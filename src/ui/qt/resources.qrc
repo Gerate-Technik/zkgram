@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="style.qss">style.qss</file>
+        <file alias="app.ico">../../../resources/app.ico</file>
+        <file alias="chat_wallpaper.png">../../../resources/chat_wallpaper.png</file>
+    </qresource>
+</RCC>

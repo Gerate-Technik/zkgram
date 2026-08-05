@@ -1,0 +1,48 @@
+build/
+build2/
+build-*/
+cmake-build-*/
+out/
+
+# Байткод Python, который CPython пишет рядом с python/bridge.py при
+# первом импорте моста (см. src/crypto/python_bridge.cpp). Имя файла
+# зависит от версии интерпретатора, так что на разных машинах он ещё и
+# разный.
+__pycache__/
+*.pyc
+
+# Personal scratch notes — not meant to be shared/committed
+TODO.md
+
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# TDLib session/db files — live account credentials, never commit
+tdlib-db/
+tdlib-files/
+*.session
+*.binlog
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+data/
+
+# Diagnostic log written next to zkgram.exe at runtime, not source
+zkgram_debug.log
+
+.vs/
+.vscode/
+.idea/
+.claude/
+CMakeCache.txt
+CMakeFiles/
+
+# Full tdesktop clone kept locally as a style/UX reference (see TODO.md) -
+# not our code, not meant to be committed into zkgram's own history.
+telegram_fork/
+build/Release/*.pdb
+*.pdb

@@ -1,0 +1,251 @@
+/* Stylesheet for the Qt UI plugin (src/ui/qt/), loaded at runtime by
+   MainWindow. Edit this file and restart the app to see changes; nothing
+   here needs a rebuild.
+
+   Colors are taken from tdesktop's own "day-blue" theme (Telegram Desktop's
+   default light theme), extracted from telegram_fork/tdesktop/Telegram/
+   Resources/day-blue.tdesktop-theme (a zip archive; unzip and read
+   colors.tdesktop-theme to see the source values) - not guessed, so the
+   look matches the real client rather than an approximation of it. */
+
+QMainWindow, QWidget#central {
+    background-color: #e6ebee;
+}
+
+/* Chat wallpaper is set in C++ (see MainWindow's chatWallpaperTile(),
+   main_window.cpp), not here - real Telegram Desktop composites a tiled
+   pattern mask over a gradient with a blend mode (see
+   data/data_wall_paper.cpp in telegram_fork/tdesktop), which plain QSS
+   background-image cannot do (no blend modes, no separate opacity per
+   layer). #messages (HistoryCanvas, see main_window.cpp) intentionally
+   has no background rule at all here; do not add one back, it would just
+   paint over the composited tile applied to its viewport in code. */
+
+QWidget#header {
+    background-color: #ffffff;
+    border-bottom: 1px solid #e4e4e5;
+}
+
+/* Draggable divider between the sidebar and the conversation, see
+   MainWindow::MainWindow's QSplitter - thin and the same color as the
+   sidebar's own border it replaces, only a faint highlight on hover to
+   signal it can be dragged. */
+
+QSplitter#mainSplitter::handle {
+    background-color: #e4e4e5;
+    width: 1px;
+}
+
+QSplitter#mainSplitter::handle:hover {
+    background-color: #b9c1c6;
+}
+
+/* Sidebar (chat list), see MainWindow::MainWindow - list of every Telegram
+   chat from TDLib, not just conversations with an active encrypted
+   session. #chatListWidget (SidebarCanvas, see main_window.cpp) draws
+   every row itself, virtualized, not built from real per-row widgets -
+   see renderSidebarRows(). */
+
+QWidget#sidebar {
+    background-color: #ffffff;
+    border-right: 1px solid #e4e4e5;
+}
+
+#chatListWidget {
+    background-color: #ffffff;
+    border: none;
+    outline: none;
+}
+
+/* Sidebar rows are custom-painted, not QLabels on a WA_StyledBackground
+   QWidget (see SidebarRowWidget in main_window.cpp) - background,
+   hover/selected state, name/preview text, and the unread badge are all
+   drawn directly there, not styled here. */
+
+/* The write-restriction bar (see writeRestrictionBar_ in main_window.cpp)
+   - one flat bar the same background as the composer below it
+   (historyComposeAreaBg, white - see #composeBar's own comment further
+   down), a gray label on the left, a small action button on the right,
+   matching the structure of tdesktop's own write-restriction bar (see
+   Controls::WriteRestriction/ComposeControls::initWriteRestriction() in
+   telegram_fork/tdesktop's history_view_compose_controls.cpp) instead of
+   the old two separate stacked bars (a big centered button, then a whole
+   separate full-width colored warning strip) with large empty gaps
+   between them. */
+QWidget#writeRestrictionBar {
+    background-color: #ffffff;
+    border: none;
+}
+
+QPushButton#startEncryptionButton {
+    border-radius: 15px;
+    padding: 0 16px;
+    font-size: 13px;
+}
+
+QLabel#plainSendWarning {
+    color: #999999;
+    font-size: 13px;
+}
+
+QLabel#companionLabel {
+    font-weight: 600;
+    font-size: 14px;
+    color: #222222;
+}
+
+QLabel#statusLabel {
+    color: #707579;
+    font-size: 12px;
+}
+
+QLineEdit {
+    border: 1px solid #dfe2e5;
+    border-radius: 16px;
+    padding: 6px 12px;
+    background: #ffffff;
+    color: #222222;
+}
+
+QLineEdit:focus {
+    border: 1px solid #37a1de;
+}
+
+QPushButton {
+    border: none;
+    border-radius: 16px;
+    padding: 6px 14px;
+    background-color: #40a7e3;
+    color: white;
+    font-weight: 600;
+}
+
+QPushButton:hover {
+    background-color: #39a5db;
+}
+
+QPushButton:pressed {
+    background-color: #2095d0;
+}
+
+/* The composer bar itself (see #composeBar in main_window.cpp) -
+   historyComposeAreaBg background (white, #ffffff), no rounding
+   (radius: 0px in chat_helpers.style's ComposeControls struct) - the
+   same white as the field inside it (historyComposeField.textBg is the
+   very same historyComposeAreaBg token), so the field reads as flush
+   with the bar instead of a separate rounded box floating in a
+   differently-colored row. */
+QWidget#composeBar {
+    background-color: #ffffff;
+    border: none;
+}
+
+QWidget#recordBar {
+    background-color: #ffffff;
+    border: none;
+}
+
+QLabel#recordTime {
+    color: #222222;
+    font-family: "DejaVu Sans Mono", "Consolas", monospace;
+    font-size: 14px;
+}
+
+/* historyComposeField: border: 0px, borderActive: 0px in
+   chat_helpers.style - genuinely no border/outline at all, on focus or
+   otherwise, and no radius property either (it is not a separate rounded
+   box, just plain text flowing directly on the composer's own
+   background). */
+QPlainTextEdit#composeField {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    color: #222222;
+}
+
+/* Attach/send-or-mic buttons - flat, circular hover highlight, no fill
+   otherwise, matching tdesktop's own IconButton-based composer chrome
+   (historyAttach/historySend in chat_helpers.style, both 44x46) instead
+   of a colored text pill. Icons themselves are drawn in code, see
+   drawSendIcon/drawAttachIcon/drawMicIcon in main_window.cpp. */
+QPushButton#composeIconButton {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+
+QPushButton#composeIconButton:hover {
+    background-color: #f1f1f1;
+}
+
+QPushButton#composeIconButton:pressed {
+    background-color: #e5e5e5;
+}
+
+/* Outgoing/incoming/photo message bubbles are custom-painted, not
+   QLabels (see HistoryCanvas in main_window.cpp) - color, corner radius,
+   and the message tail are all drawn directly in code there, a plain QSS
+   border-radius rule cannot produce a bubble with a pointed tail on one
+   corner. Only the plain system status line below is still a real
+   QLabel. */
+QLabel[messageKind="system"] {
+    color: #8a8a8a;
+    font-style: italic;
+    font-size: 13px;
+}
+
+/* Full-window onboarding slide (AuthSlide, see main_window.cpp/.hpp) -
+   local password, phone number, login code, 2FA password all reuse this
+   one styled card, centered in the window, styled after tdesktop's own
+   intro screen: plain light background, one blue accent card in the
+   middle, no chrome. */
+
+QWidget#authSlide {
+    background-color: #ffffff;
+}
+
+QLabel#authTitle {
+    font-size: 22px;
+    font-weight: 600;
+    color: #222222;
+}
+
+QLabel#authSubtitle {
+    font-size: 13px;
+    color: #707579;
+}
+
+QLineEdit#authInput {
+    border: none;
+    border-bottom: 2px solid #dcdfe3;
+    border-radius: 0;
+    padding: 10px 4px;
+    font-size: 15px;
+    background: transparent;
+}
+
+QLineEdit#authInput:focus {
+    border-bottom: 2px solid #37a1de;
+}
+
+QLabel#authError {
+    color: #e41e3f;
+    font-size: 12px;
+}
+
+QPushButton#authNext {
+    border-radius: 20px;
+    padding: 10px 0;
+    font-size: 14px;
+    background-color: #40a7e3;
+}
+
+QPushButton#authNext:hover {
+    background-color: #39a5db;
+}
+
+QPushButton#authNext:pressed {
+    background-color: #2095d0;
+}
