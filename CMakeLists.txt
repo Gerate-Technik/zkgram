@@ -84,6 +84,7 @@ if(ZKGRAM_UI STREQUAL "qt")
         src/ui/qt/main_qt.cpp
         src/ui/qt/qt_ui_provider.cpp
         src/ui/qt/main_window.cpp
+        src/ui/qt/icons.cpp
         src/ui/qt/resources.qrc
     )
 elseif(ZKGRAM_UI STREQUAL "console")

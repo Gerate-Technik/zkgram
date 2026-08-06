@@ -97,6 +97,18 @@ public:
     // core::Session::startConversation) - a user can have several running
     // at once, unlike the original one-companion-per-process design (see
     // TODO.md, "мультиюзерность").
+    // A live incoming message in a chat with no CryptoLayer session -
+    // ordinary Telegram content, nothing to decrypt, the same shape
+    // loadMessageHistory() returns. Distinct from onTextReceived below,
+    // which is only ever CryptoLayer plaintext: this one carries a real
+    // Telegram message id, so a UI can tell it apart from the copy of the
+    // same message it may also get from history. Not pure virtual, for the
+    // same reason as onChatListUpdated above.
+    virtual void onPlainMessageReceived(ConversationId conversation, const PlainMessage& message) {
+        (void)conversation;
+        (void)message;
+    }
+
     virtual void onStatus(ConversationId conversation, const std::string& stage, const std::string& message) = 0;
     virtual void onTextReceived(ConversationId conversation, const std::string& text) = 0;
     virtual void onFileReceived(ConversationId conversation, const std::string& filePath) = 0;

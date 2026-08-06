@@ -58,6 +58,10 @@ public:
     void loadMoreMessageHistory(ConversationId chatId, std::int64_t beforeMessageId,
                                  std::function<void(const std::vector<PlainMessage>&)> onResult);
 
+    // There is deliberately nothing here for "the user opened/read this
+    // chat" - see the note in telegram::TelegramClient for why zkgram never
+    // reports that back to Telegram.
+
     // chatId must be one already seen via onChatListUpdated. Idempotent:
     // calling it again for an already-active conversation is a no-op
     // instead of a second handshake.

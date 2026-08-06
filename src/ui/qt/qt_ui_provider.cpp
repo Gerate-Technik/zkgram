@@ -75,6 +75,15 @@ void QtUiProvider::onFileReceived(zkgram::core::ConversationId conversation, con
                                Q_ARG(qlonglong, conversation), Q_ARG(QString, QString::fromStdString(filePath)));
 }
 
+void QtUiProvider::onPlainMessageReceived(zkgram::core::ConversationId conversation,
+                                           const zkgram::core::PlainMessage& message) {
+    QMetaObject::invokeMethod(window_, "appendPlainMessageReceived", kFireAndForget, Q_ARG(qlonglong, conversation),
+                               Q_ARG(qlonglong, static_cast<qlonglong>(message.id)),
+                               Q_ARG(QString, QString::fromStdString(message.text)),
+                               Q_ARG(QString, QString::fromStdString(message.senderName)),
+                               Q_ARG(QString, QString::fromStdString(message.photoPath)));
+}
+
 void QtUiProvider::onHistoryPhotoReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
                                         const std::string& path) {
     QMetaObject::invokeMethod(window_, "updateHistoryPhoto", kFireAndForget, Q_ARG(qlonglong, conversation),
