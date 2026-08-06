@@ -24,6 +24,8 @@ public:
                   const std::string& message) override;
     void onTextReceived(zkgram::core::ConversationId conversation, const std::string& text) override;
     void onFileReceived(zkgram::core::ConversationId conversation, const std::string& filePath) override;
+    void onPlainMessageReceived(zkgram::core::ConversationId conversation,
+                                 const zkgram::core::PlainMessage& message) override;
     void onHistoryPhotoReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
                               const std::string& path) override;
     void onHistorySenderNameReady(zkgram::core::ConversationId conversation, std::int64_t messageId,

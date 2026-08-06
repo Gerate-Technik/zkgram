@@ -168,7 +168,10 @@ QPlainTextEdit#composeField {
    otherwise, matching tdesktop's own IconButton-based composer chrome
    (historyAttach/historySend in chat_helpers.style, both 44x46) instead
    of a colored text pill. Icons themselves are drawn in code, see
-   drawSendIcon/drawAttachIcon/drawMicIcon in main_window.cpp. */
+   Glyph/glyphIcon in icons.cpp - they are vector paths re-rendered at the
+   requested size and device pixel ratio, so there is nothing here (and no
+   image asset anywhere) to swap when the button size or the screen's
+   scaling changes. */
 QPushButton#composeIconButton {
     background: transparent;
     border: none;

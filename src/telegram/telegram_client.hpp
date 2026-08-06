@@ -177,6 +177,20 @@ public:
     void onBytesReceived(std::function<void(ChatId, const Bytes&)> callback);
     void onFileReceived(std::function<void(ChatId, const std::string&)> callback);
 
+    // Every incoming text message, a second time, as plain readable content
+    // rather than bytes to hand to a decryptor - fired alongside
+    // onBytesReceived for the same message. This layer cannot tell the two
+    // cases apart (it knows nothing about which chats have a CryptoLayer
+    // session, and must not), so it offers both and core::Session picks.
+    void onPlainMessageReceived(std::function<void(ChatId, const PlainMessage&)> callback);
+
+    // Deliberately absent: nothing here ever tells Telegram a chat was
+    // opened or read (no openChat/viewMessages call anywhere in this file).
+    // That is a decision, not an oversight - it keeps the account from
+    // reporting back when, or whether, anything was looked at, at the cost
+    // of a chat's unread count never clearing from zkgram's side. Do not
+    // "fix" the badge by adding viewMessages here.
+
     void disconnect();
 
 private:

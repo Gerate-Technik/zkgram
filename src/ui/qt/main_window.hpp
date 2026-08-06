@@ -196,6 +196,12 @@ public:
     Q_INVOKABLE void appendConversationStatus(qlonglong chatId, const QString& stage, const QString& message);
     Q_INVOKABLE void appendConversationPeerText(qlonglong chatId, const QString& text);
     Q_INVOKABLE void appendConversationFileReceived(qlonglong chatId, const QString& filePath);
+    // A live incoming message in a chat with no encrypted session - plain
+    // Telegram content, carrying its real message id (unlike
+    // appendConversationPeerText above, which is CryptoLayer plaintext and
+    // has none). See core::UiProvider::onPlainMessageReceived.
+    Q_INVOKABLE void appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
+                                                 const QString& senderName, const QString& filePath);
     Q_INVOKABLE void setConversationReady(qlonglong chatId);
 
     // Called by QtUiProvider via BlockingQueuedConnection: show a modal
@@ -449,6 +455,15 @@ private:
     // Set once a load-more request for a chat came back empty - there is
     // no more history before historyOldestMessageId_, stop asking.
     QSet<qlonglong> historyExhausted_;
+    // Telegram message ids already shown per chat. A live plain message
+    // (appendPlainMessageReceived) and a history page can legitimately
+    // carry the same message - a message arriving between the moment a
+    // chat's history is requested and the moment that request comes back
+    // is in both - so whichever gets there first wins and the other is
+    // dropped. Only ids from real Telegram messages go in here; locally
+    // generated bubbles (an outgoing echo, a system line, anything
+    // CryptoLayer decrypted) have no id and are never deduplicated.
+    QMap<qlonglong, QSet<qlonglong>> seenMessageIds_;
     // In-flight guard so scrolling near the top repeatedly while a page is
     // still loading does not fire overlapping requests.
     QSet<qlonglong> historyLoadingMore_;

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <td/telegram/Client.h>
 #include <td/telegram/td_api.h>
@@ -1079,11 +1080,38 @@ struct TelegramClient::Impl {
         switch (message.content_->get_id()) {
             case td_api::messageText::ID: {
                 auto* content = static_cast<td_api::messageText*>(message.content_.get());
-                if (content->text_ != nullptr && handlePotentialProbe(chatId, content->text_->text_)) {
+                if (content->text_ == nullptr || handlePotentialProbe(chatId, content->text_->text_)) {
                     break;
                 }
-                if (onBytes_ && content->text_ != nullptr) {
+                if (onBytes_) {
                     onBytes_(chatId, stringToBytes(content->text_->text_));
+                }
+                // The same message a second time, but as plain readable
+                // Telegram content instead of bytes to decrypt. Which of the
+                // two a given chat actually wants is core::Session's call -
+                // only it knows which chats have a CryptoLayer session - so
+                // both are offered and it picks; see its onBytesReceived()/
+                // onPlainMessageReceived() dispatchers. Before this existed
+                // only the bytes went out, and for a chat with no encrypted
+                // session they were dropped on the floor there, which is why
+                // a message arriving in an open plain chat never appeared
+                // until the chat was reopened and its history refetched.
+                if (onPlainMessage_) {
+                    PlainMessage plain;
+                    plain.id = message.id_;
+                    plain.isOutgoing = false;
+                    plain.text = content->text_->text_;
+                    plain.date = message.date_;
+                    onPlainMessage_(chatId, plain);
+                    // Resolved asynchronously and delivered through
+                    // onHistorySenderName_, exactly as for a history message
+                    // (see fetchMessageHistory) - the UI matches it up by
+                    // message id, which is why plain.id is a real one here.
+                    if (message.sender_id_ != nullptr &&
+                        message.sender_id_->get_id() == td_api::messageSenderUser::ID) {
+                        auto* sender = static_cast<td_api::messageSenderUser*>(message.sender_id_.get());
+                        requestSenderName(chatId, plain.id, sender->user_id_);
+                    }
                 }
                 break;
             }
@@ -1338,6 +1366,7 @@ struct TelegramClient::Impl {
     std::function<std::string(const std::string&)> authInputProvider_;
     std::function<void(ChatId, const Bytes&)> onBytes_;
     std::function<void(ChatId, const std::string&)> onFile_;
+    std::function<void(ChatId, const PlainMessage&)> onPlainMessage_;
 };
 
 TelegramClient::TelegramClient(std::string dataDir) : impl_(std::make_unique<Impl>(std::move(dataDir))) {}
@@ -1388,6 +1417,10 @@ void TelegramClient::sendFile(ChatId chatId, const std::string& filePath) {
 
 void TelegramClient::onBytesReceived(std::function<void(ChatId, const Bytes&)> callback) {
     impl_->onBytes_ = std::move(callback);
+}
+
+void TelegramClient::onPlainMessageReceived(std::function<void(ChatId, const PlainMessage&)> callback) {
+    impl_->onPlainMessage_ = std::move(callback);
 }
 
 void TelegramClient::onFileReceived(std::function<void(ChatId, const std::string&)> callback) {

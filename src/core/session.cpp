@@ -82,7 +82,42 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
         }
         if (onFile) {
             onFile(filePath);
+            return;
         }
+        // No encrypted conversation for this chat, so the file was never
+        // CryptoLayer output - it is an ordinary Telegram attachment. It
+        // goes out as a plain message rather than through onFileReceived so
+        // that it lands under the UI's rules for live plain content (see
+        // onPlainMessageReceived below), the same as plain text does; a
+        // live attachment has no message id here, only the downloaded path.
+        PlainMessage plain;
+        plain.text = "File: " + filePath;
+        plain.photoPath = filePath;
+        uiProvider_->onPlainMessageReceived(chatId, plain);
+    });
+    // The plain-content half of onBytesReceived above: a chat that has no
+    // CryptoLayer session has nothing to decrypt, and its live messages used
+    // to be dropped right here (the bytes went looking for an ingester that
+    // was never registered), which is why a message arriving in an open
+    // plain chat only showed up after reopening it and refetching history.
+    telegramClient_.onPlainMessageReceived([this](telegram::ChatId chatId, const telegram::PlainMessage& message) {
+        {
+            std::lock_guard<std::mutex> lock(conversationsMutex_);
+            if (conversationOnBytes_.count(chatId) != 0) {
+                // Encrypted chat: the bytes path above already took this
+                // message, and its readable form is whatever CryptoLayer
+                // decrypts it into, not the ciphertext sitting in message.text.
+                return;
+            }
+        }
+        PlainMessage plain;
+        plain.id = message.id;
+        plain.isOutgoing = message.isOutgoing;
+        plain.text = message.text;
+        plain.date = message.date;
+        plain.photoPath = message.photoPath;
+        plain.senderName = message.senderName;
+        uiProvider_->onPlainMessageReceived(chatId, plain);
     });
     telegramClient_.onHistoryPhotoReady([this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& path) {
         uiProvider_->onHistoryPhotoReady(chatId, messageId, path);
@@ -167,6 +202,7 @@ void Session::loadMoreMessageHistory(ConversationId chatId, std::int64_t beforeM
                                                 onResult(convertHistory(messages));
                                             });
 }
+
 
 void Session::probeZkgramPresence(ConversationId chatId, std::function<void(bool)> onResult) {
     telegramClient_.probeZkgramPresence(chatId, std::move(onResult));
