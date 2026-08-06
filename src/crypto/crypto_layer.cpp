@@ -7,7 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 
-#include <windows.h>
+#include "platform/paths.hpp"
 
 // Same reasoning as python_bridge.cpp: an absolute path baked in at
 // configure time, not a path resolved against the process's working
@@ -40,13 +40,19 @@ namespace {
 // handshake in cryptolayer/src/crypto_layer.py) left no trace anywhere,
 // only session.cpp's own wireAndStartConversation() logging (also added
 // alongside this) - see TODO.md, the encrypted-session-start investigation.
+//
+// Через platform::executableDir(), как и одноимённые помощники в
+// session.cpp/telegram_client.cpp/main_qt.cpp: этот файл был единственным,
+// который остался с прямым вызовом GetModuleFileNameW и #include
+// <windows.h>, из-за чего сборка под Linux падала ещё на препроцессоре
+// ("windows.h: No such file or directory"). Сам путь получается тот же
+// самый - каталог exe.
 std::string logFilePath() {
-    wchar_t buffer[MAX_PATH];
-    DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    if (length == 0 || length == MAX_PATH) {
+    std::string dir = zkgram::platform::executableDir();
+    if (dir.empty()) {
         return "zkgram_debug.log";
     }
-    return (std::filesystem::path(buffer).parent_path() / "zkgram_debug.log").string();
+    return (std::filesystem::path(dir) / "zkgram_debug.log").string();
 }
 
 void logDebug(const std::string& message) {
