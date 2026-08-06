@@ -34,9 +34,19 @@ void logDebug(const std::string& message) {
 }
 }  // namespace
 
+namespace {
+std::string localCacheDir() {
+    std::string appData = zkgram::platform::appDataDir();
+    if (appData.empty()) {
+        return {};
+    }
+    return appData + "/tdata";
+}
+}  // namespace
+
 Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, std::string password)
     : uiProvider_(std::move(uiProvider)), dataDir_(std::move(dataDir)), password_(std::move(password)),
-      telegramClient_(dataDir_) {
+      localCache_(localCacheDir(), password_), telegramClient_(dataDir_) {
     telegramClient_.setAuthInputProvider(
         [this](const std::string& prompt) { return uiProvider_->requestCredential(prompt, "str"); });
 
@@ -307,6 +317,14 @@ void Session::sendPlainText(ConversationId chatId, const std::string& text) {
 
 void Session::sendPlainFile(ConversationId chatId, const std::string& filePath) {
     telegramClient_.sendFile(chatId, filePath);
+}
+
+std::vector<PlainMessage> Session::loadCachedHistory(ConversationId chatId) const {
+    return localCache_.loadHistory(static_cast<std::int64_t>(chatId));
+}
+
+void Session::cacheHistory(ConversationId chatId, const std::vector<PlainMessage>& messages) const {
+    localCache_.saveHistory(static_cast<std::int64_t>(chatId), messages);
 }
 
 void Session::stop() {

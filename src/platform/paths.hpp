@@ -28,4 +28,22 @@ namespace zkgram::platform {
 // сторона сама решает, чем это заменить (обычно относительным путём).
 std::string executableDir();
 
+// Per-user application data directory for zkgram's own local cache (see
+// core::LocalCache) - "%APPDATA%\zkgram" on Windows (same
+// %APPDATA%\<app name>\ scheme real Telegram Desktop uses for its own
+// "tdata" folder, "%APPDATA%\Telegram Desktop\tdata" - see
+// telegram_fork/tdesktop's storage/storage_account.cpp, BaseGlobalPath()
+// - but zkgram's own separate folder, not literally inside Telegram
+// Desktop's data directory), "~/.local/share/zkgram" on Linux via
+// XDG_DATA_HOME, "~/Library/Application Support/zkgram" on macOS.
+// Distinct from executableDir(): this directory must survive a
+// reinstall/portable-copy-replacement (the whole point of a persistent
+// cache), whereas executableDir() is tied to wherever this particular
+// copy of the exe happens to sit.
+//
+// Returns an empty string if the platform's own directory could not be
+// resolved; the caller decides the fallback (usually skip caching rather
+// than write somewhere unpredictable).
+std::string appDataDir();
+
 }  // namespace zkgram::platform

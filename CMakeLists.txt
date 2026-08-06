@@ -68,6 +68,7 @@ set(ZKGRAM_SOURCES
     src/crypto/python_bridge.cpp
     src/crypto/crypto_layer.cpp
     src/telegram/telegram_client.cpp
+    src/core/local_cache.cpp
     src/core/session.cpp
 )
 

@@ -1,5 +1,6 @@
 #include "platform/paths.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <system_error>
 #include <vector>
@@ -63,6 +64,45 @@ std::string executableDir() {
         return {};
     }
     return exePath.parent_path().string();
+#endif
+}
+
+std::string appDataDir() {
+#if defined(_WIN32)
+    // Same growing-buffer pattern as executableDir() above -
+    // GetEnvironmentVariableW returns the required size (including the
+    // null terminator) when the supplied buffer is too small, rather
+    // than silently truncating.
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        DWORD length = GetEnvironmentVariableW(L"APPDATA", buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return {};  // Variable not set - no sensible fallback on Windows.
+        }
+        if (length < buffer.size()) {
+            return (std::filesystem::path(std::wstring(buffer.data(), length)) / "zkgram").string();
+        }
+        buffer.resize(length);
+    }
+#elif defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        return {};
+    }
+    return (std::filesystem::path(home) / "Library" / "Application Support" / "zkgram").string();
+#else
+    // XDG Base Directory spec - most Linux desktop environments set
+    // XDG_DATA_HOME already; ~/.local/share is the spec's own documented
+    // default when it is not set, not a guess.
+    const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+    if (xdgDataHome != nullptr && *xdgDataHome != '\0') {
+        return (std::filesystem::path(xdgDataHome) / "zkgram").string();
+    }
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        return {};
+    }
+    return (std::filesystem::path(home) / ".local" / "share" / "zkgram").string();
 #endif
 }
 

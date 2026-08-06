@@ -291,6 +291,31 @@ private:
     // that chat is reselected, or if it already has an active conversation.
     void maybeLoadPlainHistory(qlonglong chatId);
 
+    // Shows whatever core::Session::loadCachedHistory() already has on
+    // local disk for this chat from a previous run - see
+    // core::LocalCache's own class comment for why this is not optional
+    // for CryptoLayer chats specifically (forward secrecy means the live
+    // path alone can never recover old messages after a restart). Called
+    // for every chat, not gated on conversationActive_ like
+    // maybeLoadPlainHistory() is - unlike that flag, a cache file on disk
+    // reflects a *previous* run's session, so it can exist and be worth
+    // showing even though nothing is active yet in this one (a fresh
+    // launch has conversationActive_ false for every chat until the user
+    // re-starts a session, but old cached messages should still appear).
+    // Harmless/no-op to call for a chat that was never encrypted - there
+    // is simply no cache file, same as any other cache miss. A no-op
+    // every subsequent reselect of the same chat this run
+    // (cacheLoadedChats_).
+    void maybeLoadCachedHistory(qlonglong chatId);
+
+    // Persists conversationMessages_[chatId] to core::LocalCache - called
+    // from appendMessage() after every new CryptoLayer message (sent or
+    // received) for an active conversation, not for plain-history chats
+    // (nothing CryptoLayer-specific to preserve there, and
+    // conversationActive_ is false for them anyway) or System lines
+    // (status text, not real conversation content).
+    void cacheConversationHistory(qlonglong chatId);
+
     // Fetches the next older page once the message list is scrolled near
     // its top, for the currently selected chat - see
     // core::Session::loadMoreMessageHistory()/historyOldestMessageId_.
@@ -411,6 +436,10 @@ private:
     // session, not every time it is reselected in the sidebar, see
     // onChatListItemClicked().
     QSet<qlonglong> historyLoadedChats_;
+    // Same idea as historyLoadedChats_, own set rather than shared with
+    // it - see maybeLoadCachedHistory()'s own comment for why the two
+    // are not mutually exclusive per chat the way plain/encrypted are.
+    QSet<qlonglong> cacheLoadedChats_;
     // id of the oldest plain-history message currently shown per chat (0 =
     // none loaded, or history came back empty) - the pagination anchor for
     // maybeLoadMoreHistory(), same role as tdesktop's own oldest-loaded

@@ -1,5 +1,6 @@
 #include "ui/qt/main_window.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <QEasingCurve>
 #include <QMouseEvent>
 #include <QVariantAnimation>
+#include <QWheelEvent>
 #include <QAction>
 #include <QAudioInput>
 #include <QClipboard>
@@ -354,6 +356,50 @@ struct HistoryEntry {
     qlonglong messageId = 0;
 };
 
+// Eases wheel-scrolled movement into place instead of the default
+// per-tick instant jump, on both the sidebar and message list. Real
+// Telegram Desktop feeds wheel input into a tuned Ui::Animations-driven
+// QScroller kinetic state machine (see
+// telegram_fork/tdesktop/Telegram/lib_ui/ui/widgets/scroll_area.cpp,
+// ScrollArea::viewportEvent()/_scroller->handleInput() -
+// DecelerationFactor 0.6, MaximumVelocity 0.95, overshoot off) - that
+// exact input-synthesis wiring is internal to lib_ui and not reusable
+// standalone, so this reaches the same *visible* result (a glide into
+// the target position rather than a stepped jump) through a
+// QVariantAnimation on the scrollbar value instead, same mechanism this
+// codebase already uses for RippleButton's ripple.
+class SmoothWheelScroller : public QObject {
+public:
+    explicit SmoothWheelScroller(QScrollBar* bar) : QObject(bar), bar_(bar) {
+        animation_.setEasingCurve(QEasingCurve::OutCubic);
+        animation_.setDuration(220);
+        connect(&animation_, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant& value) { bar_->setValue(value.toInt()); });
+    }
+
+    void handleWheel(QWheelEvent* event) {
+        int delta = event->angleDelta().y();
+        if (delta == 0) {
+            return;
+        }
+        int ticks = delta / 120;
+        if (ticks == 0) {
+            ticks = delta > 0 ? 1 : -1;
+        }
+        int step = bar_->singleStep() * 3;
+        int from = animation_.state() == QAbstractAnimation::Running ? animation_.endValue().toInt() : bar_->value();
+        int target = std::clamp(from - ticks * step, bar_->minimum(), bar_->maximum());
+        animation_.stop();
+        animation_.setStartValue(bar_->value());
+        animation_.setEndValue(target);
+        animation_.start();
+    }
+
+private:
+    QScrollBar* bar_;
+    QVariantAnimation animation_;
+};
+
 // The message list itself - a single custom-painted, virtualized canvas
 // (QAbstractScrollArea + manual layout/paint/hit-test), not a
 // QAbstractItemView subclass with a child widget per row, matching real
@@ -367,6 +413,7 @@ public:
         setFocusPolicy(Qt::NoFocus);
         setFrameShape(QFrame::NoFrame);
         setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        smoothScroller_ = new SmoothWheelScroller(verticalScrollBar());
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     }
 
@@ -530,7 +577,13 @@ protected:
         updateScrollRange();
     }
 
+    void wheelEvent(QWheelEvent* event) override {
+        smoothScroller_->handleWheel(event);
+        event->accept();
+    }
+
 private:
+    SmoothWheelScroller* smoothScroller_;
     HistoryItem buildItem(const HistoryEntry& entry) const {
         HistoryItem item;
         item.kind = entry.kind;
@@ -789,6 +842,7 @@ public:
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setMouseTracking(true);
         viewport()->setMouseTracking(true);
+        smoothScroller_ = new SmoothWheelScroller(verticalScrollBar());
 
         nameFont_ = font();
         nameFont_.setWeight(QFont::DemiBold);
@@ -884,7 +938,13 @@ protected:
         }
     }
 
+    void wheelEvent(QWheelEvent* event) override {
+        smoothScroller_->handleWheel(event);
+        event->accept();
+    }
+
 private:
+    SmoothWheelScroller* smoothScroller_;
     int indexAt(const QPoint& pos) const {
         int y = pos.y() + verticalScrollBar()->value();
         int index = y / kSidebarRowHeight;
@@ -1815,9 +1875,43 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
     companionLabel_->setText(title);
     companionAvatar_->setPixmap(chatAvatarPixmap(title, conversationPhotoPaths_.value(currentChatId_), 38));
     companionAvatar_->show();
+    maybeLoadCachedHistory(currentChatId_);
     renderCurrentConversation();
     updateConversationControlsVisibility();
     maybeLoadPlainHistory(currentChatId_);
+}
+
+void MainWindow::maybeLoadCachedHistory(qlonglong chatId) {
+    if (session_ == nullptr || cacheLoadedChats_.contains(chatId)) {
+        return;
+    }
+    cacheLoadedChats_.insert(chatId);
+    // Populates conversationMessages_ directly, not via appendMessage()
+    // in a loop - renderCurrentConversation() (called right after this,
+    // in onChatListItemClicked) already does one full rebuild from
+    // conversationMessages_ itself; looping appendMessage() here would
+    // instead fire one appendItem() per cached message against whatever
+    // chat HistoryCanvas currently shows, which at this point in
+    // onChatListItemClicked is still the *previous* selection.
+    std::vector<zkgram::core::PlainMessage> cached = session_->loadCachedHistory(chatId);
+    if (cached.empty()) {
+        return;
+    }
+    QVector<StoredMessage> cachedMessages;
+    cachedMessages.reserve(static_cast<int>(cached.size()));
+    for (const auto& message : cached) {
+        cachedMessages.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
+                                                QString::fromStdString(message.text),
+                                                QString::fromStdString(message.photoPath),
+                                                static_cast<qlonglong>(message.id),
+                                                QString::fromStdString(message.senderName)});
+    }
+    // Prepended, not appended: conversationMessages_[chatId] can already
+    // hold live messages that arrived while this chat was not the
+    // selected one (an active session keeps receiving in the
+    // background) - cached history is always older than anything live,
+    // so it belongs before that, not after it.
+    conversationMessages_[chatId] = cachedMessages + conversationMessages_[chatId];
 }
 
 void MainWindow::maybeLoadPlainHistory(qlonglong chatId) {
@@ -2007,6 +2101,31 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         asCanvas(messages_)->appendItem(HistoryEntry{kind, text, filePath, attached, senderName, true, messageId});
         asCanvas(messages_)->scrollToBottom();
     }
+    if (kind != MessageKind::System && conversationActive_.value(chatId, false)) {
+        cacheConversationHistory(chatId);
+    }
+}
+
+void MainWindow::cacheConversationHistory(qlonglong chatId) {
+    if (session_ == nullptr) {
+        return;
+    }
+    const QVector<StoredMessage>& stored = conversationMessages_.value(chatId);
+    std::vector<zkgram::core::PlainMessage> messages;
+    messages.reserve(stored.size());
+    for (const StoredMessage& message : stored) {
+        if (message.kind == MessageKind::System) {
+            continue;  // status lines, not real conversation content - see the header comment
+        }
+        zkgram::core::PlainMessage plain;
+        plain.id = message.messageId;
+        plain.isOutgoing = message.kind == MessageKind::Outgoing;
+        plain.text = message.text.toStdString();
+        plain.photoPath = message.filePath.toStdString();
+        plain.senderName = message.senderName.toStdString();
+        messages.push_back(std::move(plain));
+    }
+    session_->cacheHistory(chatId, messages);
 }
 
 void MainWindow::updateHistoryPhoto(qlonglong chatId, qlonglong messageId, const QString& path) {

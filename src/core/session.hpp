@@ -7,7 +7,9 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "core/local_cache.hpp"
 #include "core/ui_provider.hpp"
 #include "./crypto/crypto_layer.hpp"
 #include "telegram/telegram_client.hpp"
@@ -94,12 +96,23 @@ public:
     void sendPlainText(ConversationId chatId, const std::string& text);
     void sendPlainFile(ConversationId chatId, const std::string& filePath);
 
+    // See core::LocalCache's own class comment for why this exists (not
+    // just a speed optimization - CryptoLayer's forward-secret session
+    // key makes old ciphertext permanently undecryptable after a
+    // restart, so this is the only way encrypted history survives one at
+    // all). Both are cheap no-ops if the cache directory could not be
+    // resolved/created (LocalCache::available() == false) - the caller
+    // does not need to check that itself first.
+    std::vector<PlainMessage> loadCachedHistory(ConversationId chatId) const;
+    void cacheHistory(ConversationId chatId, const std::vector<PlainMessage>& messages) const;
+
 private:
     void wireAndStartConversation(ConversationId chatId);
 
     std::shared_ptr<UiProvider> uiProvider_;
     std::string dataDir_;
     std::string password_;
+    LocalCache localCache_;
     telegram::TelegramClient telegramClient_;
 
     std::mutex conversationsMutex_;
