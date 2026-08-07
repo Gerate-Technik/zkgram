@@ -10,6 +10,8 @@
 #include <QAbstractScrollArea>
 #include <QEasingCurve>
 #include <QMouseEvent>
+#include <QScroller>
+#include <QScrollerProperties>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 #include <QAction>
@@ -386,36 +388,78 @@ struct HistoryEntry {
 // the target position rather than a stepped jump) through a
 // QVariantAnimation on the scrollbar value instead, same mechanism this
 // codebase already uses for RippleButton's ripple.
-class SmoothWheelScroller : public QObject {
+// Real Telegram Desktop's own mechanism for kinetic wheel/trackpad
+// scrolling: a tuned QScroller fed directly from wheel input, not a
+// hand-written easing animation (an earlier version of this class did
+// that instead - it was an approximation of the *effect*, not the real
+// mechanism, and it looked wrong). Structure and every tuned constant
+// copied directly from telegram_fork/tdesktop/Telegram/lib_ui/ui/widgets/
+// scroll_area.cpp: SetupScrollerPhysics() for the QScrollerProperties,
+// ScrollArea::viewportEvent()'s QEvent::Wheel handling for the
+// phase-based press/move/release dispatch into QScroller::handleInput().
+//
+// Only phased wheel events (Qt::ScrollBegin/Update/End/Momentum - what a
+// trackpad or a precision mouse wheel sends) drive the scroller here,
+// exactly like tdesktop: a plain discrete wheel click
+// (Qt::NoScrollPhase, the common case for an ordinary USB/wireless mouse
+// on Windows) is left alone and falls through to
+// QAbstractScrollArea's own default wheel handling, same as in the real
+// client - not a limitation introduced here, tdesktop's own scroller
+// genuinely does not smooth a plain mouse wheel either.
+class KineticScroller {
 public:
-    explicit SmoothWheelScroller(QScrollBar* bar) : QObject(bar), bar_(bar) {
-        animation_.setEasingCurve(QEasingCurve::OutCubic);
-        animation_.setDuration(220);
-        connect(&animation_, &QVariantAnimation::valueChanged, this,
-                [this](const QVariant& value) { bar_->setValue(value.toInt()); });
+    explicit KineticScroller(QWidget* target) : target_(target), scroller_(QScroller::scroller(target)) {
+        QScrollerProperties props = scroller_->scrollerProperties();
+        using P = QScrollerProperties;
+        // The Qt default 0.125 gives a ~4s, slippery, constant-deceleration
+        // glide that "never slows down" - 0.6 brings a hard flick down to
+        // ~1-1.6s, close to macOS native momentum (tdesktop's own comment).
+        props.setScrollMetric(P::DecelerationFactor, 0.6);
+        // The default cap 0.5 m/s clips hard flicks below the feel tdesktop
+        // tunes for; this metric is m/s, converted to pixels internally.
+        props.setScrollMetric(P::MaximumVelocity, 0.95);
+        props.setScrollMetric(P::AcceleratingFlickMaximumTime, 0.0);
+        props.setScrollMetric(P::MaximumClickThroughVelocity, 0.0);
+        props.setScrollMetric(P::DragStartDistance, 0.0);
+        props.setScrollMetric(P::VerticalOvershootPolicy, QVariant::fromValue(P::OvershootAlwaysOff));
+        props.setScrollMetric(P::HorizontalOvershootPolicy, QVariant::fromValue(P::OvershootAlwaysOff));
+        scroller_->setScrollerProperties(props);
     }
 
-    void handleWheel(QWheelEvent* event) {
-        int delta = event->angleDelta().y();
-        if (delta == 0) {
-            return;
+    // Returns true if the event was consumed (a phased event, handed to
+    // the scroller) - the caller should treat false as "let default
+    // wheel handling run", matching tdesktop's own fallthrough to
+    // QScrollArea::viewportEvent(e) for a non-phased event.
+    bool handleWheelEvent(QWheelEvent* event) {
+        switch (event->phase()) {
+        case Qt::ScrollBegin:
+        case Qt::ScrollUpdate: {
+            bool wasNull = wheelPos_.isNull();
+            if (wasNull) {
+                wheelPos_ = QPoint(target_->width(), target_->height()) / 2;
+            } else {
+                wheelPos_ += event->angleDelta();
+            }
+            scroller_->handleInput(wasNull ? QScroller::InputPress : QScroller::InputMove, wheelPos_,
+                                    QDateTime::currentMSecsSinceEpoch());
+            return true;
         }
-        int ticks = delta / 120;
-        if (ticks == 0) {
-            ticks = delta > 0 ? 1 : -1;
+        case Qt::ScrollEnd:
+        case Qt::ScrollMomentum:
+            if (!wheelPos_.isNull()) {
+                scroller_->handleInput(QScroller::InputRelease, wheelPos_, QDateTime::currentMSecsSinceEpoch());
+                wheelPos_ = {};
+            }
+            return true;
+        default:
+            return false;
         }
-        int step = bar_->singleStep() * 3;
-        int from = animation_.state() == QAbstractAnimation::Running ? animation_.endValue().toInt() : bar_->value();
-        int target = std::clamp(from - ticks * step, bar_->minimum(), bar_->maximum());
-        animation_.stop();
-        animation_.setStartValue(bar_->value());
-        animation_.setEndValue(target);
-        animation_.start();
     }
 
 private:
-    QScrollBar* bar_;
-    QVariantAnimation animation_;
+    QWidget* target_;
+    QScroller* scroller_;
+    QPoint wheelPos_;
 };
 
 // The message list itself - a single custom-painted, virtualized canvas
@@ -431,8 +475,8 @@ public:
         setFocusPolicy(Qt::NoFocus);
         setFrameShape(QFrame::NoFrame);
         setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        smoothScroller_ = new SmoothWheelScroller(verticalScrollBar());
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        kineticScroller_ = std::make_unique<KineticScroller>(this);
     }
 
     void clear() {
@@ -596,12 +640,15 @@ protected:
     }
 
     void wheelEvent(QWheelEvent* event) override {
-        smoothScroller_->handleWheel(event);
-        event->accept();
+        if (kineticScroller_->handleWheelEvent(event)) {
+            event->accept();
+        } else {
+            QAbstractScrollArea::wheelEvent(event);
+        }
     }
 
 private:
-    SmoothWheelScroller* smoothScroller_;
+    std::unique_ptr<KineticScroller> kineticScroller_;
     HistoryItem buildItem(const HistoryEntry& entry) const {
         HistoryItem item;
         item.kind = entry.kind;
@@ -910,7 +957,7 @@ public:
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setMouseTracking(true);
         viewport()->setMouseTracking(true);
-        smoothScroller_ = new SmoothWheelScroller(verticalScrollBar());
+        kineticScroller_ = std::make_unique<KineticScroller>(this);
 
         nameFont_ = font();
         nameFont_.setWeight(QFont::DemiBold);
@@ -1007,12 +1054,15 @@ protected:
     }
 
     void wheelEvent(QWheelEvent* event) override {
-        smoothScroller_->handleWheel(event);
-        event->accept();
+        if (kineticScroller_->handleWheelEvent(event)) {
+            event->accept();
+        } else {
+            QAbstractScrollArea::wheelEvent(event);
+        }
     }
 
 private:
-    SmoothWheelScroller* smoothScroller_;
+    std::unique_ptr<KineticScroller> kineticScroller_;
     int indexAt(const QPoint& pos) const {
         int y = pos.y() + verticalScrollBar()->value();
         int index = y / kSidebarRowHeight;
