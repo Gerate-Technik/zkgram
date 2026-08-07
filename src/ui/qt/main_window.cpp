@@ -1638,6 +1638,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     companionAvatar_->hide();  // no chat selected yet, see onChatListItemClicked
     companionLabel_ = new QLabel("zkgram", header);
     companionLabel_->setObjectName("companionLabel");
+    // Per-chat secret-mode toggle - see secretModeOn_'s own comment in
+    // the header for what this actually gates. Hidden by default
+    // (updateSecretModeIndicator() shows it only once the current chat
+    // actually has some secret content to reveal, see
+    // hasSecretContent_), so a chat that never had any encrypted session
+    // shows no toggle at all rather than a permanently useless one.
+    secretModeToggle_ = new RippleButton(glyphIcon(Glyph::Lock, kIconDestructiveFg), QString(), header);
+    secretModeToggle_->setObjectName("secretModeToggle");
+    secretModeToggle_->setFixedHeight(28);
+    secretModeToggle_->hide();
     // Filters the message list below by substring - the currently open
     // conversation only, not a search across every chat.
     searchInput_ = new QLineEdit(header);
@@ -1659,6 +1669,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statusLabel_->hide();
     headerLayout->addWidget(companionAvatar_);
     headerLayout->addWidget(companionLabel_);
+    headerLayout->addWidget(secretModeToggle_);
     headerLayout->addStretch();
     headerLayout->addWidget(searchInput_);
     layout->addWidget(header);
@@ -1873,6 +1884,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(recorder_, &QMediaRecorder::recorderStateChanged, this, &MainWindow::onRecorderStateChanged);
     connect(searchInput_, &QLineEdit::textChanged, this, &MainWindow::onSearchTextChanged);
     connect(startEncryptionButton_, &QPushButton::clicked, this, &MainWindow::onStartEncryptionClicked);
+    connect(secretModeToggle_, &QPushButton::clicked, this, &MainWindow::onSecretModeToggleClicked);
     connect(chatSearchInput_, &QLineEdit::textChanged, this, &MainWindow::onChatSearchTextChanged);
     connect(searchDebounceTimer_, &QTimer::timeout, this, &MainWindow::onChatSearchDebounceTimeout);
 }
@@ -1959,6 +1971,39 @@ void MainWindow::updateConversationControlsVisibility() {
     // plainSendWarning_ is shown/hidden as part of writeRestrictionBar_
     // as a whole above - same canSendPlain condition, no need to also
     // toggle it individually.
+}
+
+void MainWindow::onSecretModeToggleClicked() {
+    if (currentChatId_ == 0) {
+        return;
+    }
+    bool wasOn = secretModeOn_.value(currentChatId_, false);
+    secretModeOn_[currentChatId_] = !wasOn;
+    renderCurrentConversation();
+    updateSecretModeIndicator();
+}
+
+void MainWindow::updateSecretModeIndicator() {
+    if (currentChatId_ == 0 || !hasSecretContent_.contains(currentChatId_)) {
+        // Nothing secret ever happened in this chat - no toggle to show,
+        // matches the write-restriction bar/plain-only composer this
+        // chat already has (see updateConversationControlsVisibility()).
+        secretModeToggle_->hide();
+        return;
+    }
+    bool on = secretModeOn_.value(currentChatId_, false);
+    secretModeToggle_->setText(on ? "Secret" : "Normal");
+    // Direct per-instance background, not a QSS class rule - same
+    // pattern setConnectionStatus() already uses for statusDot_'s color,
+    // for the same reason: the color itself is the only thing that
+    // changes, everything else about the button stays the default
+    // RippleButton/QPushButton chrome.
+    secretModeToggle_->setStyleSheet(on ? "background-color: #40a7e3;" : "background-color: #e41e3f;");
+    secretModeToggle_->setIcon(glyphIcon(Glyph::Lock, Qt::white));
+    secretModeToggle_->setToolTip(on ? "Secret mode: showing encrypted and plain messages. Click to hide encrypted "
+                                        "messages again."
+                                      : "Normal mode: encrypted messages are hidden. Click to reveal them.");
+    secretModeToggle_->show();
 }
 
 void MainWindow::setConnectionStatus(const QString& text, const QString& colorHex) {
@@ -2150,6 +2195,7 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
     companionAvatar_->setPixmap(chatAvatarPixmap(title, conversationPhotoPaths_.value(currentChatId_), 38));
     companionAvatar_->show();
     maybeLoadCachedHistory(currentChatId_);
+    updateSecretModeIndicator();
     renderCurrentConversation();
     updateConversationControlsVisibility();
     maybeLoadPlainHistory(currentChatId_);
@@ -2177,12 +2223,24 @@ void MainWindow::maybeLoadCachedHistory(qlonglong chatId) {
     QVector<StoredMessage> cachedMessages;
     cachedMessages.reserve(static_cast<int>(cached.size()));
     for (const auto& message : cached) {
+        // isSecret=true: this is core::LocalCache content, decrypted
+        // CryptoLayer history from a previous run - never shown unless
+        // secretModeOn_ is explicitly toggled on for this chat (see
+        // renderCurrentConversation()), which it is not by default here,
+        // unlike the live path (appendConversationPeerText() etc.) which
+        // gets an implicit reveal from setConversationReady()/
+        // onStartEncryptionClicked() because those mean the user is
+        // acting on this chat's encryption right now - loading a chat
+        // that merely *has* old cached secret history is not the same
+        // deliberate action.
         cachedMessages.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
                                                 QString::fromStdString(message.text),
                                                 QString::fromStdString(message.photoPath),
                                                 static_cast<qlonglong>(message.id),
-                                                QString::fromStdString(message.senderName)});
+                                                QString::fromStdString(message.senderName),
+                                                /*isSecret=*/true});
     }
+    hasSecretContent_.insert(chatId);
     // Prepended, not appended: conversationMessages_[chatId] can already
     // hold live messages that arrived while this chat was not the
     // selected one (an active session keeps receiving in the
@@ -2229,10 +2287,14 @@ void MainWindow::maybeLoadPlainHistory(qlonglong chatId) {
                 // updateHistoryPhoto() swaps it for the real image once
                 // TelegramClient::requestHistoryPhoto()'s download finishes
                 // (see telegram_client.cpp).
+                // isSecret=false: this function only ever runs for a chat
+                // with no active session (see the !conversationActive_
+                // guard above), so its Telegram content was always
+                // ordinary plain text/media, never CryptoLayer ciphertext.
                 history.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
                                                  QString::fromStdString(message.text),
                                                  QString::fromStdString(message.photoPath), messageId,
-                                                 QString::fromStdString(message.senderName)});
+                                                 QString::fromStdString(message.senderName), /*isSecret=*/false});
             }
             if (!history.isEmpty()) {
                 conversationMessages_[chatId] = history + conversationMessages_[chatId];
@@ -2319,10 +2381,13 @@ void MainWindow::maybeLoadMoreHistory() {
                     }
                     seen.insert(messageId);
                 }
+                // isSecret=false - see maybeLoadPlainHistory()'s identical
+                // comment, the same !conversationActive_ guard applies
+                // here (this function's own entry check, above).
                 older.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
                                                QString::fromStdString(message.text),
                                                QString::fromStdString(message.photoPath), messageId,
-                                               QString::fromStdString(message.senderName)});
+                                               QString::fromStdString(message.senderName), /*isSecret=*/false});
             }
             if (older.isEmpty()) {
                 // Every message on this page was already on screen. Move
@@ -2394,8 +2459,17 @@ void MainWindow::onStartEncryptionClicked() {
     // that working; a failed probe now only adds a warning message.
     session_->startConversation(chatId);
     conversationActive_[chatId] = true;
+    // Clicking this button is itself the deliberate reveal action for
+    // this chat - see setConversationReady()'s identical reasoning for
+    // why that is a free pass on secretModeOn_'s "off by default" rule.
+    // Set here already, not only once onReady fires, so the handshake's
+    // own progress ("Starting...", "Waiting for companion...", the probe
+    // note below) is visible too instead of silently hidden until ready.
+    secretModeOn_[chatId] = true;
     updateConversationControlsVisibility();
-    appendMessage(chatId, MessageKind::System, "Starting encrypted session...");
+    // Updates secretModeToggle_ too (via hasSecretContent_), see
+    // appendMessage()'s own isSecret branch.
+    appendMessage(chatId, MessageKind::System, "Starting encrypted session...", /*isSecret=*/true);
 
     if (!probingChats_.contains(chatId)) {
         probingChats_.insert(chatId);
@@ -2405,22 +2479,39 @@ void MainWindow::onStartEncryptionClicked() {
                 if (!present) {
                     appendMessage(chatId, MessageKind::System,
                                   "Note: this contact does not appear to be running zkgram right now - the "
-                                  "encrypted session may not complete until they do.");
+                                  "encrypted session may not complete until they do.",
+                                  /*isSecret=*/true);
                 }
             });
         });
     }
 }
 
-void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString& text, const QString& filePath,
-                                qlonglong messageId, const QString& senderName) {
-    // Same sender AND same kind, not just same kind: two different
-    // people's consecutive messages in a group chat must not read as one
-    // attached block with only the first person's name shown.
-    bool attached = !conversationMessages_[chatId].isEmpty() && conversationMessages_[chatId].back().kind == kind &&
-                     kind != MessageKind::System && conversationMessages_[chatId].back().senderName == senderName;
-    conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName});
-    if (chatId == currentChatId_) {
+void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
+                                const QString& filePath, qlonglong messageId, const QString& senderName) {
+    // Same sender AND same kind AND same isSecret, not just same kind:
+    // two different people's consecutive messages in a group chat must
+    // not read as one attached block with only the first person's name
+    // shown - and a plain message immediately followed by a secret one
+    // (or vice versa) must not visually join into one bubble either, the
+    // two are never really "the same conversation flow" the way two
+    // consecutive plain (or two consecutive secret) messages are.
+    const QVector<StoredMessage>& stored = conversationMessages_[chatId];
+    bool attached = !stored.isEmpty() && stored.back().kind == kind && kind != MessageKind::System &&
+                     stored.back().senderName == senderName && stored.back().isSecret == isSecret;
+    conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName, isSecret});
+    if (isSecret) {
+        hasSecretContent_.insert(chatId);
+        if (chatId == currentChatId_) {
+            updateSecretModeIndicator();
+        }
+    }
+    // Only actually drawn if this chat is the one on screen AND (it is
+    // not secret, or secret mode is currently toggled on for it) - see
+    // secretModeOn_'s own comment. Still stored above either way:
+    // toggling secret mode on afterwards must show it without a refetch.
+    bool visible = chatId == currentChatId_ && (!isSecret || secretModeOn_.value(chatId, false));
+    if (visible) {
         // HistoryCanvas::appendItem() retracts the previous bubble's tail
         // in place if this one attaches to it, and lays out and paints
         // this new one - O(1) amortized, not a full conversation rebuild,
@@ -2428,7 +2519,7 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         asCanvas(messages_)->appendItem(HistoryEntry{kind, text, filePath, attached, senderName, true, messageId});
         asCanvas(messages_)->scrollToBottom();
     }
-    if (kind != MessageKind::System && conversationActive_.value(chatId, false)) {
+    if (kind != MessageKind::System && isSecret) {
         cacheConversationHistory(chatId);
     }
 }
@@ -2441,8 +2532,13 @@ void MainWindow::cacheConversationHistory(qlonglong chatId) {
     std::vector<zkgram::core::PlainMessage> messages;
     messages.reserve(stored.size());
     for (const StoredMessage& message : stored) {
-        if (message.kind == MessageKind::System) {
-            continue;  // status lines, not real conversation content - see the header comment
+        // Only secret content belongs in core::LocalCache - plain
+        // content is already recoverable from Telegram/TDLib itself, and
+        // more importantly must never end up inside the encrypted-history
+        // cache file at all (see the whole secretModeOn_ separation this
+        // is part of).
+        if (message.kind == MessageKind::System || !message.isSecret) {
+            continue;
         }
         zkgram::core::PlainMessage plain;
         plain.id = message.messageId;
@@ -2482,7 +2578,26 @@ void MainWindow::updateHistorySenderName(qlonglong chatId, qlonglong messageId, 
 }
 
 void MainWindow::renderCurrentConversation() {
-    const QVector<StoredMessage>& conversation = conversationMessages_.value(currentChatId_);
+    const QVector<StoredMessage>& stored = conversationMessages_.value(currentChatId_);
+
+    // The one place secretModeOn_ actually gets enforced for a full
+    // rebuild (appendMessage()'s own single-item path enforces it
+    // separately, see there) - a secret message is included only if
+    // secret mode is currently toggled on for this chat, never based on
+    // whether a session happens to be active/ready. Filtered into its
+    // own vector first, then the existing attached/showTail two-pass
+    // runs over *that*, not the unfiltered list - grouping must only
+    // ever look at what is actually about to be drawn, or a hidden
+    // secret message sitting between two plain ones would wrongly break
+    // (or wrongly preserve) their attachment.
+    bool secretVisible = secretModeOn_.value(currentChatId_, false);
+    QVector<StoredMessage> conversation;
+    conversation.reserve(stored.size());
+    for (const StoredMessage& message : stored) {
+        if (!message.isSecret || secretVisible) {
+            conversation.push_back(message);
+        }
+    }
 
     // Two passes, not one: whether a bubble is "attached to previous"
     // (joins its top corner, computed by looking backward) is independent
@@ -2494,7 +2609,8 @@ void MainWindow::renderCurrentConversation() {
     QVector<bool> attached(conversation.size(), false);
     for (int i = 1; i < conversation.size(); ++i) {
         attached[i] = conversation[i].kind == conversation[i - 1].kind && conversation[i].kind != MessageKind::System &&
-                      conversation[i].senderName == conversation[i - 1].senderName;
+                      conversation[i].senderName == conversation[i - 1].senderName &&
+                      conversation[i].isSecret == conversation[i - 1].isSecret;
     }
 
     QVector<HistoryEntry> entries;
@@ -2509,15 +2625,15 @@ void MainWindow::renderCurrentConversation() {
 }
 
 void MainWindow::appendConversationStatus(qlonglong chatId, const QString& stage, const QString& message) {
-    appendMessage(chatId, MessageKind::System, QString("[%1] %2").arg(stage, message));
+    appendMessage(chatId, MessageKind::System, QString("[%1] %2").arg(stage, message), /*isSecret=*/true);
 }
 
 void MainWindow::appendConversationPeerText(qlonglong chatId, const QString& text) {
-    appendMessage(chatId, MessageKind::Incoming, text);
+    appendMessage(chatId, MessageKind::Incoming, text, /*isSecret=*/true);
 }
 
 void MainWindow::appendConversationFileReceived(qlonglong chatId, const QString& filePath) {
-    appendMessage(chatId, MessageKind::Incoming, "File: " + filePath, filePath);
+    appendMessage(chatId, MessageKind::Incoming, "File: " + filePath, /*isSecret=*/true, filePath);
 }
 
 void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
@@ -2540,13 +2656,31 @@ void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageI
         }
         seen.insert(messageId);
     }
-    appendMessage(chatId, MessageKind::Incoming, text, filePath, messageId, senderName);
+    appendMessage(chatId, MessageKind::Incoming, text, /*isSecret=*/false, filePath, messageId, senderName);
 }
 
 void MainWindow::setConversationReady(qlonglong chatId) {
     conversationActive_[chatId] = true;
     conversationReady_[chatId] = true;
-    appendMessage(chatId, MessageKind::System, "Encrypted session ready");
+    appendMessage(chatId, MessageKind::System, "Encrypted session ready", /*isSecret=*/true);
+    // Auto-reveal, set AFTER the append above (not before): flipping it
+    // first would make that one message paint once via appendMessage()'s
+    // own live-append path and then again via the renderCurrentConversation()
+    // rebuild below - set after, and the rebuild is the only paint,
+    // picking up this message and any other secret content this chat
+    // had accumulated while still hidden. The user just deliberately
+    // finished setting up this exact session (clicked "Start encrypted
+    // session" themselves, waited through the handshake) - showing what
+    // they just built without an extra click is the expected outcome of
+    // that action, not an exception to secretModeOn_'s "off by default"
+    // rule. A chat's *cached* secret history from a previous run gets no
+    // such free pass (see maybeLoadCachedHistory()) - only a session
+    // actually completed in this run does.
+    secretModeOn_[chatId] = true;
+    if (chatId == currentChatId_) {
+        renderCurrentConversation();
+        updateSecretModeIndicator();
+    }
     updateConversationControlsVisibility();
 }
 
@@ -2592,8 +2726,11 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
         input_->setFocus();
     } else if (chosen == forwardAction && session_ != nullptr && currentChatId_ != 0) {
         QString forwarded = "Forwarded: " + text;
+        // Always via sendText (encrypted) - Forward has never offered a
+        // plain-send fallback the way onSendClicked()/sendFilePath() do,
+        // so it is always isSecret=true to match.
         session_->sendText(currentChatId_, forwarded.toStdString());
-        appendMessage(currentChatId_, MessageKind::Outgoing, forwarded);
+        appendMessage(currentChatId_, MessageKind::Outgoing, forwarded, /*isSecret=*/true);
     }
 }
 
@@ -2695,10 +2832,14 @@ void MainWindow::onSendClicked() {
             session_->sendPlainText(currentChatId_, text.toStdString());
         }
     } catch (const std::exception& e) {
-        appendMessage(currentChatId_, MessageKind::System, QString("Send failed: %1").arg(e.what()));
+        appendMessage(currentChatId_, MessageKind::System, QString("Send failed: %1").arg(e.what()), isActive);
         return;
     }
-    appendMessage(currentChatId_, MessageKind::Outgoing, text);
+    // isSecret mirrors isActive exactly - what actually left this device
+    // (encrypted via sendText, or plain via sendPlainText) is what
+    // determines which mode this message belongs to, not anything about
+    // the UI's current secretModeOn_ state.
+    appendMessage(currentChatId_, MessageKind::Outgoing, text, isActive);
     input_->clear();
 }
 
@@ -2714,10 +2855,10 @@ void MainWindow::sendFilePath(const QString& filePath, const QString& label) {
             session_->sendPlainFile(currentChatId_, filePath.toStdString());
         }
     } catch (const std::exception& e) {
-        appendMessage(currentChatId_, MessageKind::System, QString("Send failed: %1").arg(e.what()));
+        appendMessage(currentChatId_, MessageKind::System, QString("Send failed: %1").arg(e.what()), isActive);
         return;
     }
-    appendMessage(currentChatId_, MessageKind::Outgoing, label + filePath, filePath);
+    appendMessage(currentChatId_, MessageKind::Outgoing, label + filePath, isActive, filePath);
 }
 
 void MainWindow::onSendFileClicked() {

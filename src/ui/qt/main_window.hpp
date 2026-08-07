@@ -236,6 +236,11 @@ private Q_SLOTS:
     void onStartEncryptionClicked();
     void onChatSearchTextChanged(const QString& query);
     void onChatSearchDebounceTimeout();
+    // Flips secretModeOn_[currentChatId_] and re-renders - the only
+    // place that ever changes secretModeOn_ by direct user action (see
+    // setConversationReady() for the one automatic case, starting a
+    // brand new session this run).
+    void onSecretModeToggleClicked();
 
 protected:
     void closeEvent(class QCloseEvent* event) override;
@@ -254,13 +259,28 @@ private:
         // empty for everything else (outgoing, System, or not yet
         // resolved, see updateHistorySenderName()).
         QString senderName;
+        // True for anything that ever passed through crypto::CryptoLayer
+        // (decrypted incoming/outgoing text or files, and the session's
+        // own status lines) - false for ordinary Telegram content
+        // (plain history, a plain live message, see
+        // Session::sendPlainText/onPlainMessageReceived). This is the
+        // one field the whole secretModeOn_ separation is built on (see
+        // renderCurrentConversation()) - stored on every message
+        // permanently, never inferred at render time, so a filtering bug
+        // elsewhere cannot accidentally show secret content as if it
+        // were plain.
+        bool isSecret = false;
     };
 
     // Appends to conversationMessages_[chatId] always; only actually drawn
     // into the visible messages_ list if chatId is the one currently
-    // selected in the sidebar (see currentChatId_/renderCurrentConversation).
-    void appendMessage(qlonglong chatId, MessageKind kind, const QString& text, const QString& filePath = QString(),
-                        qlonglong messageId = 0, const QString& senderName = QString());
+    // selected in the sidebar AND (!isSecret || secret mode is currently
+    // toggled on for it, see secretModeOn_/renderCurrentConversation) -
+    // a secret message is still stored either way, so toggling secret
+    // mode on later shows it without needing to refetch anything.
+    void appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
+                        const QString& filePath = QString(), qlonglong messageId = 0,
+                        const QString& senderName = QString());
     // Rebuilds messages_ (a HistoryCanvas, see main_window.cpp) from
     // conversationMessages_[currentChatId_] - "attached"/"showTail" per
     // message (whether it joins the previous bubble/gets the pointed
@@ -271,6 +291,11 @@ private:
     void sendFilePath(const QString& filePath, const QString& label);
     void setControlsEnabled(bool enabled);
     void updateConversationControlsVisibility();
+    // Updates secretModeToggle_'s icon/tooltip/enabled state for
+    // currentChatId_ - called on chat switch and whenever secretModeOn_/
+    // hasSecretContent_ change for it. Does not touch secretModeOn_
+    // itself.
+    void updateSecretModeIndicator();
 
     // Shared by updateChatList() and the live search results
     // (onChatSearchDebounceTimeout()) - both deal in the same
@@ -414,12 +439,33 @@ private:
     QLineEdit* searchInput_;
     QLabel* companionAvatar_;
     QLabel* companionLabel_;
+    // Per-chat secret-mode toggle/indicator, next to companionLabel_ in
+    // the conversation header - see updateSecretModeIndicator() and
+    // secretModeOn_'s own comment for what this actually controls.
+    QPushButton* secretModeToggle_;
     QLabel* statusDot_;
     QLabel* statusLabel_;
 
     // Per-chat state, keyed by chat id - lets switching the sidebar
     // selection redraw instantly without re-fetching anything.
     QMap<qlonglong, QVector<StoredMessage>> conversationMessages_;
+    // Per-chat view mode: whether secret (decrypted CryptoLayer) content
+    // is currently allowed to render for this chat, on top of its
+    // always-visible plain content - see renderCurrentConversation() and
+    // secretModeToggle_. Missing/false means normal mode. Deliberately
+    // separate from conversationActive_/conversationReady_: those two
+    // are about whether a session exists at all, this one is about
+    // whether the user has actually chosen to reveal it right now - a
+    // chat can have secret content available (an active session, or
+    // cached history from a previous run) while this stays off, and
+    // toggling it does not start or stop anything, only what is drawn.
+    QMap<qlonglong, bool> secretModeOn_;
+    // Whether conversationMessages_[chatId] has ever received at least
+    // one isSecret message (live or from core::LocalCache) - lets
+    // secretModeToggle_ stay disabled/hidden for a chat with nothing
+    // secret to reveal, instead of offering a toggle that would do
+    // nothing.
+    QSet<qlonglong> hasSecretContent_;
     QMap<qlonglong, bool> conversationActive_;
     // Set only once setConversationReady() actually fires (the crypto
     // handshake finished), not the moment "Start encrypted session" is
