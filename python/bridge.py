@@ -7,8 +7,25 @@ Python-шим, связывающий настоящий CryptoLayer (см. ../.
 собираются из std::function, в конечном счёте ведущих в src/core/session.cpp.
 """
 
+import inspect
+
 from base_module import BaseModule, Credential
 from UIProvider import UIProvider
+
+
+# BaseModule.Listener существует в двух несовместимых версиях.
+#
+# В модифицированном cryptolayer-module-interface, под который этот мост и
+# писался (см. README про поддержку отправки файлов), у неё есть параметр
+# file_ingester. В публичном igmunv/cryptolayer-module-interface его нет:
+# там сигнатура (credentials, ingester, user_id, stop_event), и передача
+# шести аргументов роняла init с "BaseModule.Listener.__init__() takes 5
+# positional arguments but 6 were given" ещё до начала рукопожатия, то
+# есть шифрованная переписка не устанавливалась вообще.
+#
+# Определяем по фактической сигнатуре, а не по номеру версии: у пакета его
+# просто нет, а сравнивать по наличию файлов ещё хуже.
+_LISTENER_TAKES_FILE_INGESTER = "file_ingester" in inspect.signature(BaseModule.Listener.__init__).parameters
 
 
 class CppUiProvider(UIProvider):
@@ -69,13 +86,32 @@ class CppModule(BaseModule):
 
     class Listener(BaseModule.Listener):
         def __init__(self, credentials, ingester, file_ingester, user_id, callbacks: dict):
-            super().__init__(credentials, ingester, file_ingester, user_id, BaseModule.stop_event)
+            if _LISTENER_TAKES_FILE_INGESTER:
+                super().__init__(credentials, ingester, file_ingester, user_id, BaseModule.stop_event)
+            else:
+                super().__init__(credentials, ingester, user_id, BaseModule.stop_event)
+            # Присваиваем всегда: версия без file_ingester этого поля не
+            # заводит, а _on_file ниже на него рассчитывает. В версии с
+            # поддержкой файлов просто перезапишется тем же значением.
+            self.file_ingester = file_ingester
             callbacks["register_receiver"](self._on_bytes, self._on_file)
 
         def _on_bytes(self, data: bytes):
             self.ingester(data.decode("utf-8"))
 
         def _on_file(self, file_path: str):
+            # У публичного CryptoLayer init_module зовёт create_session с
+            # одним аргументом, поэтому приёмника файлов нет вовсе и
+            # file_ingester приходит None. Молча вызвать None - это
+            # TypeError из потока TDLib, поэтому сообщаем в лог и выходим:
+            # текстовые сообщения при этом продолжают работать.
+            if self.file_ingester is None:
+                self.logger.warning(
+                    "received an encrypted file (%s) but this CryptoLayer build has no file ingester - "
+                    "file transfer needs the modified cryptolayer, see README",
+                    file_path,
+                )
+                return
             self.file_ingester(file_path)
 
         def listen(self) -> str:
