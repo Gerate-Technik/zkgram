@@ -32,6 +32,7 @@
 #include <QHash>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QBrush>
@@ -54,6 +55,7 @@
 #include <QStyle>
 #include <QAbstractTextDocumentLayout>
 #include <QTextBlock>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTextStream>
@@ -358,6 +360,12 @@ struct HistoryItem {
     std::shared_ptr<QTextDocument> doc;  // text/system items only
     int contentWidth = 0;                // bubble/system inner width, pre-margin
     int contentHeight = 0;               // bubble/system inner height, pre-margin
+    // Plain-text length of doc up to (not including) the appended
+    // timestamp/tick run - see buildItem(). Mouse selection/copy is
+    // clamped to this so dragging into or past the timestamp cannot pick
+    // it up: only the message's own text is meant to be selectable, the
+    // time and the sent-tick are metadata, not content.
+    int textLength = 0;
 
     int top = 0;     // position within the canvas's total scrollable content
     int height = 0;  // full row height, including outer margins
@@ -472,7 +480,13 @@ private:
 class HistoryCanvas : public QAbstractScrollArea {
 public:
     explicit HistoryCanvas(QWidget* parent = nullptr) : QAbstractScrollArea(parent) {
-        setFocusPolicy(Qt::NoFocus);
+        // ClickFocus, not NoFocus: mouse text selection (see
+        // mousePressEvent/keyPressEvent below) needs Ctrl+C to reach this
+        // widget, which only happens once it can actually hold focus -
+        // ClickFocus specifically (not the composer's TabFocus/StrongFocus)
+        // because clicking into the list to select text is itself the
+        // natural way to focus it, same as any real text view.
+        setFocusPolicy(Qt::ClickFocus);
         setFrameShape(QFrame::NoFrame);
         setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -612,13 +626,39 @@ public:
         return HitResult{};
     }
 
+    // Empty if nothing is currently selected (a plain click with no
+    // drag leaves selectionStart_ == selectionEnd_, which is a
+    // zero-length range - QTextCursor::selectedText() on that is
+    // already ""). Used by MainWindow's right-click Copy action to
+    // prefer a mouse selection over the whole message when one exists.
+    QString selectedText() const {
+        if (selectionItemIndex_ < 0 || selectionItemIndex_ >= items_.size()) {
+            return {};
+        }
+        const HistoryItem& item = items_[selectionItemIndex_];
+        if (!item.doc) {
+            return {};
+        }
+        QTextCursor cursor(item.doc.get());
+        cursor.setPosition(selectionStart_);
+        cursor.setPosition(selectionEnd_, QTextCursor::KeepAnchor);
+        // QTextCursor::selectedText() uses U+2029 (paragraph separator)
+        // for line breaks inside the document, not '\n' - invisible in
+        // the app itself, but a real newline is what every other program
+        // a selection gets pasted into actually expects.
+        QString text = cursor.selectedText();
+        text.replace(QChar(0x2029), QChar('\n'));
+        return text;
+    }
+
 protected:
     void paintEvent(QPaintEvent* event) override {
         QPainter painter(viewport());
         painter.setRenderHint(QPainter::Antialiasing);
         int scrollY = verticalScrollBar()->value();
         QRect visible = event->rect();
-        for (const HistoryItem& item : items_) {
+        for (int i = 0; i < items_.size(); ++i) {
+            const HistoryItem& item = items_[i];
             if (item.hidden) {
                 continue;
             }
@@ -630,7 +670,7 @@ protected:
             if (itemBottom < visible.top() || itemTop > visible.bottom()) {
                 continue;
             }
-            paintItem(painter, item, itemTop);
+            paintItem(painter, item, itemTop, i == selectionItemIndex_);
         }
     }
 
@@ -647,8 +687,143 @@ protected:
         }
     }
 
+    // Real character-level mouse text selection (click-drag highlights a
+    // range, double-click selects a word, Ctrl+C copies it) - the message
+    // list is a single custom-painted canvas (see the class comment
+    // above), so none of this comes for free the way it would from a
+    // real QLabel/QTextEdit per message; it has to be built by hand here,
+    // same as real Telegram Desktop's own bubbles do (Ui::Text::String
+    // selection state, see history_view_element.h).
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) {
+            QAbstractScrollArea::mousePressEvent(event);
+            return;
+        }
+        int index = itemIndexAt(event->pos());
+        if (index < 0 || items_[index].isImage || !items_[index].doc) {
+            clearSelection();
+            QAbstractScrollArea::mousePressEvent(event);
+            return;
+        }
+        int pos = docPositionAt(items_[index], event->pos());
+        selectionItemIndex_ = index;
+        selectionStart_ = pos;
+        selectionEnd_ = pos;
+        selecting_ = true;
+        viewport()->update();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!selecting_ || selectionItemIndex_ < 0) {
+            QAbstractScrollArea::mouseMoveEvent(event);
+            return;
+        }
+        selectionEnd_ = docPositionAt(items_[selectionItemIndex_], event->pos());
+        viewport()->update();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        selecting_ = false;
+        QAbstractScrollArea::mouseReleaseEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        int index = itemIndexAt(event->pos());
+        if (index < 0 || items_[index].isImage || !items_[index].doc) {
+            QAbstractScrollArea::mouseDoubleClickEvent(event);
+            return;
+        }
+        QTextCursor cursor(items_[index].doc.get());
+        cursor.setPosition(docPositionAt(items_[index], event->pos()));
+        cursor.select(QTextCursor::WordUnderCursor);
+        selectionItemIndex_ = index;
+        // Clamped the same as docPositionAt() - WordUnderCursor should
+        // not normally cross into the timestamp span (it starts with a
+        // non-breaking space, not a word character), but this makes that
+        // guaranteed rather than incidental.
+        selectionStart_ = qMin(cursor.selectionStart(), items_[index].textLength);
+        selectionEnd_ = qMin(cursor.selectionEnd(), items_[index].textLength);
+        viewport()->update();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->matches(QKeySequence::Copy)) {
+            QString text = selectedText();
+            if (!text.isEmpty()) {
+                QGuiApplication::clipboard()->setText(text);
+            }
+            return;
+        }
+        QAbstractScrollArea::keyPressEvent(event);
+    }
+
 private:
     std::unique_ptr<KineticScroller> kineticScroller_;
+    int selectionItemIndex_ = -1;
+    int selectionStart_ = -1;
+    int selectionEnd_ = -1;
+    bool selecting_ = false;
+
+    void clearSelection() {
+        if (selectionItemIndex_ >= 0) {
+            selectionItemIndex_ = -1;
+            selectionStart_ = selectionEnd_ = -1;
+            viewport()->update();
+        }
+    }
+
+    // Same bubbleLeft/bubbleTop geometry paintItem() works out for the
+    // bubble body rect, isolated here so hit-testing (mouse events) and
+    // painting agree on where the document actually sits, without
+    // duplicating paintItem() itself.
+    QPointF textOrigin(const HistoryItem& item, int rowTop) const {
+        int rowMargin = kRowVerticalMargin(item.attached);
+        int bubbleTop = rowTop + rowMargin / 2;
+        int viewportWidth = viewport()->width();
+        int bubbleOuterWidth = item.contentWidth + kBubbleMargin * 2;
+        int bubbleLeft;
+        if (item.kind == MessageKind::Outgoing) {
+            bubbleLeft = viewportWidth - bubbleOuterWidth - kSideMargin;
+        } else if (item.kind == MessageKind::Incoming) {
+            bubbleLeft = kSideMargin;
+        } else {
+            bubbleLeft = (viewportWidth - bubbleOuterWidth) / 2;
+        }
+        return QPointF(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin);
+    }
+
+    int itemIndexAt(const QPoint& pos) const {
+        int y = pos.y() + verticalScrollBar()->value();
+        for (int i = 0; i < items_.size(); ++i) {
+            if (items_[i].hidden) {
+                continue;
+            }
+            if (y >= items_[i].top && y < items_[i].top + items_[i].height) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Character position within item.doc closest to a viewport-local
+    // point - Qt::FuzzyHit clamps to the nearest valid position rather
+    // than requiring an exact hit, which is what lets a drag continue
+    // past the actual text bounds (into the bubble's own padding, or
+    // above/below the item) and still extend the selection sensibly.
+    // Capped at item.textLength: the timestamp/tick run painted after the
+    // real text is metadata, not content, and must not be selectable or
+    // copyable - dragging into or past it just holds the selection at
+    // the text's own end instead of reaching past it.
+    int docPositionAt(const HistoryItem& item, const QPoint& viewportPos) const {
+        int rowTop = item.top - verticalScrollBar()->value();
+        QPointF docLocal = QPointF(viewportPos) - textOrigin(item, rowTop);
+        int pos = item.doc->documentLayout()->hitTest(docLocal, Qt::FuzzyHit);
+        if (pos < 0) {
+            pos = 0;
+        }
+        return qMin(pos, item.textLength);
+    }
+
     HistoryItem buildItem(const HistoryEntry& entry) const {
         HistoryItem item;
         item.kind = entry.kind;
@@ -695,6 +870,25 @@ private:
             }
             QString escaped = entry.text.toHtmlEscaped();
             escaped.replace("\n", "<br>");
+
+            // Everything up to here (message text, plus the sender-name
+            // prefix added just below if any) is real content; the
+            // timestamp/tick span appended after this point is metadata,
+            // not content - measured by rendering this part alone into a
+            // throwaway document, since HTML entity decoding (&nbsp;,
+            // etc.) means character counts do not map 1:1 between source
+            // HTML and the document's own plain-text positions.
+            QString textOnlyHtml = escaped;
+            if (entry.kind == MessageKind::Incoming && !entry.attached && !entry.senderName.isEmpty()) {
+                textOnlyHtml =
+                    QString("<b style=\"color:#3a8ee6;\">%1</b><br>%2").arg(entry.senderName.toHtmlEscaped(), escaped);
+            }
+            {
+                QTextDocument measuring;
+                measuring.setHtml(textOnlyHtml);
+                item.textLength = measuring.toPlainText().length();
+            }
+
             html = QString("%1&nbsp;&nbsp;<span style=\"color:#a0acb6; font-size:%2px;\">%3%4</span>")
                        .arg(escaped)
                        .arg(kBubbleMetaFontSize)
@@ -712,6 +906,11 @@ private:
             item.doc->setPlainText(html);
         }
         item.doc->setTextWidth(kMaxBubbleContentWidth);
+        if (entry.kind == MessageKind::System) {
+            // No metadata span appended for system lines - the whole
+            // thing is "text", nothing to clamp.
+            item.textLength = item.doc->characterCount();
+        }
         // ceil, not a truncating cast: idealWidth() is fractional, and
         // handing the document back a width even a fraction of a pixel
         // narrower than it asked for makes it wrap - so a bubble that fits
@@ -734,7 +933,7 @@ private:
 
     static int kRowVerticalMargin(bool attached) { return attached ? 2 : 7; }
 
-    void paintItem(QPainter& painter, const HistoryItem& item, int rowTop) const {
+    void paintItem(QPainter& painter, const HistoryItem& item, int rowTop, bool isSelected) const {
         int rowMargin = kRowVerticalMargin(item.attached);
         int bubbleOuterHeight = item.height - rowMargin;
         int bubbleTop = rowTop + rowMargin / 2;
@@ -769,7 +968,7 @@ private:
             painter.setPen(QColor("#8a8a8a"));
             painter.save();
             painter.translate(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin);
-            item.doc->drawContents(&painter);
+            drawDocument(painter, item, isSelected);
             painter.restore();
             return;
         }
@@ -781,9 +980,66 @@ private:
                          item.showTail, item.attached);
         painter.save();
         painter.translate(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin);
-        item.doc->drawContents(&painter);
+        drawDocument(painter, item, isSelected);
         if (item.showTick) {
             paintSentTick(painter, item);
+        }
+        painter.restore();
+    }
+
+    // Paints a translucent highlight rect under the selected range, then
+    // draws the document completely normally on top via
+    // drawContents() - deliberately not QAbstractTextDocumentLayout's
+    // own Selection/PaintContext mechanism (an earlier version of this
+    // function used that instead), because a Selection there is a
+    // QTextCharFormat overlay applied to the actual text, and changed
+    // the text's own color instead of just sitting behind it. Painting a
+    // background rect manually and leaving drawContents() completely
+    // untouched guarantees the glyphs themselves are never altered.
+    void drawDocument(QPainter& painter, const HistoryItem& item, bool isSelected) const {
+        if (isSelected && selectionStart_ != selectionEnd_) {
+            paintSelectionHighlight(painter, item);
+        }
+        item.doc->drawContents(&painter);
+    }
+
+    // One rect per text line the selection actually overlaps, each
+    // spanning only the selected columns on that line (not the whole
+    // line width) - handles a selection crossing multiple lines/blocks
+    // the same way any real text editor's highlight does.
+    void paintSelectionHighlight(QPainter& painter, const HistoryItem& item) const {
+        int start = qMin(selectionStart_, selectionEnd_);
+        int end = qMax(selectionStart_, selectionEnd_);
+        painter.save();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(64, 167, 227, 90));
+        for (QTextBlock block = item.doc->begin(); block.isValid(); block = block.next()) {
+            int blockStart = block.position();
+            int blockEnd = blockStart + block.length();  // length() includes the block separator
+            if (blockEnd <= start || blockStart >= end) {
+                continue;
+            }
+            QTextLayout* layout = block.layout();
+            if (layout == nullptr) {
+                continue;
+            }
+            QPointF blockOrigin = item.doc->documentLayout()->blockBoundingRect(block).topLeft();
+            int rangeStartInBlock = qMax(start, blockStart) - blockStart;
+            int rangeEndInBlock = qMin(end, blockStart + block.length() - 1) - blockStart;
+            for (int i = 0; i < layout->lineCount(); ++i) {
+                QTextLine line = layout->lineAt(i);
+                int lineStart = line.textStart();
+                int lineEnd = lineStart + line.textLength();
+                if (lineEnd <= rangeStartInBlock || lineStart >= rangeEndInBlock) {
+                    continue;
+                }
+                int segStart = qMax(lineStart, rangeStartInBlock);
+                int segEnd = qMin(lineEnd, rangeEndInBlock);
+                qreal x1 = line.cursorToX(segStart);
+                qreal x2 = line.cursorToX(segEnd);
+                QRectF rect(blockOrigin.x() + qMin(x1, x2), blockOrigin.y() + line.y(), qAbs(x2 - x1), line.height());
+                painter.drawRect(rect);
+            }
         }
         painter.restore();
     }
@@ -1490,6 +1746,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sendFileButton_ = new RippleButton(glyphIcon(Glyph::Attach, kIconFg), QString(), inputRow);
     sendFileButton_->setObjectName("composeIconButton");
     sendFileButton_->setFixedSize(44, 46);
+    // Qt's QPushButton default icon size (~16px from the style's
+    // PM_ButtonIconSize) reads as tiny inside a 44x46 button - matches
+    // roughly what the real 44x46 historyAttach/historySend icons in
+    // chat_helpers.style actually fill.
+    sendFileButton_->setIconSize(QSize(24, 24));
     sendFileButton_->setToolTip("Send a file");
     input_ = new ChatInput(inputRow);
     input_->setObjectName("composeField");
@@ -1501,6 +1762,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sendButton_ = new RippleButton(glyphIcon(Glyph::Mic, kIconFg), QString(), inputRow);
     sendButton_->setObjectName("composeIconButton");
     sendButton_->setFixedSize(44, 46);
+    sendButton_->setIconSize(QSize(24, 24));
     sendButton_->setToolTip("Record a voice message");
     inputLayout->addWidget(sendFileButton_, 0, Qt::AlignBottom);
     inputLayout->addWidget(input_, 1, Qt::AlignVCenter);
@@ -1523,6 +1785,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     cancelRecordButton_ = new RippleButton(glyphIcon(Glyph::Trash, kIconDestructiveFg), QString(), recordBar_);
     cancelRecordButton_->setObjectName("composeIconButton");
     cancelRecordButton_->setFixedSize(44, 46);
+    cancelRecordButton_->setIconSize(QSize(24, 24));
     cancelRecordButton_->setToolTip("Discard recording");
 
     recordDot_ = new QLabel(recordBar_);
@@ -1536,11 +1799,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     pauseRecordButton_ = new RippleButton(glyphIcon(Glyph::Pause, kIconFg), QString(), recordBar_);
     pauseRecordButton_->setObjectName("composeIconButton");
     pauseRecordButton_->setFixedSize(44, 46);
+    pauseRecordButton_->setIconSize(QSize(24, 24));
     pauseRecordButton_->setToolTip("Pause recording");
 
     sendRecordButton_ = new RippleButton(glyphIcon(Glyph::Send, kIconAccentFg), QString(), recordBar_);
     sendRecordButton_->setObjectName("composeIconButton");
     sendRecordButton_->setFixedSize(44, 46);
+    sendRecordButton_->setIconSize(QSize(24, 24));
     sendRecordButton_->setToolTip("Stop and send");
 
     recordLayout->addWidget(cancelRecordButton_, 0, Qt::AlignVCenter);
@@ -2294,7 +2559,13 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
     if (kind == MessageKind::System) {
         return;
     }
-    QString text = hit.text;
+    // A mouse selection (see HistoryCanvas::selectedText()) takes
+    // priority over the whole message, same as right-clicking selected
+    // text in any real text view - falls back to the whole message when
+    // nothing is actually selected (the common case: right-click without
+    // dragging first).
+    QString selected = asCanvas(messages_)->selectedText();
+    QString text = selected.isEmpty() ? hit.text : selected;
 
     QMenu menu(this);
     QAction* copyAction = menu.addAction("Copy text");
