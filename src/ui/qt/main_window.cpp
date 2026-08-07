@@ -836,6 +836,14 @@ private:
         int viewportHeight = viewport()->height();
         verticalScrollBar()->setRange(0, qMax(0, totalHeight_ - viewportHeight));
         verticalScrollBar()->setPageStep(viewportHeight);
+        // Never set anywhere before, so QAbstractScrollArea's default
+        // wheelEvent() (the actual fallback path a plain, non-phased mouse
+        // wheel takes - see KineticScroller's own comment) was scrolling
+        // by Qt's raw QAbstractSlider default of 1, times whatever small
+        // multiplier Qt applies internally - a couple of pixels per
+        // notch, not a usable scroll speed. 20 lands close to one
+        // message's worth of movement per notch after that multiplier.
+        verticalScrollBar()->setSingleStep(20);
     }
 
     static constexpr int kSideMargin = 8;
@@ -1073,6 +1081,9 @@ private:
         int viewportHeight = viewport()->height();
         verticalScrollBar()->setRange(0, qMax(0, rows_.size() * kSidebarRowHeight - viewportHeight));
         verticalScrollBar()->setPageStep(viewportHeight);
+        // See HistoryCanvas::updateScrollRange()'s identical line for why
+        // this is needed - never set anywhere before.
+        verticalScrollBar()->setSingleStep(20);
     }
 
     void paintRow(QPainter& painter, const SidebarRowData& row, int top, bool selected, bool hovered) {

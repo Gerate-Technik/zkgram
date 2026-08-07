@@ -39,6 +39,7 @@ class EmbeddedInterpreter {
 public:
     EmbeddedInterpreter() {
         configureSysPath();
+        configureLogging();
 
         // ГЛАВНОЕ: отдать GIL. Py_Initialize (внутри scoped_interpreter)
         // оставляет GIL захваченным потоком, который его вызвал, и сам
@@ -77,6 +78,37 @@ private:
         path.append(cryptolayerRoot + "/cryptolayer/src");
         path.append(cryptolayerRoot + "/cryptolayer-module-interface");
         path.append(zkgramRoot + "/python");
+    }
+
+    // cryptolayer/src/crypto_layer.py and levels/base.py both do
+    // logging.getLogger(...).error/info(...) throughout the entire
+    // handshake and send/receive protocol (signature mismatches, AES-GCM
+    // decrypt failures, brotli decompress failures, WordCoder decode
+    // errors - exactly the kind of failure that would explain a
+    // handshake silently getting stuck) but neither this file nor
+    // cryptolayer itself ever called logging.basicConfig()/addHandler()
+    // anywhere. Without a configured handler, Python's logging module
+    // falls back to its "handler of last resort", which only prints
+    // WARNING-and-above to sys.stderr - and this Qt build links as a
+    // WIN32 (no console) subsystem app, so stderr goes nowhere anyone
+    // can see. Every one of those error() calls was real diagnostic
+    // information that no one, including this codebase's own debugging
+    // sessions, could ever actually see. Routed into the same
+    // zkgram_debug.log the C++ side's own logDebug() helpers
+    // (session.cpp/telegram_client.cpp/crypto_layer.cpp) already write
+    // to, with a distinguishing "[python]" prefix, rather than a second
+    // separate log file.
+    static void configureLogging() {
+        std::string logPath = zkgram::platform::executableDir();
+        logPath = (logPath.empty() ? std::string(".") : logPath) + "/zkgram_debug.log";
+
+        py::module_ logging = py::module_::import("logging");
+        py::object handler = logging.attr("FileHandler")(logPath, "a", "utf-8");
+        handler.attr("setFormatter")(
+            logging.attr("Formatter")("%(asctime)s [python] %(name)s %(levelname)s: %(message)s"));
+        py::object root = logging.attr("getLogger")();
+        root.attr("addHandler")(handler);
+        root.attr("setLevel")(logging.attr("INFO"));
     }
 
     py::scoped_interpreter interpreter_;

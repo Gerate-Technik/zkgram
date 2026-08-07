@@ -3,5 +3,20 @@
         <file alias="style.qss">style.qss</file>
         <file alias="app.ico">../../../resources/app.ico</file>
         <file alias="chat_wallpaper.png">../../../resources/chat_wallpaper.png</file>
+        <!-- Real telegram_fork/tdesktop icon assets (white shape, transparent
+             background - recolored at runtime, see icons.cpp), not
+             hand-drawn approximations - see TODO.md for where each one
+             came from. -->
+        <file alias="icons/send.png">../../../resources/icons/send.png</file>
+        <file alias="icons/mic.png">../../../resources/icons/mic.png</file>
+        <file alias="icons/attach.png">../../../resources/icons/attach.png</file>
+        <file alias="icons/photo.png">../../../resources/icons/photo.png</file>
+        <file alias="icons/document.png">../../../resources/icons/document.png</file>
+        <file alias="icons/trash.png">../../../resources/icons/trash.png</file>
+        <file alias="icons/pause.png">../../../resources/icons/pause.png</file>
+        <file alias="icons/play.png">../../../resources/icons/play.png</file>
+        <file alias="icons/search.png">../../../resources/icons/search.png</file>
+        <file alias="icons/check.png">../../../resources/icons/check.png</file>
+        <file alias="icons/lock.png">../../../resources/icons/lock.png</file>
     </qresource>
 </RCC>

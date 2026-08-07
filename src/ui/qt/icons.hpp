@@ -11,28 +11,31 @@ QT_END_NAMESPACE
 
 namespace zkgram::ui::qt {
 
-// Every glyph the Qt UI draws for itself. They are drawn rather than shipped
-// as image files for the same reason the old per-icon drawXIcon() helpers in
-// main_window.cpp were: the project has no external asset pipeline, and a
-// handful of vector paths is cheaper to carry than a set of PNGs at four
-// scale factors each. Unlike those helpers, everything here is laid out on
-// one shared 24x24 grid with one stroke weight (see kGridSize/kStroke in
-// icons.cpp), so the icons read as a family instead of as eight separately
-// eyeballed drawings, and each is re-rendered as vectors at whatever size
-// and device pixel ratio it is asked for instead of being baked once into a
-// fixed 24x24 pixmap that a HiDPI screen then blurs.
+// Every glyph the Qt UI draws for itself - each one a real
+// telegram_fork/tdesktop icon asset (Telegram/Resources/icons/...,
+// embedded via resources.qrc), not a hand-drawn approximation. An
+// earlier version of this file built every glyph from scratch as
+// QPainterPath shapes "from memory" - close in spirit but visibly not
+// the real silhouette once compared against the actual asset (see
+// TODO.md). The source PNG for each is white-on-transparent and
+// recolored at runtime (see colorizeMask() in icons.cpp), the same
+// mask+palette technique tdesktop's own style::internal::MonoIcon uses
+// (Telegram/lib_ui/ui/style/style_core_icon.cpp).
+// Each comment names the real tdesktop asset this one loads (path under
+// Telegram/Resources/icons/ in telegram_fork), not just what it is used
+// for - see icons.cpp's glyphResourcePath().
 enum class Glyph {
-    Send,      // composer send button, and "stop and send" on the record bar
-    Mic,       // composer button while the field is empty
-    Attach,    // composer attach (paperclip)
-    Photo,     // "Photo or Video" in the attach menu
-    Document,  // "Document" in the attach menu
-    Trash,     // discard a recording
-    Pause,     // pause a recording
-    Play,      // resume a paused recording
-    Search,    // leading glyph inside the two search fields
-    Check,     // "sent" tick on an outgoing bubble
-    Lock,      // encrypted-session indicator on a chat list row
+    Send,      // chat/input_send - composer send button, "stop and send" on the record bar
+    Mic,       // chat/input_record - composer button while the field is empty
+    Attach,    // chat/input_attach - composer attach (paperclip)
+    Photo,     // menu/image - "Photo or Video" in the attach menu
+    Document,  // menu/file - "Document" in the attach menu
+    Trash,     // menu/delete - discard a recording
+    Pause,     // media_pause - pause a recording
+    Play,      // media_play - resume a paused recording
+    Search,    // top_bar_search - leading glyph inside the two search fields
+    Check,     // history_sent - "sent" tick on an outgoing bubble
+    Lock,      // chat/mini_lock - encrypted-session indicator on a chat list row
 };
 
 // Paints the glyph centred in rect, scaled uniformly to fit, in color.
