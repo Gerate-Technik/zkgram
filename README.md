@@ -2,19 +2,48 @@
 
 **A real end-to-end encrypted messenger that runs on top of your existing Telegram account.**
 
-zkgram is a native desktop Telegram client built on [TDLib](https://github.com/tdlib/td), with a genuine, independently implemented end-to-end encryption layer placed in front of every message before it ever touches Telegram's servers. Telegram does not see your conversation. It only ever sees ciphertext, disguised as ordinary text, flowing between two accounts that happen to talk to each other.
+| | |
+|---|---|
+| Repository | [github.com/Gerate-Technik/zkgram](https://github.com/Gerate-Technik/zkgram) |
+| Organization | [github.com/Gerate-Technik](https://github.com/Gerate-Technik) |
+| License | [GNU GPLv3](https://www.gnu.org/licenses/gpl-3.0.html) |
+| Encryption engine | [selimann/cryptolayer-modules](https://github.com/selimann/cryptolayer-modules), a modified [CryptoLayer](https://github.com/igmunv/cryptolayer) |
+| Full documentation | [`docs/README.md`](docs/README.md) |
 
-The encryption itself is a modified version of [CryptoLayer](https://github.com/igmunv/cryptolayer), extended with Telegram transport support and encrypted file transfer specifically for this project, maintained at [selimann/cryptolayer-modules](https://github.com/selimann/cryptolayer-modules).
+zkgram is a native desktop Telegram client built on [TDLib](https://github.com/tdlib/td), with a genuine, independently implemented end-to-end encryption layer placed in front of every message before it ever touches Telegram's servers. Telegram does not see your conversation. It only ever sees ciphertext, disguised as ordinary text, flowing between two accounts that happen to talk to each other.
 
 You keep your existing Telegram account, your existing contacts, and Telegram's own reliable message delivery. What changes is that, for any conversation where both sides run zkgram, the content itself is invisible to Telegram, to anyone who might compromise Telegram's servers, and to anyone intercepting traffic in between. Everyone else on the network still sees you as an ordinary Telegram user.
 
+The name follows the same zero-knowledge principle used by, for example, zero-knowledge password managers: Telegram's own infrastructure ends up with zero knowledge of what was actually said in an encrypted conversation. It refers to that property, not to zero-knowledge proofs as a cryptographic primitive, which zkgram does not use.
+
 ## Why this exists
 
-Telegram's own "Secret Chats" are end-to-end encrypted, but they are a separate, second-class feature: no multi-device support, no cloud sync, and you have to trust Telegram's own implementation of the protocol. Regular Telegram chats, the ones people actually use day to day, are encrypted only in transit and at rest on Telegram's servers, not end to end. Telegram itself, and by extension anyone who gains access to Telegram's infrastructure, can in principle read them.
+| | Regular Telegram chat | Telegram Secret Chat | zkgram |
+|---|---|---|---|
+| Content end-to-end encrypted | No | Yes | Yes |
+| Independent, auditable encryption implementation | N/A | No, Telegram's own | Yes, [open source](https://github.com/selimann/cryptolayer-modules) |
+| Works across all your devices | Yes | No | Yes, inherited from your Telegram account |
+| Cloud message history | Yes | No | No, local encrypted cache only |
+| Ciphertext disguised as plain text | N/A | No | Yes |
+| Requires a new account or app your contacts don't already have | No | No | No |
+
+Telegram's own Secret Chats are end-to-end encrypted, but they are a separate, second-class feature: no multi-device support, no cloud sync, and you have to trust Telegram's own implementation of the protocol. Regular Telegram chats, the ones people actually use day to day, are encrypted only in transit and at rest on Telegram's servers, not end to end. Telegram itself, and by extension anyone who gains access to Telegram's infrastructure, can in principle read them.
 
 zkgram closes that gap without asking you to leave Telegram, create a new account, or convince your contacts to install a completely separate app with its own network and its own reliability problems. It reuses Telegram purely as a transport, the way a postal service is used to deliver a sealed, tamper-evident envelope: the courier can see that a letter moved from one address to another, but not what is written inside it.
 
 ## Core capabilities
+
+| Capability | What it means |
+|---|---|
+| Real end-to-end encryption | Fresh ECDH (SECP256R1) key exchange per session, AES-GCM per message, ECDSA-signed handshake |
+| Forward secrecy | Session keys are never reused and never written to disk |
+| Disguised ciphertext | Encrypted messages are encoded to read as ordinary text, not obvious "encrypted garbage" |
+| Real Telegram account, real infrastructure | No separate zkgram account or server, delivery and multi-device presence inherited from Telegram |
+| Secret/normal mode separation | Decrypted content only ever shown in an explicitly enabled secret view, never leaks into the normal view |
+| Local encrypted history | Password-derived local cache (PBKDF2-HMAC-SHA256, AES-256-CTR) so history survives a restart |
+| Multi-conversation | Any number of independent encrypted sessions at once, each with its own keys |
+| Encrypted files and voice messages | Same AES-GCM, signed encryption path as text |
+| Interface built from real Telegram Desktop source and assets | Not a from-scratch approximation of the look and feel |
 
 ### Real end-to-end encryption, not a marketing label
 
@@ -35,8 +64,10 @@ zkgram authenticates as a real Telegram client (via TDLib, the same library the 
 
 Not every conversation needs to be encrypted, and not every moment of looking at your screen is a moment you want decrypted content visible. Each chat can be individually switched into an encrypted session, and once it has any encrypted history at all, its view can be independently toggled between:
 
-- **Normal mode**: shows only ordinary Telegram content for that chat. Decrypted content is never drawn, never leaked into this view, regardless of whether an encrypted session exists for that chat.
-- **Secret mode**: shows ordinary content plus the decrypted conversation, explicitly revealed.
+| Mode | What it shows |
+|---|---|
+| Normal | Only ordinary Telegram content for that chat. Decrypted content is never drawn into this view, regardless of whether an encrypted session exists. |
+| Secret | Ordinary content plus the decrypted conversation, explicitly revealed. |
 
 This is deliberately one-directional: normal mode can never accidentally surface secret content, while secret mode can still show the ordinary parts of the conversation for context. The distinction is enforced at the data level, not just hidden visually, and defaults to off, including for previously cached encrypted history from an earlier session.
 
@@ -60,11 +91,7 @@ Rather than approximating what Telegram Desktop looks like, zkgram's interface i
 
 zkgram is organized into three layers that are deliberately kept from knowing about each other directly:
 
-1. **Transport** (`telegram::TelegramClient`): talks to TDLib, handles login, the chat list, sending and receiving raw bytes and files. Has no idea what it is carrying is encrypted.
-2. **Cryptography** (`crypto::CryptoLayer`): an embedded Python bridge into the real [CryptoLayer](https://github.com/igmunv/cryptolayer) engine, which performs the actual key exchange, signing, encryption, and decryption. Has no idea Telegram exists; it only knows it has bytes to send and bytes it received.
-3. **Session** (`core::Session`): the only layer allowed to know about both of the above. It wires a specific chat's transport events to a specific encrypted conversation's cryptography, and nothing else in the codebase is allowed to reach across that boundary.
-
-A pluggable UI layer sits on top of `core::Session` through a small interface (`UiProvider`), so the interface itself, currently a Qt desktop client, is not hardwired into the rest of the application and could in principle be replaced or extended.
+![Diagram of zkgram's three isolated layers: TelegramClient and CryptoLayer connect only through Session, never directly to each other, with UiProvider plugged into Session from above](docs/images/architecture.svg)
 
 Full architecture documentation, including the exact data flow, the Python bridge's threading model, and how to extend the project with a new cryptographic backend, a different transport, or a different UI, is in [`docs/README.md`](docs/README.md).
 
@@ -72,16 +99,30 @@ Full architecture documentation, including the exact data flow, the Python bridg
 
 Being precise about limits is part of taking security seriously.
 
-- **Metadata is not hidden.** Telegram still knows which two accounts are communicating and roughly when, the same way a postal service knows which two addresses exchanged a letter even without opening it. zkgram protects the content of a conversation, not the fact that a conversation is happening.
-- **A compromised device defeats everything running on it.** If your device itself is compromised while a session is active, or while you are looking at decrypted content on screen, no amount of encryption in transit helps. This is true of every messenger, not specific to zkgram.
-- **Trust in the signature exchange is still on you.** The app shows you both sides' signature fingerprints to compare; skipping that comparison (or comparing carelessly) weakens the guarantee that a handshake is with the person you think it is with.
-- **The local password is not recoverable.** It decrypts your local identity file and is never stored anywhere, by design. Losing it means generating a new local identity.
+| Not protected against | Why |
+|---|---|
+| Metadata exposure | Telegram still knows which two accounts are communicating and roughly when, the same way a postal service knows which two addresses exchanged a letter even without opening it. zkgram protects the content of a conversation, not the fact that a conversation is happening. |
+| A compromised device | If your device itself is compromised while a session is active, or while decrypted content is on screen, no amount of encryption in transit helps. True of every messenger, not specific to zkgram. |
+| Skipped signature verification | The app shows both sides' signature fingerprints to compare; skipping that comparison, or comparing carelessly, weakens the guarantee that a handshake is with the person you think it is with. |
+| A lost local password | It decrypts your local identity file and is never stored anywhere, by design. Losing it means generating a new local identity. |
 
 ## Project status
 
-- Login, the full chat list, sending and receiving both plain and encrypted messages, multiple simultaneous encrypted conversations, file and voice message transfer, local encrypted history caching, and the secret/normal mode separation are implemented and have been exercised against a real Telegram account.
-- Windows is the primary, most thoroughly tested target. Linux is supported by the build (`build.sh`, `installtdlib.sh`) but has seen less real-world testing. macOS should follow the same build path as Linux but has not been verified.
-- Not yet implemented: a proper installer (currently a portable build only), group encryption for more than two participants, and a small number of composer icons that still use hand-drawn approximations rather than the real Telegram Desktop asset. See [`TODO.md`](TODO.md) for the current, actively maintained list (kept locally, not part of the published repository).
+| Area | Status | Notes |
+|---|---|---|
+| Login, chat list, plain and encrypted messaging | Implemented | Exercised against a real Telegram account |
+| Multiple simultaneous encrypted conversations | Implemented | |
+| File and voice message transfer | Implemented | |
+| Local encrypted history caching | Implemented | |
+| Secret/normal mode separation | Implemented | |
+| Windows | Fully tested | Primary target |
+| Linux | Supported | Builds via `build.sh`/`installtdlib.sh`, less real-world testing |
+| macOS | Unverified | Expected to follow the Linux build path |
+| Installer | Not yet implemented | Portable build only |
+| Group encryption (more than two participants) | Not yet implemented | |
+| Composer icon set | Partial | A small number of icons are hand-drawn approximations rather than the real Telegram Desktop asset |
+
+See [`TODO.md`](TODO.md) for the current, actively maintained list (kept locally, not part of the published repository).
 
 ## Getting started
 
@@ -101,15 +142,19 @@ Manual, step-by-step build instructions without the helper script are documented
 
 Required for any build:
 
-- CMake 3.20 or newer
-- A C++20 compiler (MSVC 19.3x+ on Windows via Visual Studio 2022 Build Tools, GCC/Clang on Linux)
-- Python 3.8 or newer with development headers, plus `pip install cryptography brotli` in that same interpreter (this is what the embedded CryptoLayer engine actually runs on)
-- [TDLib](https://github.com/tdlib/td), built from source (no precompiled binaries are published or fetched, deliberately: this is a cryptographic component, and trusting someone else's opaque binary of it defeats the point). `install-tdlib.ps1`/`installtdlib.sh` automate this.
-- [OpenSSL](https://openssl.org/)
+| Requirement | Notes |
+|---|---|
+| CMake | 3.20 or newer |
+| C++20 compiler | MSVC 19.3x+ on Windows (Visual Studio 2022 Build Tools), GCC/Clang on Linux |
+| Python | 3.8 or newer, with development headers, plus `pip install cryptography brotli` in that interpreter (what the embedded CryptoLayer engine runs on) |
+| [TDLib](https://github.com/tdlib/td) | Built from source, not a precompiled binary, deliberately: this is a cryptographic component, and trusting someone else's opaque binary of it defeats the point. `install-tdlib.ps1`/`installtdlib.sh` automate this. |
+| [OpenSSL](https://openssl.org/) | |
 
 Required only for the graphical client (`-DZKGRAM_UI=qt`, the default; a console-only build needs none of this):
 
-- Qt6, `Widgets` and `Multimedia` modules, built with a compiler ABI-compatible with the rest of the toolchain (an MSVC build of Qt on Windows, not a MinGW one)
+| Requirement | Notes |
+|---|---|
+| Qt6 | `Widgets` and `Multimedia` modules, built with a compiler ABI-compatible with the rest of the toolchain (an MSVC build of Qt on Windows, not a MinGW one) |
 
 Full dependency details, manual build instructions without the helper scripts, and the `-DZKGRAM_UI` option are documented in [`docs/README.md`](docs/README.md).
 
@@ -121,6 +166,10 @@ zkgram is licensed under the [GNU GPL version 3](https://www.gnu.org/licenses/gp
 
 ## Acknowledgments
 
-- [TDLib](https://github.com/tdlib/td), the official Telegram client library this project's transport layer is built on.
-- [CryptoLayer](https://github.com/igmunv/cryptolayer), the original encryption engine this project builds on; zkgram uses a modified version with added Telegram transport and encrypted file transfer support, maintained at [selimann/cryptolayer-modules](https://github.com/selimann/cryptolayer-modules).
-- [Telegram Desktop](https://github.com/telegramdesktop/tdesktop), whose real source and design assets zkgram's interface is deliberately built to match rather than approximate.
+| Project | Role |
+|---|---|
+| [TDLib](https://github.com/tdlib/td) | The official Telegram client library this project's transport layer is built on |
+| [CryptoLayer](https://github.com/igmunv/cryptolayer) | The original encryption engine this project builds on. zkgram uses a modified version with added Telegram transport and encrypted file transfer support, maintained at [selimann/cryptolayer-modules](https://github.com/selimann/cryptolayer-modules) |
+| [selimann](https://github.com/selimann) | Main developer and maintainer of zkgram |
+| [Telegram Desktop](https://github.com/telegramdesktop/tdesktop) | Whose real source and design assets zkgram's interface is deliberately built to match rather than approximate |
+| [Tsettaro](https://github.com/Tsettaro) | Develops the Linux version of zkgram |
