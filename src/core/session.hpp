@@ -113,6 +113,11 @@ public:
 private:
     void wireAndStartConversation(ConversationId chatId);
 
+    // Возвращает переписку, готовую к отправке, ОТПУСТИВ conversationsMutex_
+    // до возврата: вызывать CryptoLayer под этим локом нельзя, см. её
+    // определение в session.cpp (инверсия порядка блокировок с GIL).
+    std::shared_ptr<crypto::CryptoLayer> readyConversation(ConversationId chatId);
+
     std::shared_ptr<UiProvider> uiProvider_;
     std::string dataDir_;
     std::string password_;
@@ -120,7 +125,12 @@ private:
     telegram::TelegramClient telegramClient_;
 
     std::mutex conversationsMutex_;
-    std::map<ConversationId, std::unique_ptr<crypto::CryptoLayer>> conversations_;
+    // shared_ptr, а не unique_ptr: sendText/sendFile/stop обязаны отпустить
+    // conversationsMutex_ ДО обращения к CryptoLayer (там берётся GIL, см.
+    // их комментарии про инверсию блокировок), а значит держат объект уже
+    // без лока - копия shared_ptr гарантирует, что его не уничтожит
+    // параллельный stop() прямо во время вызова.
+    std::map<ConversationId, std::shared_ptr<crypto::CryptoLayer>> conversations_;
     // Populated only once a conversation's onReady callback actually fires
     // (handshake finished). sendText/sendFile check this before touching
     // Python: CryptoLayer's AES key is still None mid handshake, so calling

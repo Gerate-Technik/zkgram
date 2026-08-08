@@ -296,8 +296,7 @@ void Session::wireAndStartConversation(ConversationId chatId) {
     };
 
     auto cryptoLayer =
-        std::make_unique<crypto::CryptoLayer>(dataDir_, password_, std::to_string(chatId), std::move(callbacks));
-    crypto::CryptoLayer* cryptoLayerPtr = cryptoLayer.get();
+        std::make_shared<crypto::CryptoLayer>(dataDir_, password_, std::to_string(chatId), std::move(callbacks));
     {
         std::lock_guard<std::mutex> lock(conversationsMutex_);
         conversations_[chatId] = std::move(cryptoLayer);
@@ -306,10 +305,10 @@ void Session::wireAndStartConversation(ConversationId chatId) {
     // init() blocks (waits on the companion's public key/signature) - see
     // the header comment on initThreads_.
     std::lock_guard<std::mutex> lock(conversationsMutex_);
-    initThreads_[chatId] = std::thread([this, chatId, cryptoLayerPtr] {
+    initThreads_[chatId] = std::thread([this, chatId, cryptoLayer] {
         logDebug("wireAndStartConversation: chatId=" + std::to_string(chatId) + " init() thread starting");
         try {
-            cryptoLayerPtr->init();
+            cryptoLayer->init();
             logDebug("wireAndStartConversation: chatId=" + std::to_string(chatId) + " init() returned normally");
         } catch (const std::exception& e) {
             logDebug("wireAndStartConversation: chatId=" + std::to_string(chatId) + " init() threw: " + e.what());
@@ -318,9 +317,28 @@ void Session::wireAndStartConversation(ConversationId chatId) {
     });
 }
 
-void Session::sendText(ConversationId chatId, const std::string& text) {
+// Достаёт переписку под локом и ОТПУСКАЕТ лок до возврата.
+//
+// Вызывать любой метод crypto::CryptoLayer, держа conversationsMutex_,
+// нельзя: он берёт GIL, а Python, уже держа GIL, вызывает наши колбэки,
+// которые берут этот же мьютекс (registerReceiver/onReady/onDisconnect
+// в wireAndStartConversation). Получается классическая инверсия порядка
+// блокировок - один поток идёт mutex -> GIL, другой GIL -> mutex - и оба
+// встают навсегда. Интерфейс при этом замирает целиком, потому что
+// confirmSignatures/requestCredential ждут GUI-поток через
+// BlockingQueuedConnection, не отпуская GIL.
+std::shared_ptr<crypto::CryptoLayer> Session::readyConversation(ConversationId chatId) {
     std::lock_guard<std::mutex> lock(conversationsMutex_);
     if (readyConversations_.count(chatId) == 0) {
+        return nullptr;
+    }
+    auto it = conversations_.find(chatId);
+    return it == conversations_.end() ? nullptr : it->second;
+}
+
+void Session::sendText(ConversationId chatId, const std::string& text) {
+    auto conversation = readyConversation(chatId);
+    if (conversation == nullptr) {
         // Handshake not finished yet (or never started) - CryptoLayer's AES
         // key is still None at this point, so calling send() would not
         // fail cleanly. The UI already hides the input row until
@@ -329,22 +347,17 @@ void Session::sendText(ConversationId chatId, const std::string& text) {
         uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
         return;
     }
-    auto it = conversations_.find(chatId);
-    if (it != conversations_.end()) {
-        it->second->sendText(text);
-    }
+    conversation->sendText(text);
 }
 
 void Session::sendFile(ConversationId chatId, const std::string& filePath) {
-    std::lock_guard<std::mutex> lock(conversationsMutex_);
-    if (readyConversations_.count(chatId) == 0) {
+    // Лок отпущен до вызова - см. readyConversation().
+    auto conversation = readyConversation(chatId);
+    if (conversation == nullptr) {
         uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
         return;
     }
-    auto it = conversations_.find(chatId);
-    if (it != conversations_.end()) {
-        it->second->sendFile(filePath);
-    }
+    conversation->sendFile(filePath);
 }
 
 void Session::sendPlainText(ConversationId chatId, const std::string& text) {
@@ -369,16 +382,26 @@ void Session::stop() {
     // sendBytes/registerReceiver, see wireAndStartConversation) needs that
     // same mutex, so joining while holding it would deadlock (this thread
     // waiting on join(), that thread waiting on the lock).
+    //
+    // По той же причине CryptoLayer::stop() тоже вызывается без лока: он
+    // уходит в Python и берёт GIL, а держать ради этого conversationsMutex_
+    // означало бы ту же инверсию блокировок, что описана в
+    // readyConversation(). Указатели копируются под локом, вызовы идут после.
     std::vector<std::thread> threadsToJoin;
+    std::vector<std::shared_ptr<crypto::CryptoLayer>> conversationsToStop;
     {
         std::lock_guard<std::mutex> lock(conversationsMutex_);
+        conversationsToStop.reserve(conversations_.size());
         for (auto& [chatId, cryptoLayer] : conversations_) {
-            cryptoLayer->stop();
+            conversationsToStop.push_back(cryptoLayer);
         }
         for (auto& [chatId, thread] : initThreads_) {
             threadsToJoin.push_back(std::move(thread));
         }
         initThreads_.clear();
+    }
+    for (auto& cryptoLayer : conversationsToStop) {
+        cryptoLayer->stop();
     }
     telegramClient_.disconnect();
     for (auto& thread : threadsToJoin) {
