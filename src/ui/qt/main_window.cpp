@@ -211,50 +211,24 @@ QPixmap dotPixmap(int size, const QColor& color) {
 // tiled, mostly-transparent doodle pattern is blended over a solid color
 // or gradient with a blend mode and reduced opacity (see
 // Data::WallPaper's rendering in telegram_fork/tdesktop's
-// data/data_wall_paper.cpp) - approximated here by pre-compositing that
-// same combination into a single tile once, then handing the tile to
-// HistoryCanvas's viewport (see messages_) as a repeating QPalette brush (see
-// where this is called in MainWindow's constructor). A flat
-// background-image: url(...) in QSS could only ever show the pattern
-// pixmap verbatim at full opacity with no blend mode or color layer under
-// it - not achievable in QSS alone, hence doing the compositing here
-// instead. CompositionMode_SoftLight is Qt's equivalent of the CSS
-// soft-light blend mode real tdesktop mentions using for this.
-// Cached, not recomputed per call: this used to be composited once and
-// handed to QPalette::Base on the viewport (autoFillBackground(true)),
-// which QAbstractScrollArea normally paints with automatically before
-// paintEvent runs. In practice it never showed up - MainWindow calls
-// setStyleSheet() on itself later in the constructor (see
-// loadStylesheet()'s call site), and once any ancestor has an active
-// stylesheet, Qt hands background painting for descendant widgets to
-// QStyleSheetStyle instead of the plain palette/autoFillBackground path,
-// even for widgets no selector in style.qss actually targets - so the
-// viewport quietly went transparent and showed whatever was behind it
-// (MainWindow's own #e6ebee) instead of this tile. Painting it explicitly
-// in HistoryCanvas::paintEvent() below sidesteps that entirely, since it
-// no longer depends on which style Qt decides to route autofill through.
-const QPixmap& chatWallpaperTile() {
-    static const QPixmap tile = [] {
-        QPixmap pattern(":/chat_wallpaper.png");
-        if (pattern.isNull()) {
-            return pattern;
-        }
-        QPixmap composited(pattern.size());
-        QPainter painter(&composited);
-        painter.setRenderHint(QPainter::Antialiasing);
-
-        QLinearGradient gradient(0, 0, composited.width(), composited.height());
-        gradient.setColorAt(0.0, QColor("#d5e6f7"));
-        gradient.setColorAt(1.0, QColor("#c3d9ee"));
-        painter.fillRect(composited.rect(), gradient);
-
-        painter.setOpacity(0.35);
-        painter.setCompositionMode(QPainter::CompositionMode_SoftLight);
-        painter.drawPixmap(0, 0, pattern);
-        painter.end();
-        return composited;
-    }();
-    return tile;
+// data/data_wall_paper.cpp). Painted explicitly in
+// HistoryCanvas::paintEvent() below (not via QPalette::Base/
+// autoFillBackground - see git history for why that path silently
+// stopped painting anything at all once MainWindow got a stylesheet).
+//
+// The gradient and the pattern are deliberately NOT pre-composited into
+// one small repeating tile the way an earlier version of this function
+// did: baking a viewport-sized gradient into a single 320x480 tile and
+// then repeating THAT tile meant the gradient itself restarted at every
+// tile boundary, which is a far more visible seam than any texture
+// repeat - a gradient that resets is obvious, a seamless doodle pattern
+// repeating is not. Real tdesktop does not do this either: the gradient
+// covers the whole surface once, only the pattern mask repeats. So this
+// only caches the raw pattern pixmap; the gradient is painted fresh,
+// sized to the actual viewport, on every paint.
+const QPixmap& chatWallpaperPattern() {
+    static const QPixmap pattern = [] { return QPixmap(":/chat_wallpaper.png"); }();
+    return pattern;
 }
 
 // A rounded rectangle path with an independent radius per corner - plain
@@ -672,11 +646,26 @@ protected:
         QPainter painter(viewport());
         painter.setRenderHint(QPainter::Antialiasing);
         // Painted by hand rather than left to QPalette::Base/
-        // autoFillBackground - see chatWallpaperTile()'s own comment for
-        // why that path silently stopped painting anything at all.
-        const QPixmap& wallpaper = chatWallpaperTile();
-        if (!wallpaper.isNull()) {
-            painter.drawTiledPixmap(viewport()->rect(), wallpaper);
+        // autoFillBackground - see chatWallpaperPattern()'s own comment
+        // for why that path silently stopped painting anything at all.
+        //
+        // Gradient first, sized to the actual viewport so it stays one
+        // continuous sweep with no seam, then the doodle pattern tiled
+        // on top with a blend mode - see chatWallpaperPattern()'s comment
+        // for why these two are not baked into a single repeating tile.
+        QRect viewportRect = viewport()->rect();
+        QLinearGradient gradient(0, 0, viewportRect.width(), viewportRect.height());
+        gradient.setColorAt(0.0, QColor("#d5e6f7"));
+        gradient.setColorAt(1.0, QColor("#c3d9ee"));
+        painter.fillRect(viewportRect, gradient);
+
+        const QPixmap& pattern = chatWallpaperPattern();
+        if (!pattern.isNull()) {
+            painter.save();
+            painter.setOpacity(0.35);
+            painter.setCompositionMode(QPainter::CompositionMode_SoftLight);
+            painter.drawTiledPixmap(viewportRect, pattern);
+            painter.restore();
         }
         int scrollY = verticalScrollBar()->value();
         QRect visible = event->rect();
@@ -1708,7 +1697,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     historyCanvas->viewport()->setContextMenuPolicy(Qt::CustomContextMenu);
     // Wallpaper is painted directly in HistoryCanvas::paintEvent() now,
     // not via QPalette::Base/autoFillBackground here - see
-    // chatWallpaperTile()'s comment for why that used to silently no-op.
+    // chatWallpaperPattern()'s comment for why that used to silently no-op.
     messages_ = historyCanvas;
     layout->addWidget(messages_);
 
