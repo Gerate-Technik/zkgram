@@ -223,7 +223,7 @@ cmake -S . -B build-qt -DPYBIND11_FINDPYTHON=ON -DZKGRAM_UI=qt -DCMAKE_PREFIX_PA
 cmake --build build-qt --config Release
 ```
 
-или одной командой (см. §4): `.\build.ps1 -Ui qt -QtPrefix <путь_до_Qt6>`.
+или одной командой (см. §4): `.\build-cmake.ps1 -Ui qt -QtPrefix <путь_до_Qt6>`.
 
 ### Почему не `lib_ui`/`RpWidget` (UI библиотека Telegram Desktop)
 
@@ -269,16 +269,18 @@ TDLib не поставляется как обычный пакет, её ну�
 
 После сборки или установки TDLib укажите её через `CMAKE_PREFIX_PATH` или `Td_DIR` при конфигурации.
 
-### Одной командой (build.ps1)
+### Одной командой (build-cmake.ps1)
 
-`build.ps1` в корне репозитория оборачивает конфигурацию и сборку через `cmake` в одну команду и проверяет, что сборка запущена на Windows.
+`build-cmake.ps1` в корне репозитория оборачивает конфигурацию и сборку через `cmake` в одну команду и проверяет, что сборка запущена на Windows. Это низкоуровневый скрипт: он не ставит TDLib или Qt сам, только собирает сам zkgram против уже установленных зависимостей, путь к ним передаётся параметрами.
 
 ```powershell
-.\build.ps1 -TdPrefix C:\tdlib                                              # консольный UI, Release
-.\build.ps1 -Ui qt -TdPrefix C:\tdlib -QtPrefix C:\Qt\6.9.3\msvc2022_64      # Qt UI
+.\build-cmake.ps1 -TdPrefix C:\tdlib                                              # консольный UI, Release
+.\build-cmake.ps1 -Ui qt -TdPrefix C:\tdlib -QtPrefix C:\Qt\6.9.3\msvc2022_64      # Qt UI
 ```
 
 Параметры: `-Ui console|qt` (по умолчанию `console`), `-Config` (по умолчанию `Release`), `-PythonExe` (путь к нужному `python.exe`), `-TdPrefix` (путь к сборке или установке TDLib), `-QtPrefix` (путь к установке Qt6, нужен только при `-Ui qt`), `-VcpkgBinDir` (нужен только при сборке TDLib с динамической линковкой OpenSSL/zlib, для обычной сборки не требуется), `-Clean` (удалить папку `build` перед конфигурацией). Скрипт не подавляет ошибки `cmake`, он просто оборачивает команды ниже.
+
+Есть ещё `build.ps1` (без `-cmake`) — это отдельный, более высокоуровневый скрипт, который сначала ставит TDLib и Qt6 (если их ещё нет), затем сам вызывает `build-cmake.ps1`, прогоняет `windeployqt` и складывает готовый портативный билд в `dist/`. Он не принимает `-Ui`/`-TdPrefix`/`-QtPrefix` — это параметры именно `build-cmake.ps1`. См. `.\build.ps1 -?` или сам файл.
 
 ### Сборка вручную
 

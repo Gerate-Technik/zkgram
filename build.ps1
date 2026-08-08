@@ -13,7 +13,7 @@ What this does, in order:
      source through vcpkg, which drags in a full ffmpeg build and dozens of
      other dependencies for ~an hour; see TODO.md, "переключился на
      aqtinstall"). Skipped if already installed at -QtDir/-QtVersion.
-  4. Builds zkgram itself (via build.ps1 -Ui qt) against the above.
+  4. Builds zkgram itself (via build-cmake.ps1 -Ui qt) against the above.
   5. Runs windeployqt to place the Qt runtime DLLs next to zkgram.exe.
   6. Copies everything a user needs to run the app - zkgram.exe, the Qt
      DLLs windeployqt placed, and TDLib's OpenSSL/zlib being statically
@@ -24,11 +24,15 @@ What this does, in order:
      separate, much larger undertaking not done here).
 
 Usage:
-  .\build-all.ps1
-  .\build-all.ps1 -OutDir D:\zkgram-dist
-  .\build-all.ps1 -Clean          # wipe and rebuild TDLib + zkgram from scratch
-  .\build-all.ps1 -SkipTdlib      # already have TDLib installed, just rebuild zkgram+Qt step
-  .\build-all.ps1 -SkipQt         # already have Qt installed, just rebuild zkgram
+  .\build.ps1
+  .\build.ps1 -OutDir D:\zkgram-dist
+  .\build.ps1 -Clean          # wipe and rebuild TDLib + zkgram from scratch
+  .\build.ps1 -SkipTdlib      # already have TDLib installed, just rebuild zkgram+Qt step
+  .\build.ps1 -SkipQt         # already have Qt installed, just rebuild zkgram
+
+For just the CMake configure+build step on its own (no TDLib/Qt install,
+no windeployqt, no dist/ packaging), use build-cmake.ps1 directly - this
+script's own step 4 is nothing more than a call to it.
 
 Re-running is safe and incremental: each step is skipped if its output
 already exists (TDLib install, Qt install), except the zkgram build itself
@@ -158,7 +162,7 @@ if (-not (Test-Path "$qtInstallPath\bin\windeployqt.exe")) {
 Write-Host ""
 Write-Host "=== 4. Building zkgram (Qt UI) ===" -ForegroundColor Cyan
 
-& "$PSScriptRoot\build.ps1" -Ui qt -TdPrefix "$TdInstallDir;$vcpkgInstalled" -QtPrefix $qtInstallPath
+& "$PSScriptRoot\build-cmake.ps1" -Ui qt -TdPrefix "$TdInstallDir;$vcpkgInstalled" -QtPrefix $qtInstallPath
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $exePath = Join-Path $PSScriptRoot "build\Release\zkgram.exe"
