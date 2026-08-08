@@ -291,6 +291,10 @@ private:
     void sendFilePath(const QString& filePath, const QString& label);
     void setControlsEnabled(bool enabled);
     void updateConversationControlsVisibility();
+
+    // Уйдёт ли следующее сообщение в этом чате шифротекстом. Требует и
+    // активной сессии, и включённого режима Secret - см. определение.
+    bool sendsEncrypted(qlonglong chatId) const;
     // Updates secretModeToggle_'s icon/tooltip/enabled state for
     // currentChatId_ - called on chat switch and whenever secretModeOn_/
     // hasSecretContent_ change for it. Does not touch secretModeOn_

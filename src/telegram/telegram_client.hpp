@@ -167,8 +167,26 @@ public:
     // produces a text-safe ciphertext representation before this is called).
     void sendBytes(ChatId chatId, const Bytes& data);
 
-    // Sends an already-encrypted local file as a document to chatId.
+    // Sends ordinary, unencrypted text to chatId - the "Normal mode" half
+    // of the composer (see core::Session::sendPlainText). Deliberately a
+    // separate entry point from sendBytes() above rather than the same one:
+    // only sendBytes() tags its payload as zkgram ciphertext, and the
+    // receiving side routes by that tag. Sending plain text through
+    // sendBytes() would tag it as ciphertext and the peer would hand it to
+    // CryptoLayer instead of showing it.
+
+    void sendPlainText(ChatId chatId, const std::string& text);
+
+    // Sends an already-encrypted local file as a document to chatId - tagged
+    // as zkgram ciphertext in the message caption, the same envelope idea
+    // sendBytes() uses for text (see kCipherPrefix in the .cpp).
     void sendFile(ChatId chatId, const std::string& filePath);
+
+    // Sends an ordinary, unencrypted local file - untagged, so the peer
+    // shows it instead of handing it to CryptoLayer. Separate entry point
+    // from sendFile() for the same reason sendPlainText() is separate from
+    // sendBytes().
+    void sendPlainFile(ChatId chatId, const std::string& filePath);
 
     // One process-wide callback each (not per-chat) - the chat id comes
     // through as the first callback argument, dispatching to the right

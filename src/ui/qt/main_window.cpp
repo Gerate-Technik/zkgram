@@ -220,24 +220,40 @@ QPixmap dotPixmap(int size, const QColor& color) {
 // it - not achievable in QSS alone, hence doing the compositing here
 // instead. CompositionMode_SoftLight is Qt's equivalent of the CSS
 // soft-light blend mode real tdesktop mentions using for this.
-QPixmap chatWallpaperTile() {
-    QPixmap pattern(":/chat_wallpaper.png");
-    if (pattern.isNull()) {
-        return pattern;
-    }
-    QPixmap tile(pattern.size());
-    QPainter painter(&tile);
-    painter.setRenderHint(QPainter::Antialiasing);
+// Cached, not recomputed per call: this used to be composited once and
+// handed to QPalette::Base on the viewport (autoFillBackground(true)),
+// which QAbstractScrollArea normally paints with automatically before
+// paintEvent runs. In practice it never showed up - MainWindow calls
+// setStyleSheet() on itself later in the constructor (see
+// loadStylesheet()'s call site), and once any ancestor has an active
+// stylesheet, Qt hands background painting for descendant widgets to
+// QStyleSheetStyle instead of the plain palette/autoFillBackground path,
+// even for widgets no selector in style.qss actually targets - so the
+// viewport quietly went transparent and showed whatever was behind it
+// (MainWindow's own #e6ebee) instead of this tile. Painting it explicitly
+// in HistoryCanvas::paintEvent() below sidesteps that entirely, since it
+// no longer depends on which style Qt decides to route autofill through.
+const QPixmap& chatWallpaperTile() {
+    static const QPixmap tile = [] {
+        QPixmap pattern(":/chat_wallpaper.png");
+        if (pattern.isNull()) {
+            return pattern;
+        }
+        QPixmap composited(pattern.size());
+        QPainter painter(&composited);
+        painter.setRenderHint(QPainter::Antialiasing);
 
-    QLinearGradient gradient(0, 0, tile.width(), tile.height());
-    gradient.setColorAt(0.0, QColor("#d5e6f7"));
-    gradient.setColorAt(1.0, QColor("#c3d9ee"));
-    painter.fillRect(tile.rect(), gradient);
+        QLinearGradient gradient(0, 0, composited.width(), composited.height());
+        gradient.setColorAt(0.0, QColor("#d5e6f7"));
+        gradient.setColorAt(1.0, QColor("#c3d9ee"));
+        painter.fillRect(composited.rect(), gradient);
 
-    painter.setOpacity(0.35);
-    painter.setCompositionMode(QPainter::CompositionMode_SoftLight);
-    painter.drawPixmap(0, 0, pattern);
-    painter.end();
+        painter.setOpacity(0.35);
+        painter.setCompositionMode(QPainter::CompositionMode_SoftLight);
+        painter.drawPixmap(0, 0, pattern);
+        painter.end();
+        return composited;
+    }();
     return tile;
 }
 
@@ -655,6 +671,13 @@ protected:
     void paintEvent(QPaintEvent* event) override {
         QPainter painter(viewport());
         painter.setRenderHint(QPainter::Antialiasing);
+        // Painted by hand rather than left to QPalette::Base/
+        // autoFillBackground - see chatWallpaperTile()'s own comment for
+        // why that path silently stopped painting anything at all.
+        const QPixmap& wallpaper = chatWallpaperTile();
+        if (!wallpaper.isNull()) {
+            painter.drawTiledPixmap(viewport()->rect(), wallpaper);
+        }
         int scrollY = verticalScrollBar()->value();
         QRect visible = event->rect();
         for (int i = 0; i < items_.size(); ++i) {
@@ -1683,14 +1706,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // reliably in viewport-local coordinates, matching what
     // HistoryCanvas::itemAt() expects.
     historyCanvas->viewport()->setContextMenuPolicy(Qt::CustomContextMenu);
-    // See chatWallpaperTile() - QPalette::Base is what a
-    // QAbstractScrollArea's viewport actually paints its background with.
-    {
-        QPalette wallpaperPalette = historyCanvas->viewport()->palette();
-        wallpaperPalette.setBrush(QPalette::Base, QBrush(chatWallpaperTile()));
-        historyCanvas->viewport()->setPalette(wallpaperPalette);
-        historyCanvas->viewport()->setAutoFillBackground(true);
-    }
+    // Wallpaper is painted directly in HistoryCanvas::paintEvent() now,
+    // not via QPalette::Base/autoFillBackground here - see
+    // chatWallpaperTile()'s comment for why that used to silently no-op.
     messages_ = historyCanvas;
     layout->addWidget(messages_);
 
@@ -1944,33 +1962,59 @@ void MainWindow::setControlsEnabled(bool enabled) {
     sendFileButton_->setEnabled(enabled);
 }
 
+// Единственный источник правды о том, ЗАШИФРУЕТСЯ ли то, что пользователь
+// сейчас отправит в этом чате. Раньше отправка смотрела только на
+// conversationActive_, то есть на факт существования сессии, и переключение
+// в Normal было чисто косметическим: индикатор краснел, история пряталась, а
+// в Telegram всё равно уходил шифротекст, и собеседник без zkgram видел
+// набор бессвязных слов (WordCoder). Для приложения, весь смысл которого в
+// шифровании, врать в эту сторону нельзя ни в одну из сторон, поэтому режим
+// отправки и режим отображения теперь определяет одно и то же значение.
+bool MainWindow::sendsEncrypted(qlonglong chatId) const {
+    return conversationActive_.value(chatId, false) && secretModeOn_.value(chatId, false);
+}
+
 void MainWindow::updateConversationControlsVisibility() {
     bool hasSelection = currentChatId_ != 0;
     bool isActive = hasSelection && conversationActive_.value(currentChatId_, false);
     bool isReady = hasSelection && conversationReady_.value(currentChatId_, false);
     bool isChannel = hasSelection && conversationIsChannel_.value(currentChatId_, false);
+    bool encrypted = hasSelection && sendsEncrypted(currentChatId_);
+    // Предупреждение "Not encrypted" висит ровно тогда, когда следующее
+    // сообщение действительно уйдёт открытым текстом - в том числе когда
+    // сессия есть, но пользователь переключился в Normal. Раньше условием
+    // было отсутствие сессии, и в этом случае предупреждение пропадало,
+    // хотя писать открытым текстом было по-прежнему можно.
+    //
     // Encryption is a 1:1 protocol between two CryptoLayer nodes - a
     // channel's one-to-many audience cannot use it, so the bar never
     // appears there regardless of isActive.
-    writeRestrictionBar_->setVisible(hasSelection && !isActive && !isChannel);
+    writeRestrictionBar_->setVisible(hasSelection && !encrypted && !isChannel);
+    // Кнопку "Start encrypted session" показываем только когда сессии ещё
+    // нет: при активной сессии в режиме Normal предупреждение уместно, а
+    // предлагать начать уже начатое - нет, вернуться в шифрованный режим
+    // нужно переключателем в шапке.
+    startEncryptionButton_->setVisible(!isActive);
     // A chat with no encrypted session at all can still be written to
     // directly, unencrypted, straight to Telegram - the same chats
     // maybeLoadPlainHistory() already reads as plain content instead of
     // ciphertext (a contact not running zkgram, a group, a channel);
     // without this such a chat could be read but never actually replied
-    // to unless the other side also ran zkgram. Once isActive (handshake
-    // started), this reverts to hidden until isReady - CryptoLayer's AES
-    // key is still None mid handshake, sending before that crashes it
-    // instead of failing gracefully, same as before.
-    bool canSendPlain = hasSelection && !isActive && !isChannel;
-    bool showInput = isReady || canSendPlain;
+    // to unless the other side also ran zkgram.
+    //
+    // Требование "сначала дождись isReady" относится только к шифрованной
+    // отправке: AES-ключ CryptoLayer до конца рукопожатия ещё None, и
+    // send() там не падает чисто. Открытая отправка от рукопожатия не
+    // зависит вообще, поэтому в режиме Normal поле доступно сразу.
+    bool showInput = encrypted ? isReady : !isChannel;
+    showInput = showInput && hasSelection;
     input_->setVisible(showInput);
     sendButton_->setVisible(showInput);
     sendFileButton_->setVisible(showInput);
     setControlsEnabled(showInput);
     // plainSendWarning_ is shown/hidden as part of writeRestrictionBar_
-    // as a whole above - same canSendPlain condition, no need to also
-    // toggle it individually.
+    // as a whole above - same condition, no need to also toggle it
+    // individually.
 }
 
 void MainWindow::onSecretModeToggleClicked() {
@@ -1981,10 +2025,18 @@ void MainWindow::onSecretModeToggleClicked() {
     secretModeOn_[currentChatId_] = !wasOn;
     renderCurrentConversation();
     updateSecretModeIndicator();
+    // Переключатель теперь меняет и режим отправки, поэтому предупреждение
+    // "Not encrypted" и доступность поля ввода надо пересчитать сразу же,
+    // а не оставлять до следующей смены чата.
+    updateConversationControlsVisibility();
 }
 
 void MainWindow::updateSecretModeIndicator() {
-    if (currentChatId_ == 0 || !hasSecretContent_.contains(currentChatId_)) {
+    // Показываем и при активной сессии без секретного содержимого: раз
+    // переключатель управляет режимом отправки, спрятать его означало бы
+    // запереть пользователя в текущем режиме без возможности вернуться.
+    if (currentChatId_ == 0 ||
+        (!hasSecretContent_.contains(currentChatId_) && !conversationActive_.value(currentChatId_, false))) {
         // Nothing secret ever happened in this chat - no toggle to show,
         // matches the write-restriction bar/plain-only composer this
         // chat already has (see updateConversationControlsVisibility()).
@@ -2000,9 +2052,15 @@ void MainWindow::updateSecretModeIndicator() {
     // RippleButton/QPushButton chrome.
     secretModeToggle_->setStyleSheet(on ? "background-color: #40a7e3;" : "background-color: #e41e3f;");
     secretModeToggle_->setIcon(glyphIcon(Glyph::Lock, Qt::white));
-    secretModeToggle_->setToolTip(on ? "Secret mode: showing encrypted and plain messages. Click to hide encrypted "
-                                        "messages again."
-                                      : "Normal mode: encrypted messages are hidden. Click to reveal them.");
+    // Текст описывает оба следствия режима - и что видно, и как уйдёт
+    // следующее сообщение. Прежняя формулировка говорила только про
+    // видимость, из-за чего "Normal" читался как безопасный, хотя отправка
+    // при этом оставалась шифрованной.
+    secretModeToggle_->setToolTip(
+        on ? "Secret mode: messages you send are encrypted, and encrypted history is shown. Click to switch to plain "
+              "Telegram messages."
+           : "Normal mode: messages you send go to Telegram unencrypted, and encrypted history is hidden. Click to "
+              "switch back to encrypted.");
     secretModeToggle_->show();
 }
 
@@ -2506,11 +2564,12 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
             updateSecretModeIndicator();
         }
     }
-    // Only actually drawn if this chat is the one on screen AND (it is
-    // not secret, or secret mode is currently toggled on for it) - see
-    // secretModeOn_'s own comment. Still stored above either way:
-    // toggling secret mode on afterwards must show it without a refetch.
-    bool visible = chatId == currentChatId_ && (!isSecret || secretModeOn_.value(chatId, false));
+    // Рисуется, только если этот чат на экране И режим сообщения совпадает
+    // с текущим режимом просмотра - см. фильтр в renderCurrentConversation()
+    // и комментарий там же о том, почему разделение строгое. Сохраняется
+    // выше в любом случае: переключение режима должно показать накопленное
+    // без повторной загрузки.
+    bool visible = chatId == currentChatId_ && (isSecret == secretModeOn_.value(chatId, false));
     if (visible) {
         // HistoryCanvas::appendItem() retracts the previous bubble's tail
         // in place if this one attaches to it, and lays out and paints
@@ -2582,19 +2641,27 @@ void MainWindow::renderCurrentConversation() {
 
     // The one place secretModeOn_ actually gets enforced for a full
     // rebuild (appendMessage()'s own single-item path enforces it
-    // separately, see there) - a secret message is included only if
-    // secret mode is currently toggled on for this chat, never based on
-    // whether a session happens to be active/ready. Filtered into its
-    // own vector first, then the existing attached/showTail two-pass
-    // runs over *that*, not the unfiltered list - grouping must only
-    // ever look at what is actually about to be drawn, or a hidden
-    // secret message sitting between two plain ones would wrongly break
-    // (or wrongly preserve) their attachment.
+    // separately, see there) - never based on whether a session happens
+    // to be active/ready.
+    //
+    // Разделение строгое, а не «публичное видно всегда, защищённое
+    // добавляется сверху»: в защищённом режиме показывается только
+    // защищённое, в обычном - только публичное. Смешивать нельзя, потому
+    // что для пользователя это два разных канала с разными гарантиями, и
+    // соседние пузырьки без явной пометки читались бы как одна переписка -
+    // из открытого сообщения в защищённой ленте легко сделать неверный
+    // вывод, что оно тоже было зашифровано.
+    //
+    // Filtered into its own vector first, then the existing
+    // attached/showTail two-pass runs over *that*, not the unfiltered
+    // list - grouping must only ever look at what is actually about to be
+    // drawn, or a hidden message sitting between two shown ones would
+    // wrongly break (or wrongly preserve) their attachment.
     bool secretVisible = secretModeOn_.value(currentChatId_, false);
     QVector<StoredMessage> conversation;
     conversation.reserve(stored.size());
     for (const StoredMessage& message : stored) {
-        if (!message.isSecret || secretVisible) {
+        if (message.isSecret == secretVisible) {
             conversation.push_back(message);
         }
     }
@@ -2824,7 +2891,10 @@ void MainWindow::onSendClicked() {
     // updateConversationControlsVisibility()/Session::sendPlainText()) -
     // the only alternative used to be no way to send anything at all
     // until the other side also started running zkgram.
-    bool isActive = conversationActive_.value(currentChatId_, false);
+    // Не conversationActive_, а sendsEncrypted(): наличие сессии само по
+    // себе больше не означает, что писать нужно шифротекстом - решает
+    // переключатель Secret/Normal в шапке чата.
+    bool isActive = sendsEncrypted(currentChatId_);
     try {
         if (isActive) {
             session_->sendText(currentChatId_, text.toStdString());
@@ -2847,7 +2917,8 @@ void MainWindow::sendFilePath(const QString& filePath, const QString& label) {
     if (session_ == nullptr || currentChatId_ == 0) {
         return;
     }
-    bool isActive = conversationActive_.value(currentChatId_, false);
+    // Тот же критерий, что и у текста - см. onSendClicked().
+    bool isActive = sendsEncrypted(currentChatId_);
     try {
         if (isActive) {
             session_->sendFile(currentChatId_, filePath.toStdString());

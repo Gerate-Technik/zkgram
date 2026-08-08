@@ -80,20 +80,13 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
                 onFile = it->second;
             }
         }
+        // Сюда транспорт присылает только помеченные шифрованными вложения
+        // (см. kCipherPrefix), поэтому запасного пути "а вдруг это обычный
+        // файл" здесь больше нет: обычные приходят через
+        // onPlainMessageReceived, как и обычный текст.
         if (onFile) {
             onFile(filePath);
-            return;
         }
-        // No encrypted conversation for this chat, so the file was never
-        // CryptoLayer output - it is an ordinary Telegram attachment. It
-        // goes out as a plain message rather than through onFileReceived so
-        // that it lands under the UI's rules for live plain content (see
-        // onPlainMessageReceived below), the same as plain text does; a
-        // live attachment has no message id here, only the downloaded path.
-        PlainMessage plain;
-        plain.text = "File: " + filePath;
-        plain.photoPath = filePath;
-        uiProvider_->onPlainMessageReceived(chatId, plain);
     });
     // The plain-content half of onBytesReceived above: a chat that has no
     // CryptoLayer session has nothing to decrypt, and its live messages used
@@ -101,15 +94,15 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
     // was never registered), which is why a message arriving in an open
     // plain chat only showed up after reopening it and refetching history.
     telegramClient_.onPlainMessageReceived([this](telegram::ChatId chatId, const telegram::PlainMessage& message) {
-        {
-            std::lock_guard<std::mutex> lock(conversationsMutex_);
-            if (conversationOnBytes_.count(chatId) != 0) {
-                // Encrypted chat: the bytes path above already took this
-                // message, and its readable form is whatever CryptoLayer
-                // decrypts it into, not the ciphertext sitting in message.text.
-                return;
-            }
-        }
+        // Раньше здесь стояла отбраковка "если в чате есть сессия - выбросить",
+        // потому что транспорт отдавал каждое входящее и как байты, и как
+        // открытый текст, а выбрать мог только этот слой, и только на весь чат
+        // сразу. Из-за этого в чате с активной сессией открытые сообщения
+        // собеседника не показывались вообще.
+        //
+        // Теперь маршрутизация идёт по маркеру на самом сообщении
+        // (kCipherPrefix, см. telegram_client.cpp): сюда попадает только то,
+        // что шифротекстом не является, независимо от наличия сессии.
         PlainMessage plain;
         plain.id = message.id;
         plain.isOutgoing = message.isOutgoing;
@@ -299,11 +292,19 @@ void Session::wireAndStartConversation(ConversationId chatId) {
         std::make_shared<crypto::CryptoLayer>(dataDir_, password_, std::to_string(chatId), std::move(callbacks));
     {
         std::lock_guard<std::mutex> lock(conversationsMutex_);
-        conversations_[chatId] = std::move(cryptoLayer);
+        // Копия, а не std::move: этот же shared_ptr захватывает лямбда
+        // потока ниже. После перемещения локальный указатель стал бы
+        // пустым, и поток разыменовал бы nullptr - сегфолт ровно в момент
+        // нажатия "Start encrypted session".
+        conversations_[chatId] = cryptoLayer;
     }
 
     // init() blocks (waits on the companion's public key/signature) - see
     // the header comment on initThreads_.
+    //
+    // Поток владеет своей копией shared_ptr: init() работает долго, и
+    // держать сырой указатель на объект, который параллельный stop() может
+    // убрать из conversations_, было бы гонкой на уничтожении.
     std::lock_guard<std::mutex> lock(conversationsMutex_);
     initThreads_[chatId] = std::thread([this, chatId, cryptoLayer] {
         logDebug("wireAndStartConversation: chatId=" + std::to_string(chatId) + " init() thread starting");
@@ -361,11 +362,17 @@ void Session::sendFile(ConversationId chatId, const std::string& filePath) {
 }
 
 void Session::sendPlainText(ConversationId chatId, const std::string& text) {
-    telegramClient_.sendBytes(chatId, telegram::Bytes(text.begin(), text.end()));
+    // sendPlainText, а не sendBytes: последний помечает содержимое как
+    // шифротекст zkgram, и получатель отдал бы это в CryptoLayer вместо
+    // показа пользователю - см. kCipherPrefix в telegram_client.cpp.
+    telegramClient_.sendPlainText(chatId, text);
 }
 
 void Session::sendPlainFile(ConversationId chatId, const std::string& filePath) {
-    telegramClient_.sendFile(chatId, filePath);
+    // sendPlainFile, а не sendFile: последний помечает вложение как
+    // шифротекст zkgram, и получатель отдал бы его в CryptoLayer вместо
+    // показа - см. kCipherPrefix в telegram_client.cpp.
+    telegramClient_.sendPlainFile(chatId, filePath);
 }
 
 std::vector<PlainMessage> Session::loadCachedHistory(ConversationId chatId) const {

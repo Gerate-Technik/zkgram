@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -122,6 +123,53 @@ bool looksLikeImagePath(const std::string& filePath) {
 // is actually a zkgram ciphertext blob); everything else just names the
 // kind, matching how a normal Telegram client's chat list shows "Photo"/
 // "Document" instead of trying to render non-text content inline.
+// Служебные конверты zkgram: проба присутствия и шифротекст CryptoLayer.
+// Все начинаются с U+200B (zero width space), поэтому в обычной переписке
+// не встречаются.
+//
+// Маркер шифротекста нужен, чтобы получатель мог отличить наш шифротекст
+// от обычного сообщения. Без него приходилось выбирать одно из двух на весь
+// чат сразу: core::Session отдавал входящее либо в CryptoLayer, либо в UI,
+// по признаку "есть ли в этом чате сессия" - и в чате с активной сессией
+// открытые сообщения собеседника пропадали, их забирал ingester CryptoLayer,
+// для которого они мусор.
+//
+// Это конверт транспортного уровня, а не знание о крипто: src/telegram
+// по-прежнему не знает, что внутри байт, только то, что это его собственный
+// протокольный конверт - ровно как с пробами. Скрытности маркер не убавляет:
+// WordCoder делает шифротекст узнаваемым и так, а факт использования zkgram
+// уже виден по пробам.
+constexpr const char* kProbePingPrefix = "\xE2\x80\x8Bzkgram-probe-ping";
+constexpr const char* kProbePongPrefix = "\xE2\x80\x8Bzkgram-probe-pong";
+constexpr const char* kCipherPrefix = "\xE2\x80\x8Bzkgram-e2e:";
+
+bool startsWith(const std::string& text, const char* prefix) {
+    return text.rfind(prefix, 0) == 0;
+}
+
+// Всё, что являетсявнутренним сообщением протокола, а не содержимым для
+// пользователя: показывать такое в истории или в превью чата нельзя.
+// Подпись (caption) вложения - то же место для конверта, что тело у
+// текстового сообщения. Имя файла для этого не годится: CryptoLayer
+// восстанавливает по нему оригинальное имя, и дописывать туда служебную
+// метку значило бы портить пользовательские данные.
+std::string captionOf(const td_api::MessageContent& content) {
+    if (content.get_id() == td_api::messageDocument::ID) {
+        const auto& document = static_cast<const td_api::messageDocument&>(content);
+        return document.caption_ != nullptr ? document.caption_->text_ : "";
+    }
+    if (content.get_id() == td_api::messagePhoto::ID) {
+        const auto& photo = static_cast<const td_api::messagePhoto&>(content);
+        return photo.caption_ != nullptr ? photo.caption_->text_ : "";
+    }
+    return "";
+}
+
+bool isZkgramEnvelope(const std::string& text) {
+    return startsWith(text, kProbePingPrefix) || startsWith(text, kProbePongPrefix) ||
+           startsWith(text, kCipherPrefix);
+}
+
 std::string previewFor(const td_api::message& message) {
     if (message.content_ == nullptr) {
         return "";
@@ -129,7 +177,10 @@ std::string previewFor(const td_api::message& message) {
     switch (message.content_->get_id()) {
         case td_api::messageText::ID: {
             auto* content = static_cast<const td_api::messageText*>(message.content_.get());
-            return content->text_ != nullptr ? content->text_->text_ : "";
+            if (content->text_ == nullptr || isZkgramEnvelope(content->text_->text_)) {
+                return "";
+            }
+            return content->text_->text_;
         }
         case td_api::messageDocument::ID:
             return "Document";
@@ -799,6 +850,17 @@ struct TelegramClient::Impl {
                     if (messagePtr == nullptr) {
                         continue;
                     }
+                    // Служебные сообщения протокола (пробы, шифротекст) - не
+                    // содержимое для пользователя. previewFor() уже отдаёт по
+                    // ним пустую строку, но такое сообщение всё равно попало бы
+                    // в историю пустым пузырём, поэтому пропускаем целиком.
+                    if (messagePtr->content_ != nullptr &&
+                        messagePtr->content_->get_id() == td_api::messageText::ID) {
+                        auto* text = static_cast<td_api::messageText*>(messagePtr->content_.get());
+                        if (text->text_ != nullptr && isZkgramEnvelope(text->text_->text_)) {
+                            continue;
+                        }
+                    }
                     PlainMessage plain;
                     plain.id = messagePtr->id_;
                     plain.isOutgoing = messagePtr->is_outgoing_;
@@ -1004,12 +1066,8 @@ struct TelegramClient::Impl {
     // MSVC's handling of a literal non-ASCII character in a narrow string
     // literal depends on the source/execution charset, which is not worth
     // relying on for a single invisible character.
-    static constexpr const char* kProbePingPrefix = "\xE2\x80\x8Bzkgram-probe-ping";
-    static constexpr const char* kProbePongPrefix = "\xE2\x80\x8Bzkgram-probe-pong";
-
-    static bool startsWith(const std::string& text, const char* prefix) {
-        return text.rfind(prefix, 0) == 0;
-    }
+    // Константы и startsWith() живут в анонимном namespace выше - ими
+    // пользуется ещё и previewFor(), до объявления этого класса.
 
     // Returns true if `text` was a probe ping/pong and has been fully
     // handled here (auto-reply sent, or a waiting probeZkgramPresence()
@@ -1083,8 +1141,17 @@ struct TelegramClient::Impl {
                 if (content->text_ == nullptr || handlePotentialProbe(chatId, content->text_->text_)) {
                     break;
                 }
-                if (onBytes_) {
-                    onBytes_(chatId, stringToBytes(content->text_->text_));
+                // Маркер решает, чем это сообщение является, вместо прежней
+                // схемы "отдаём и туда, и туда, а core::Session выберет по
+                // наличию сессии в чате". Та схема теряла открытые сообщения
+                // в чате с активной сессией: их забирал ingester CryptoLayer,
+                // а открытая копия отбрасывалась как заведомо лишняя.
+                const std::string& incoming = content->text_->text_;
+                if (startsWith(incoming, kCipherPrefix)) {
+                    if (onBytes_) {
+                        onBytes_(chatId, stringToBytes(incoming.substr(std::strlen(kCipherPrefix))));
+                    }
+                    break;  // шифротекст показывать как текст нельзя ни при каких условиях
                 }
                 // The same message a second time, but as plain readable
                 // Telegram content instead of bytes to decrypt. Which of the
@@ -1118,7 +1185,8 @@ struct TelegramClient::Impl {
             case td_api::messageDocument::ID: {
                 auto* content = static_cast<td_api::messageDocument*>(message.content_.get());
                 if (content->document_ != nullptr && content->document_->document_ != nullptr) {
-                    downloadIncomingFile(chatId, content->document_->document_->id_);
+                    downloadIncomingFile(chatId, content->document_->document_->id_,
+                                          startsWith(captionOf(*message.content_), kCipherPrefix));
                 }
                 break;
             }
@@ -1130,7 +1198,8 @@ struct TelegramClient::Impl {
                 if (content->photo_ != nullptr && !content->photo_->sizes_.empty()) {
                     auto& largest = content->photo_->sizes_.back();
                     if (largest->photo_ != nullptr) {
-                        downloadIncomingFile(chatId, largest->photo_->id_);
+                        downloadIncomingFile(chatId, largest->photo_->id_,
+                                              startsWith(captionOf(*message.content_), kCipherPrefix));
                     }
                 }
                 break;
@@ -1140,10 +1209,10 @@ struct TelegramClient::Impl {
         }
     }
 
-    void downloadIncomingFile(ChatId chatId, std::int32_t fileId) {
+    void downloadIncomingFile(ChatId chatId, std::int32_t fileId, bool encrypted) {
         {
             std::lock_guard<std::mutex> lock(pendingFilesMutex_);
-            pendingFiles_[fileId] = chatId;
+            pendingFiles_[fileId] = PendingFile{chatId, encrypted};
         }
         // sendWithHandler (a real request_id) and priority 32 (max), not
         // sendNotify (request_id 0) at priority 1 (min) - the exact same
@@ -1234,25 +1303,37 @@ struct TelegramClient::Impl {
             }
         }
 
-        ChatId chatId = 0;
+        PendingFile pending;
         bool isPending = false;
         {
             std::lock_guard<std::mutex> lock(pendingFilesMutex_);
             auto it = pendingFiles_.find(file.id_);
             isPending = it != pendingFiles_.end();
             if (isPending) {
-                chatId = it->second;
+                pending = it->second;
+                pendingFiles_.erase(it);
             }
         }
         if (!isPending) {
             return;
         }
-        {
-            std::lock_guard<std::mutex> lock(pendingFilesMutex_);
-            pendingFiles_.erase(file.id_);
+        // Ровно та же развилка, что и для текста: решает конверт конкретного
+        // сообщения, а не наличие сессии в чате. Иначе обычное вложение,
+        // присланное в чат с активной сессией, уходило в CryptoLayer и у
+        // получателя не показывалось вовсе.
+        if (pending.encrypted) {
+            if (onFile_) {
+                onFile_(pending.chatId, file.local_->path_);
+            }
+            return;
         }
-        if (onFile_) {
-            onFile_(chatId, file.local_->path_);
+        if (onPlainMessage_) {
+            // У живого вложения нет id сообщения на этом этапе, только путь -
+            // так же, как раньше это делал запасной путь в core::Session.
+            PlainMessage plain;
+            plain.text = "File: " + file.local_->path_;
+            plain.photoPath = file.local_->path_;
+            onPlainMessage_(pending.chatId, plain);
         }
     }
 
@@ -1282,11 +1363,21 @@ struct TelegramClient::Impl {
         sendMessageContent(chatId, std::move(content));
     }
 
+    // Только для шифротекста CryptoLayer - помечается маркером, чтобы
+    // получатель отправил его в расшифровку, а не показал как текст.
+    // Открытые сообщения идут через sendPlainText() без маркера.
     void sendBytes(ChatId chatId, const Bytes& data) {
-        sendPlainText(chatId, std::string(data.begin(), data.end()));
+        sendPlainText(chatId, std::string(kCipherPrefix) + std::string(data.begin(), data.end()));
     }
 
-    void sendFile(ChatId chatId, const std::string& filePath) {
+    // caption с маркером ставится только на шифрованные вложения - см.
+    // kCipherPrefix. Открытые идут через sendPlainFile() без него.
+    static td_api::object_ptr<td_api::formattedText> cipherCaption() {
+        return td_api::make_object<td_api::formattedText>(std::string(kCipherPrefix),
+                                                           std::vector<td_api::object_ptr<td_api::textEntity>>());
+    }
+
+    void sendFile(ChatId chatId, const std::string& filePath, bool encrypted) {
         if (looksLikeImagePath(filePath)) {
             // inputMessagePhoto gives an inline preview on both ends instead
             // of a generic document icon; width_/height_ are left at 0
@@ -1299,6 +1390,9 @@ struct TelegramClient::Impl {
             photo->height_ = 0;
             auto content = td_api::make_object<td_api::inputMessagePhoto>();
             content->photo_ = std::move(photo);
+            if (encrypted) {
+                content->caption_ = cipherCaption();
+            }
             sendMessageContent(chatId, std::move(content));
             return;
         }
@@ -1309,6 +1403,9 @@ struct TelegramClient::Impl {
         document->disable_content_type_detection_ = true;
         auto content = td_api::make_object<td_api::inputMessageDocument>();
         content->document_ = std::move(document);
+        if (encrypted) {
+            content->caption_ = cipherCaption();
+        }
         sendMessageContent(chatId, std::move(content));
     }
 
@@ -1330,7 +1427,15 @@ struct TelegramClient::Impl {
     std::map<std::uint64_t, Handler> handlers_;
 
     std::mutex pendingFilesMutex_;
-    std::map<std::int32_t, ChatId> pendingFiles_;
+    // Не просто ChatId: к моменту, когда докачка завершится, самого
+    // сообщения уже нет под рукой, а решать, куда отдать файл - в
+    // CryptoLayer или пользователю - надо по его конверту. Признак
+    // снимается с подписи при получении сообщения и доносится сюда.
+    struct PendingFile {
+        ChatId chatId = 0;
+        bool encrypted = false;
+    };
+    std::map<std::int32_t, PendingFile> pendingFiles_;
 
     struct PendingHistoryPhoto {
         ChatId chatId = 0;
@@ -1411,8 +1516,16 @@ void TelegramClient::sendBytes(ChatId chatId, const Bytes& data) {
     impl_->sendBytes(chatId, data);
 }
 
+void TelegramClient::sendPlainText(ChatId chatId, const std::string& text) {
+    impl_->sendPlainText(chatId, text);
+}
+
 void TelegramClient::sendFile(ChatId chatId, const std::string& filePath) {
-    impl_->sendFile(chatId, filePath);
+    impl_->sendFile(chatId, filePath, /*encrypted=*/true);
+}
+
+void TelegramClient::sendPlainFile(ChatId chatId, const std::string& filePath) {
+    impl_->sendFile(chatId, filePath, /*encrypted=*/false);
 }
 
 void TelegramClient::onBytesReceived(std::function<void(ChatId, const Bytes&)> callback) {
