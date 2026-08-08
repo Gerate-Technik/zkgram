@@ -52,13 +52,13 @@ zkgram closes that gap without asking you to leave Telegram, create a new accoun
 - Because the encryption key is negotiated fresh on every new session (forward secrecy), a device compromised after the fact cannot retroactively decrypt what it captured earlier, and closing and reopening a session does not reuse an old key.
 - Every participant has a persistent signing identity (a separate ECDSA keypair) used to sign the key exchange itself, so a man-in-the-middle cannot silently swap in their own key during the handshake. The app shows both sides' signature fingerprints so they can be compared and confirmed, exactly the way Signal or WhatsApp safety numbers work.
 
-![zkgram console log showing the ECDH key exchange and signature verification steps completing, ending in "Encrypted session ready" followed by a real "Hello, world!" exchange](resources/screenshots/encryption-handshake-log.png)
+![zkgram console log showing the ECDH key exchange and signature verification steps completing, ending in "Encrypted session ready" followed by a real "Hello, world!" exchange](web/images/encryption-handshake-log.png)
 
 ### Disguised ciphertext, not obvious encrypted blobs
 
 Raw ciphertext looks nothing like text, and a message that is visibly "encrypted garbage" is itself a signal that something suspicious is happening in that conversation. zkgram encodes ciphertext through a word-substitution scheme (WordCoder) before sending it, so what actually travels over Telegram reads as a sequence of ordinary words rather than a block of random-looking bytes. Telegram's own systems, and anyone glancing at the conversation who is not one of the two participants, see plausible-looking text, not an obvious marker that says "this message is encrypted."
 
-![Real Telegram chat screenshot showing zkgram's disguised ciphertext rendered as ordinary-looking word-salad text instead of visibly encrypted data](resources/screenshots/wire-disguised-text.png)
+![Real Telegram chat screenshot showing zkgram's disguised ciphertext rendered as ordinary-looking word-salad text instead of visibly encrypted data](web/images/wire-disguised-text.png)
 
 ### Runs on your real Telegram account, over Telegram's real infrastructure
 

@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zkgram - Private Telegram Client with Independent End-to-End Encryption</title>
+<meta name="description" content="zkgram is a private Telegram client with independent, open-source end-to-end encryption for your existing Telegram account. Telegram never sees the plaintext.">
+<link rel="canonical" href="https://gerate-technik.github.io/zkgram/">
+<link rel="icon" href="resources/app.ico">
+<meta name="theme-color" content="#0b0b10">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gerate-technik.github.io/zkgram/">
+<meta property="og:site_name" content="zkgram">
+<meta property="og:title" content="zkgram - Private Telegram Client with Independent End-to-End Encryption">
+<meta property="og:description" content="A private Telegram client with an independent, open-source end-to-end encryption layer. Same Telegram account, same contacts - Telegram never sees the plaintext.">
+<meta property="og:image" content="https://gerate-technik.github.io/zkgram/web/images/wire-disguised-text.png">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="zkgram - Private Telegram Client with Independent End-to-End Encryption">
+<meta name="twitter:description" content="A private Telegram client with an independent, open-source end-to-end encryption layer. Telegram never sees the plaintext.">
+<meta name="twitter:image" content="https://gerate-technik.github.io/zkgram/web/images/wire-disguised-text.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "zkgram",
+  "alternateName": "zkgram private Telegram client",
+  "description": "zkgram is a private Telegram client: an independent, open-source end-to-end encryption layer on top of your existing Telegram account.",
+  "url": "https://gerate-technik.github.io/zkgram/",
+  "applicationCategory": "SecurityApplication",
+  "operatingSystem": "Windows, Linux",
+  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+  "codeRepository": "https://github.com/Gerate-Technik/zkgram",
+  "featureList": [
+    "Independent end-to-end encryption over your existing Telegram account",
+    "ECDH key exchange with a fresh key per session (forward secrecy)",
+    "AES-256-GCM message encryption, ECDSA-signed handshake",
+    "Ciphertext disguised as ordinary text",
+    "Custom encryption dictionary, not locked to the default word list",
+    "Password-protected local encrypted history"
+  ],
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "creator": {
+    "@type": "Organization",
+    "name": "Gerätetechnik",
+    "url": "https://gerattechnik.com/"
+  }
+}
+</script>
+
+<style>
+  :root{
+    --bg:#0b0b10;
+    --ink:#f5f3ea;
+    --muted:#9694a3;
+    --line:#2a2a35;
+    --blue:#3b6bff;
+    --pink:#ff3d78;
+    --yellow:#f5d90a;
+    --ink-on-blue:#0b0b10;
+    --ink-on-pink:#0b0b10;
+    --ink-on-yellow:#0b0b10;
+    --font-display:"Arial Black","Helvetica Neue",Arial,sans-serif;
+    --font-body:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    --font-mono:ui-monospace,"Cascadia Code","JetBrains Mono",Consolas,monospace;
+    --font-maker:"Arial Narrow",Haettenschweiler,var(--font-display);
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f5f3ea;
+      --ink:#0b0b10;
+      --muted:#5c5c66;
+      --line:#d8d5c4;
+      --blue:#1c3fd1;
+      --pink:#e0195f;
+      --yellow:#c99e00;
+    }
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--font-body);
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  a{color:inherit}
+  ::selection{background:var(--pink);color:#fff}
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px;position:relative}
+  .wrap-wide{max-width:1180px;margin:0 auto;padding:0 24px;position:relative}
+  .mono{font-family:var(--font-mono)}
+
+  a:focus-visible, .btn:focus-visible{
+    outline:3px solid var(--yellow);
+    outline-offset:2px;
+  }
+
+  /* ============ nav ============ */
+  nav.top{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    row-gap:14px;
+    padding:22px 0;
+  }
+  .brand{
+    text-decoration:none;
+    font-family:var(--font-display);
+    font-size:19px;
+    letter-spacing:-.01em;
+    color:var(--ink);
+  }
+  .brand span{color:var(--pink)}
+  .maker-mark{
+    font-family:var(--font-maker);
+    font-style:normal;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.02em;
+    background:var(--pink);
+    color:#fff;
+    padding:2px 8px;
+    text-decoration:none;
+    display:inline-block;
+    transform:rotate(-1.5deg);
+  }
+  .maker-mark:hover{background:var(--blue)}
+  .brand-by{
+    font-size:17px;
+  }
+  .top-links{display:flex;gap:6px;flex-wrap:wrap}
+  .top-links a{
+    text-decoration:none;
+    font-family:var(--font-mono);
+    font-size:11.5px;
+    font-weight:700;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    padding:7px 12px;
+    border:2px solid var(--ink);
+    color:var(--ink);
+    transition:background .12s,color .12s;
+  }
+  .top-links a:hover{background:var(--ink);color:var(--bg)}
+  @media (max-width:600px){
+    .top-links{width:100%;gap:8px}
+    .top-links a{font-size:10.5px;padding:6px 9px}
+  }
+
+  /* ============ hero ============ */
+  .hero{
+    position:relative;
+    padding:20px 0 50px;
+    overflow:hidden;
+  }
+  .halftone{
+    position:absolute;
+    top:-60px;
+    right:-90px;
+    width:340px;
+    height:340px;
+    border-radius:50%;
+    background-image:radial-gradient(var(--pink) 3.4px, transparent 3.4px);
+    background-size:15px 15px;
+    opacity:.55;
+    z-index:0;
+    pointer-events:none;
+  }
+  .kicker{
+    position:relative;
+    z-index:1;
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    font-family:var(--font-mono);
+    font-weight:700;
+    font-size:11.5px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    background:var(--yellow);
+    color:var(--ink-on-yellow);
+    padding:6px 12px;
+    transform:rotate(-2deg);
+    margin-bottom:26px;
+  }
+  h1{
+    position:relative;
+    z-index:1;
+    font-family:var(--font-display);
+    font-size:clamp(46px,10vw,104px);
+    line-height:.92;
+    letter-spacing:-.01em;
+    margin:0;
+    text-transform:uppercase;
+  }
+  h1 .l1{
+    display:block;
+    color:var(--ink);
+    transform:rotate(-1.4deg);
+    transform-origin:left;
+  }
+  h1 .l2{
+    display:block;
+    color:var(--bg);
+    background:var(--blue);
+    padding:0 10px;
+    display:inline-block;
+    transform:rotate(-1.4deg) translateX(-6px);
+    margin-top:6px;
+    box-decoration-break:clone;
+    -webkit-box-decoration-break:clone;
+  }
+  .lede{
+    position:relative;
+    z-index:1;
+    max-width:56ch;
+    font-size:18px;
+    line-height:1.62;
+    color:var(--muted);
+    margin:30px 0 0;
+  }
+  b{
+    background:var(--ink);
+    color:var(--bg);
+    padding:1px 7px;
+    font-weight:700;
+    box-decoration-break:clone;
+    -webkit-box-decoration-break:clone;
+  }
+  .cta-row{
+    position:relative;
+    z-index:1;
+    display:flex;
+    flex-wrap:wrap;
+    gap:14px;
+    margin-top:32px;
+  }
+  .btn{
+    display:inline-block;
+    text-decoration:none;
+    font-family:var(--font-mono);
+    font-weight:700;
+    font-size:13px;
+    letter-spacing:.03em;
+    text-transform:uppercase;
+    padding:14px 24px;
+    border:2.5px solid var(--ink);
+    transition:transform .12s;
+  }
+  .btn:hover{transform:translate(-3px,-3px)}
+  .btn-blue{background:var(--blue);color:#fff;border-color:var(--blue)}
+  .btn-outline{background:transparent;color:var(--ink)}
+
+  /* ============ comic strip demo ============ */
+  .strip{
+    position:relative;
+    z-index:1;
+    margin-top:46px;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+  }
+  @media (max-width:680px){ .strip{grid-template-columns:1fr} }
+  .proof-stack{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:36px;
+    margin-top:34px;
+    justify-items:start;
+  }
+  .proof-stack .panel{
+    width:fit-content;
+    max-width:100%;
+  }
+  .proof-stack .panel-tag{font-size:13px;padding:6px 12px}
+  .proof-stack img{
+    display:block;
+    margin-top:10px;
+    max-width:100%;
+    max-height:620px;
+    width:auto;
+    height:auto;
+    border:3px solid var(--ink);
+  }
+  @media (max-width:680px){
+    .proof-stack{justify-items:center}
+    .proof-stack .panel{width:100%}
+    .proof-stack img{max-height:none;width:100%}
+  }
+  .proof-stack .panel.pink{box-shadow:9px 9px 0 var(--pink)}
+  .proof-stack .panel.blue{box-shadow:9px 9px 0 var(--blue)}
+  .panel{
+    border:3px solid var(--ink);
+    background:var(--bg);
+    position:relative;
+    padding:18px;
+    min-height:150px;
+  }
+  .panel.blue{box-shadow:7px 7px 0 var(--blue)}
+  .panel.pink{box-shadow:7px 7px 0 var(--pink)}
+  .panel-tag{
+    font-family:var(--font-mono);
+    font-weight:700;
+    font-size:10.5px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    padding:4px 9px;
+    display:inline-block;
+    margin-bottom:14px;
+  }
+  .panel.blue .panel-tag{background:var(--blue);color:#fff}
+  .panel.pink .panel-tag{background:var(--pink);color:#fff}
+  .panel-text{
+    font-family:var(--font-mono);
+    font-size:14.5px;
+    line-height:1.65;
+    min-height:3.3em;
+  }
+  .panel-text .cursor{
+    display:inline-block;
+    width:.5em;
+    background:var(--ink);
+    margin-left:1px;
+    animation:blink 1s step-end infinite;
+  }
+  @keyframes blink{50%{opacity:0}}
+  @media (prefers-reduced-motion: reduce){
+    .panel-text .cursor{animation:none}
+  }
+
+  /* ============ sections ============ */
+  section{padding:56px 0;position:relative}
+  .section-head{
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:30px;
+  }
+  .num-badge{
+    font-family:var(--font-display);
+    font-size:26px;
+    color:var(--bg);
+    background:var(--pink);
+    width:44px;height:44px;
+    display:flex;align-items:center;justify-content:center;
+    flex:none;
+    transform:rotate(-4deg);
+  }
+  h2{
+    font-family:var(--font-display);
+    font-size:clamp(22px,3.4vw,30px);
+    text-transform:uppercase;
+    letter-spacing:-.01em;
+    margin:0;
+  }
+
+  /* ============ diagram ============ */
+  .diagram-frame{
+    border:3px solid var(--ink);
+    padding:16px clamp(8px,3vw,26px);
+    overflow-x:auto;
+  }
+  svg{display:block;width:100%;height:auto;max-width:1120px;margin:0 auto}
+  figure{margin:0}
+  figcaption{
+    margin-top:18px;
+    font-size:14.5px;
+    line-height:1.65;
+    color:var(--muted);
+    max-width:70ch;
+  }
+
+  /* ============ spec ============ */
+  .spec-list{display:grid;gap:2px;background:var(--line)}
+  .spec-row{
+    display:grid;
+    grid-template-columns:190px 1fr;
+    gap:18px;
+    padding:16px 20px;
+    background:var(--bg);
+    align-items:baseline;
+  }
+  .spec-row.joke{background:var(--yellow)}
+  .spec-row.joke dt, .spec-row.joke dd, .spec-row.joke dd span{color:var(--ink-on-yellow)}
+  .spec-row dt{
+    font-family:var(--font-mono);
+    font-weight:700;
+    font-size:12px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--pink);
+  }
+  .spec-row dd{margin:0;font-size:15.5px}
+  .spec-row dd span{color:var(--muted);font-size:14px}
+  @media (max-width:560px){ .spec-row{grid-template-columns:1fr;gap:6px} }
+
+  /* ============ loud propaganda-style callout bands, full-bleed ============ */
+  .shout-band{
+    background:var(--yellow);
+    color:var(--ink-on-yellow);
+    padding:56px 0;
+    margin:0 0 20px;
+  }
+  .shout-band.pink{
+    background:var(--pink);
+    color:#fff;
+  }
+  .shout-band .section-head{margin-bottom:28px}
+  .shout-band .num-badge{background:var(--ink);color:var(--yellow)}
+  .shout-band.pink .num-badge{color:var(--pink)}
+  .shout-band h2{font-size:clamp(26px,4.4vw,40px)}
+  .shout-quote{
+    margin:0;
+    font-family:var(--font-mono);
+    font-weight:700;
+    font-size:clamp(20px,3vw,30px);
+    line-height:1.45;
+    border-left:7px solid var(--ink);
+    padding-left:24px;
+  }
+  .shout-band.pink .shout-quote{border-left-color:#fff}
+  .cite-tag{
+    display:block;
+    margin-top:22px;
+    padding:18px 22px;
+    background:var(--ink);
+    color:var(--yellow);
+    font-family:var(--font-mono);
+  }
+  .cite-tag .src-label{
+    display:block;
+    font-size:12px;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    opacity:.65;
+    margin-bottom:8px;
+  }
+  .cite-tag .src-body{
+    display:block;
+    font-size:clamp(17px,2vw,20px);
+    font-weight:700;
+    line-height:1.5;
+  }
+  .cite-tag .src-body a{white-space:nowrap}
+  .shout-band.pink .cite-tag{background:#fff;color:var(--pink)}
+  .cite-tag a{color:inherit;text-decoration:underline}
+  .stat-grid{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:20px;
+    margin:38px 0;
+  }
+  @media (max-width:680px){ .stat-grid{grid-template-columns:1fr} }
+  .stat-item{
+    border:3px solid var(--ink);
+    background:var(--bg);
+    padding:22px 20px;
+    box-shadow:7px 7px 0 var(--ink);
+  }
+  .shout-band.pink .stat-item{border-color:#fff;box-shadow:7px 7px 0 #fff}
+  .stat-num{
+    font-family:var(--font-display);
+    font-size:clamp(42px,7vw,64px);
+    line-height:1;
+    letter-spacing:-.01em;
+    color:var(--ink);
+  }
+  .stat-cap{
+    font-family:var(--font-mono);
+    font-size:13.5px;
+    font-weight:700;
+    letter-spacing:.03em;
+    margin-top:12px;
+    color:var(--ink);
+  }
+  .stat-cap span{display:block;font-weight:400;opacity:.7;margin-top:4px}
+  .shout-band p{
+    font-size:clamp(16.5px,2.1vw,20px);
+    line-height:1.7;
+    max-width:74ch;
+  }
+  .shout-band b{
+    background:var(--ink);
+    color:var(--yellow);
+  }
+  .shout-band.pink b{color:#fff}
+  .shout-band .mono a{color:inherit;text-decoration:underline}
+  .ai-layout{
+    margin-top:8px;
+    overflow:auto;
+  }
+  .ai-layout figure{
+    float:left;
+    width:380px;
+    max-width:46%;
+    margin:0 24px 16px 0;
+  }
+  .ai-layout img{
+    display:block;
+    width:100%;
+    height:auto;
+    border:3px solid #fff;
+    box-shadow:9px 9px 0 #fff;
+  }
+  .ai-layout p{margin-top:0;margin-right:-90px}
+  @media (max-width:900px){ .ai-layout p{margin-right:0} }
+  .photo-credit{
+    display:block;
+    margin-top:12px;
+    padding:9px 14px;
+    background:#fff;
+    color:var(--pink);
+    font-family:var(--font-mono);
+    font-size:12.5px;
+    font-weight:700;
+    letter-spacing:.02em;
+    line-height:1.5;
+  }
+  .photo-credit a{color:var(--blue);text-decoration:underline}
+  .shout-band:not(.pink) .photo-credit{background:var(--ink);color:var(--yellow)}
+  .shout-band:not(.pink) .photo-credit a{color:#fff}
+  @media (max-width:900px){
+    .ai-layout figure{float:none;width:100%;max-width:100%;margin:0 0 20px}
+  }
+
+  /* ============ footer ============ */
+  footer{
+    background:var(--ink);
+    color:var(--bg);
+    padding:44px 0 50px;
+    margin-top:20px;
+  }
+  .colophon{
+    font-family:var(--font-mono);
+    font-size:12px;
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:18px 24px;
+  }
+  .colophon dt{
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    opacity:.55;
+    margin-bottom:5px;
+    font-size:11px;
+  }
+  .colophon dd{margin:0}
+  .colophon a{text-decoration:none;color:var(--bg)}
+  .colophon a:hover{color:var(--yellow)}
+  .colophon a.maker-mark{background:var(--yellow);color:var(--ink-on-yellow)}
+  .colophon a.maker-mark:hover{background:#fff}
+  .footer-bottom{
+    margin-top:30px;
+    padding-top:20px;
+    border-top:2px solid var(--bg);
+    opacity:.6;
+    font-family:var(--font-mono);
+    font-size:11px;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+
+  /* ============ mobile pass ============ */
+  @media (max-width:480px){
+    body{font-size:15px}
+    .wrap, .wrap-wide{padding:0 18px}
+    h1{font-size:38px}
+    .kicker{font-size:10.5px;padding:5px 10px;transform:rotate(-1.5deg)}
+    .lede{font-size:16px}
+    .halftone{width:220px;height:220px;top:-40px;right:-70px}
+    section, .shout-band{padding:40px 0}
+    .section-head{gap:10px;margin-bottom:22px}
+    .num-badge{width:36px;height:36px;font-size:20px}
+    .shout-quote{font-size:17px;padding-left:16px;border-left-width:5px}
+    .cite-tag{padding:14px 16px}
+    .stat-num{font-size:36px}
+    .btn{padding:12px 18px;font-size:12px}
+    .panel-text{font-size:13px}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav class="top">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+      <a class="brand" href="#top">zk<span>gram</span></a>
+      <span style="font-family:var(--font-mono);font-size:11.5px;color:var(--muted)">by</span>
+      <a class="maker-mark brand-by" href="https://gerattechnik.com/" target="_blank" rel="noopener">Gerätetechnik</a>
+    </div>
+    <div class="top-links">
+      <a href="#proof">Proof</a>
+      <a href="#how">Architecture</a>
+      <a href="#spec">Spec</a>
+      <a href="#fine-print">Fine print</a>
+      <a href="https://github.com/Gerate-Technik/zkgram" target="_blank" rel="noopener">Source</a>
+    </div>
+  </nav>
+</div>
+
+<div class="wrap">
+  <section class="hero" id="top">
+    <div class="halftone" aria-hidden="true"></div>
+    <span class="kicker">Private Telegram client &middot; open source</span>
+    <h1><span class="l1">Same Telegram.</span><span class="l2">Zero knowledge.</span></h1>
+    <p class="lede">
+      zkgram is a private Telegram client: it wraps your existing Telegram account in an independent,
+      open&#8209;source end&#8209;to&#8209;end encryption layer.
+      <b>Telegram still carries every message - it just never gets to read one.</b>
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-blue" href="https://github.com/Gerate-Technik/zkgram" target="_blank" rel="noopener">View source</a>
+      <a class="btn btn-outline" href="https://github.com/Gerate-Technik/zkgram/blob/main/docs/README.md" target="_blank" rel="noopener">Read the docs</a>
+    </div>
+
+    <div class="strip">
+      <div class="panel blue">
+        <span class="panel-tag">What Telegram sees</span>
+        <div class="panel-text" id="wireText"></div>
+      </div>
+      <div class="panel pink">
+        <span class="panel-tag">What your contact sees</span>
+        <div class="panel-text" id="peerText"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="wrap">
+  <section id="proof">
+    <span class="kicker">Not staged</span>
+    <h2>Two screenshots, not a mockup</h2>
+    <p class="lede" style="margin-top:16px;font-size:15.5px">
+      The panels above are a simulation for this page. <b>These two are not</b> - one real Telegram
+      client with zkgram's disguise turned on, one zkgram session log <b>completing a real key exchange</b>.
+    </p>
+    <div class="proof-stack">
+      <div class="panel pink">
+        <span class="panel-tag">Real Telegram app &middot; disguised ciphertext</span>
+        <img src="web/images/wire-disguised-text.png" width="1768" height="1414" loading="lazy" alt="Real Telegram chat screenshot showing zkgram's disguised ciphertext rendered as ordinary-looking word-salad text instead of visible encrypted data">
+      </div>
+      <div class="panel blue">
+        <span class="panel-tag">zkgram's own console &middot; encryption handshake</span>
+        <img src="web/images/encryption-handshake-log.png" width="1280" height="1004" loading="lazy" alt="zkgram console log showing the ECDH key exchange and signature verification steps completing, ending in Encrypted session ready followed by a Hello world exchange">
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="wrap-wide">
+  <section id="how">
+    <div class="section-head">
+      <span class="num-badge">1</span>
+      <h2>Three parties who never fully trust each other</h2>
+    </div>
+    <div class="diagram-frame">
+      <figure>
+        <svg viewBox="0 0 1000 460" role="img" aria-label="Diagram: TelegramClient (transport) and CryptoLayer (cryptography) connect only through Session, never directly to each other; a UiProvider interface sits above Session.">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 Z" fill="var(--ink)"></path>
+            </marker>
+          </defs>
+
+          <rect x="20" y="176" width="150" height="72" fill="none" stroke="var(--ink)" stroke-width="1.6" opacity="0.55"></rect>
+          <text x="95" y="208" text-anchor="middle" font-size="11" letter-spacing="0.06em" fill="var(--muted)" font-family="var(--font-mono)">TELEGRAM</text>
+          <text x="95" y="224" text-anchor="middle" font-size="11" letter-spacing="0.06em" fill="var(--muted)" font-family="var(--font-mono)">SERVERS</text>
+
+          <rect x="220" y="152" width="236" height="120" fill="none" stroke="var(--blue)" stroke-width="2.4"></rect>
+          <text x="338" y="180" text-anchor="middle" font-size="11" letter-spacing="0.1em" fill="var(--blue)" font-family="var(--font-mono)" font-weight="700">TRANSPORT</text>
+          <text x="338" y="208" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--ink)" font-family="var(--font-mono)">TelegramClient</text>
+          <text x="338" y="240" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">talks to TDLib only</text>
+          <text x="338" y="258" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">has no idea it carries ciphertext</text>
+
+          <rect x="504" y="120" width="204" height="184" fill="var(--ink)" fill-opacity="0.04" stroke="var(--yellow)" stroke-width="2.6"></rect>
+          <text x="606" y="150" text-anchor="middle" font-size="11" letter-spacing="0.1em" fill="var(--yellow)" font-family="var(--font-mono)" font-weight="700">SESSION</text>
+          <text x="606" y="180" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ink)" font-family="var(--font-mono)">core::Session</text>
+          <text x="606" y="210" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">the only layer allowed</text>
+          <text x="606" y="228" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">to know about both sides</text>
+          <line x1="536" y1="246" x2="676" y2="246" stroke="var(--ink)" stroke-width="1" opacity="0.2"></line>
+          <text x="606" y="270" text-anchor="middle" font-size="11" fill="var(--muted)" opacity="0.8" font-family="var(--font-mono)">wires one chat's transport</text>
+          <text x="606" y="286" text-anchor="middle" font-size="11" fill="var(--muted)" opacity="0.8" font-family="var(--font-mono)">events to one encrypted session</text>
+
+          <rect x="756" y="152" width="216" height="120" fill="none" stroke="var(--pink)" stroke-width="2.4"></rect>
+          <text x="864" y="180" text-anchor="middle" font-size="11" letter-spacing="0.1em" fill="var(--pink)" font-family="var(--font-mono)" font-weight="700">CRYPTOGRAPHY</text>
+          <text x="864" y="208" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--ink)" font-family="var(--font-mono)">CryptoLayer</text>
+          <text x="864" y="240" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">embedded Python bridge</text>
+          <text x="864" y="258" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">has no idea Telegram exists</text>
+
+          <rect x="504" y="20" width="204" height="80" fill="none" stroke="var(--ink)" stroke-width="1.6" stroke-dasharray="4 5" opacity="0.75"></rect>
+          <text x="606" y="44" text-anchor="middle" font-size="11" letter-spacing="0.1em" fill="var(--muted)" font-family="var(--font-mono)">INTERFACE &middot; SWAPPABLE</text>
+          <text x="606" y="68" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--ink)" font-family="var(--font-mono)">UiProvider</text>
+          <text x="606" y="88" text-anchor="middle" font-size="11.5" fill="var(--muted)" font-family="var(--font-mono)">Qt today, replaceable</text>
+
+          <line x1="170" y1="212" x2="218" y2="212" stroke="var(--ink)" stroke-width="1.8" marker-end="url(#ar)"></line>
+          <text x="194" y="198" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="var(--font-mono)">TDLib</text>
+
+          <line x1="456" y1="212" x2="502" y2="212" stroke="var(--ink)" stroke-width="1.8" marker-end="url(#ar)" marker-start="url(#ar)"></line>
+          <text x="479" y="198" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="var(--font-mono)">bytes</text>
+
+          <line x1="708" y1="212" x2="754" y2="212" stroke="var(--ink)" stroke-width="1.8" marker-end="url(#ar)" marker-start="url(#ar)"></line>
+          <text x="731" y="198" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="var(--font-mono)">encrypt</text>
+          <text x="731" y="232" text-anchor="middle" font-size="10.5" fill="var(--muted)" font-family="var(--font-mono)">decrypt</text>
+
+          <line x1="606" y1="100" x2="606" y2="116" stroke="var(--ink)" stroke-width="1.8" marker-end="url(#ar)" marker-start="url(#ar)"></line>
+
+          <path d="M 338 276 C 338 372, 864 372, 864 276" fill="none" stroke="var(--yellow)" stroke-width="2" stroke-dasharray="2 7" stroke-linecap="round"></path>
+          <circle cx="601" cy="384" r="12" fill="var(--bg)" stroke="var(--yellow)" stroke-width="2"></circle>
+          <line x1="595" y1="378" x2="607" y2="390" stroke="var(--yellow)" stroke-width="2" stroke-linecap="round"></line>
+          <line x1="607" y1="378" x2="595" y2="390" stroke="var(--yellow)" stroke-width="2" stroke-linecap="round"></line>
+          <text x="601" y="414" text-anchor="middle" font-size="12" font-weight="700" fill="var(--yellow)" font-family="var(--font-mono)">no direct call, ever</text>
+          <text x="601" y="432" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="var(--font-mono)">Transport and Cryptography only reach</text>
+          <text x="601" y="448" text-anchor="middle" font-size="11" fill="var(--muted)" font-family="var(--font-mono)">each other by going through Session</text>
+        </svg>
+        <figcaption><b>The missing line is the point.</b> TelegramClient and CryptoLayer are never wired to each other - only Session knows about both, which is what keeps swapping the UI, the transport, or the crypto backend a one-layer change, not a rewrite.</figcaption>
+      </figure>
+    </div>
+  </section>
+</div>
+
+<div class="wrap">
+  <section id="spec">
+    <div class="section-head">
+      <span class="num-badge">2</span>
+      <h2>Spec sheet, not a marketing claim</h2>
+    </div>
+    <dl class="spec-list">
+      <div class="spec-row">
+        <dt>Key exchange</dt>
+        <dd>ECDH &middot; SECP256R1 <span>- fresh every session</span></dd>
+      </div>
+      <div class="spec-row">
+        <dt>Cipher</dt>
+        <dd>AES&#8209;256&#8209;GCM <span>- per message</span></dd>
+      </div>
+      <div class="spec-row">
+        <dt>Handshake signing</dt>
+        <dd>ECDSA <span>- blocks man&#8209;in&#8209;the&#8209;middle</span></dd>
+      </div>
+      <div class="spec-row">
+        <dt>Forward secrecy</dt>
+        <dd>Session keys <span>never written to disk</span></dd>
+      </div>
+      <div class="spec-row">
+        <dt>Local cache</dt>
+        <dd>PBKDF2&#8209;HMAC&#8209;SHA256 <span>&rarr;</span> AES&#8209;256&#8209;CTR</dd>
+      </div>
+      <div class="spec-row">
+        <dt>Disguise</dt>
+        <dd>Ciphertext encoded <span>as ordinary words</span></dd>
+      </div>
+      <div class="spec-row">
+        <dt>Dictionary</dt>
+        <dd>Bring your own word list <span>- not locked to the default set</span></dd>
+      </div>
+      <div class="spec-row joke">
+        <dt>Rust</dt>
+        <dd>Not a single line <span>- and it still compiles</span></dd>
+      </div>
+      <div class="spec-row joke">
+        <dt>Electron</dt>
+        <dd>0 windows, 0 renderer processes <span>- your battery says thanks</span></dd>
+      </div>
+    </dl>
+    <p class="mono" style="margin-top:22px;font-size:14px;color:var(--muted)">
+      Designed and built by
+      <a class="maker-mark" href="https://gerattechnik.com/" target="_blank" rel="noopener" style="font-size:19px">Gerätetechnik</a>,
+      an embedded and security engineering studio.
+    </p>
+  </section>
+</div>
+
+<section id="fine-print" class="shout-band">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="num-badge">3</span>
+      <h2>The fine print Telegram would rather you skim</h2>
+    </div>
+
+    <blockquote class="shout-quote">
+      "If Telegram receives a valid order from the relevant judicial authorities that confirms you're a suspect
+      in a case involving criminal activities that violate the Telegram Terms of Service, we will perform a
+      legal analysis of the request and may disclose your IP address and phone number to the relevant authorities."
+    </blockquote>
+    <div class="cite-tag">
+      <span class="src-label">Source</span>
+      <span class="src-body">Telegram's own Privacy Policy, section 8.3 &middot; <a href="https://telegram.org/privacy" target="_blank" rel="noopener">telegram.org/privacy &#8594;</a></span>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-item">
+        <div class="stat-num">900</div>
+        <div class="stat-cap">US &middot; 2024<span>requests fulfilled, 2,253 users affected</span></div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">14,641</div>
+        <div class="stat-cap">India &middot; 2024<span>requests fulfilled, 23,535 users affected</span></div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">142</div>
+        <div class="stat-cap">UK &middot; 2024<span>requests fulfilled, 293 users affected</span></div>
+      </div>
+    </div>
+
+    <p>
+      Regular Telegram chats were <b>never end-to-end encrypted</b>, so Telegram already holds the technical ability to
+      read their content - that's the whole reason this project exists. What the numbers above add is that, on a
+      valid court order, it will also <b>hand over your phone number and IP address</b>. zkgram does not change either
+      of those facts about how Telegram itself is built. <b>It changes what is actually inside the message</b> by the
+      time it gets anywhere near Telegram at all.
+    </p>
+    <p class="mono" style="margin:16px 0 0;font-size:12.5px;opacity:.85">
+      Numbers sourced from Telegram's own transparency reports, via
+      <a href="https://techcrunch.com/2025/01/07/telegram-reports-spike-in-sharing-user-data-with-law-enforcement/" target="_blank" rel="noopener">TechCrunch, Jan 2025</a>
+      and
+      <a href="https://www.bleepingcomputer.com/news/legal/telegram-hands-over-data-on-thousands-of-users-to-us-law-enforcement/" target="_blank" rel="noopener">BleepingComputer</a>
+    </p>
+  </div>
+</section>
+
+<section id="ai-editor" class="shout-band pink">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="num-badge">4</span>
+      <h2>Meanwhile: Telegram's new AI reads your draft before you even hit send</h2>
+    </div>
+
+    <blockquote class="shout-quote">
+      "The text editor utilizes the Cocoon Network to give users complete privacy. Requests are processed in a
+      confidential environment with zero access to user data."
+    </blockquote>
+    <div class="cite-tag">
+      <span class="src-label">Source</span>
+      <span class="src-body">Telegram's own blog, announcing the AI Editor &middot; <a href="https://telegram.org/blog/ai-editor-mighty-polls-and-more" target="_blank" rel="noopener">telegram.org/blog/ai-editor-mighty-polls-and-more &#8594;</a></span>
+    </div>
+
+    <div class="stat-grid" style="grid-template-columns:repeat(2,1fr);margin:34px 0 30px">
+      <div class="stat-item">
+        <div class="stat-num">0</div>
+        <div class="stat-cap">Independent audits<span>of the Cocoon Network, published by anyone but Telegram</span></div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">1</div>
+        <div class="stat-cap">Company deciding<span>what "zero access" means - the one that built it</span></div>
+      </div>
+    </div>
+
+    <div class="ai-layout">
+      <figure>
+        <img src="web/images/telegram-ai-editor.png" width="747" height="754" loading="lazy" alt="Telegram's own official AI Editor screenshot: a drafted message is rewritten by AI before sending, with Translate, Style, and Fix options above it">
+        <figcaption class="photo-credit">
+          Image credit: Telegram, from its own
+          <a href="https://telegram.org/blog/ai-editor-mighty-polls-and-more" target="_blank" rel="noopener">AI Editor announcement</a> - used here for commentary.
+        </figcaption>
+      </figure>
+      <p>
+        Type more than three lines in the stock Telegram app and an AI icon offers to translate it, fix your grammar,
+        or rewrite it in a different tone. Tap it, and <b>your drafted text - the message you haven't sent yet - leaves
+        your device</b> and goes to Telegram's own "Cocoon Network" for processing. The promise that nobody looks at it
+        is <b>made entirely by the same company that built and runs that network</b>. Nobody outside Telegram has audited it.
+      </p>
+      <p>
+        <b>This has nothing to do with zkgram sessions themselves</b> - zkgram's own composer never goes near Telegram's AI
+        Editor. It is what is now built into the stock app everyone else is using, for every other chat they have,
+        encrypted or not, and it processes drafted text <b>before a single character of any encryption gets a chance to
+        run on it</b>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <dl class="colophon">
+      <div>
+        <dt>Repository</dt>
+        <dd><a href="https://github.com/Gerate-Technik/zkgram" target="_blank" rel="noopener">Gerate-Technik/zkgram</a></dd>
+      </div>
+      <div>
+        <dt>Organization</dt>
+        <dd><a href="https://github.com/Gerate-Technik" target="_blank" rel="noopener">Gerate-Technik</a></dd>
+      </div>
+      <div>
+        <dt>License</dt>
+        <dd><a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU GPLv3</a></dd>
+      </div>
+      <div>
+        <dt>Built by</dt>
+        <dd><a class="maker-mark" href="https://gerattechnik.com/" target="_blank" rel="noopener" style="font-size:16px">Gerätetechnik</a></dd>
+      </div>
+    </dl>
+    <div class="footer-bottom">
+      <span>zkgram &middot; independent &middot; not affiliated with Telegram</span>
+      <span>encrypted since 2026</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var wire = document.getElementById('wireText');
+  var peer = document.getElementById('peerText');
+
+  var wireMsg = 'harbor lanterns drift past the quiet cedar stones tonight';
+  var peerMsg = 'meet me at the north gate at nine';
+
+  function typeInto(el, str, speed, onDone){
+    var cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    var textNode = document.createTextNode('');
+    el.appendChild(textNode);
+    el.appendChild(cursor);
+    var i = 0;
+    var iv = setInterval(function(){
+      textNode.textContent = str.slice(0, i + 1);
+      i++;
+      if (i >= str.length) {
+        clearInterval(iv);
+        cursor.remove();
+        if (onDone) onDone();
+      }
+    }, speed);
+  }
+
+  if (reduceMotion) {
+    wire.textContent = wireMsg;
+    peer.textContent = peerMsg;
+    return;
+  }
+
+  typeInto(wire, wireMsg, 30, function(){
+    setTimeout(function(){ typeInto(peer, peerMsg, 34); }, 450);
+  });
+})();
+</script>
+
+</body>
+</html>
