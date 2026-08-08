@@ -13,7 +13,6 @@ __pycache__/
 
 # Personal scratch notes — not meant to be shared/committed
 TODO.md
-docs/images
 *.o
 *.obj
 *.exe

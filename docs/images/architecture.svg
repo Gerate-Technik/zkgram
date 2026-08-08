@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" role="img" aria-label="Diagram showing zkgram's telegram::TelegramClient transport layer and crypto::CryptoLayer cryptography layer connected only through core::Session, which is the sole layer aware of both. A dashed line marked no direct call underscores that transport and cryptography never talk to each other directly. A UiProvider interface layer sits above Session, marked swappable, exchanging events and actions with it only.">
+  <style>
+    :root{
+      --ink:#182226;
+      --surface:#ffffff;
+      --surface-2:#e4e9ea;
+      --accent:#2f8f7f;
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --ink:#e7edef;
+        --surface:#161f24;
+        --surface-2:#1d2830;
+        --accent:#4fc0ac;
+      }
+    }
+    text{
+      font-family:ui-monospace,'IBM Plex Mono',SFMono-Regular,Menlo,Consolas,monospace;
+      fill:var(--ink);
+    }
+    .line{stroke:var(--ink);fill:none}
+    .box{fill:var(--surface-2);stroke:var(--ink)}
+    .box-session{fill:var(--surface);stroke:var(--accent)}
+    .box-ui{fill:none;stroke:var(--ink)}
+    .accent-line{stroke:var(--accent);fill:none}
+    .accent-text{fill:var(--accent)}
+    .muted{opacity:.65}
+    .faint{opacity:.55}
+    .fainter{opacity:.35}
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="var(--ink)"></path>
+    </marker>
+  </defs>
+
+  <!-- ===== all shapes drawn first, so arrows/labels below always paint on top ===== -->
+
+  <!-- Telegram network node -->
+  <rect x="24" y="256" width="150" height="72" rx="10" class="line" stroke-width="1.4" opacity="0.55"></rect>
+  <text x="99" y="288" text-anchor="middle" font-size="11" letter-spacing="0.06em" class="faint">TELEGRAM</text>
+  <text x="99" y="304" text-anchor="middle" font-size="11" letter-spacing="0.06em" class="faint">SERVERS</text>
+
+  <!-- Transport box -->
+  <rect x="224" y="232" width="196" height="120" rx="10" class="box" stroke-width="1.4"></rect>
+  <text x="322" y="260" text-anchor="middle" font-size="11" letter-spacing="0.1em" class="muted">TRANSPORT</text>
+  <text x="322" y="288" text-anchor="middle" font-size="13.5" font-weight="600">TelegramClient</text>
+  <text x="322" y="320" text-anchor="middle" font-size="11.5" class="faint">talks to TDLib only</text>
+  <text x="322" y="338" text-anchor="middle" font-size="11.5" class="faint">has no idea it carries ciphertext</text>
+
+  <!-- Session box (emphasized, taller) -->
+  <rect x="468" y="200" width="204" height="184" rx="10" class="box-session" stroke-width="2"></rect>
+  <text x="570" y="230" text-anchor="middle" font-size="11" letter-spacing="0.1em" class="accent-text">SESSION</text>
+  <text x="570" y="260" text-anchor="middle" font-size="14" font-weight="700">core::Session</text>
+  <text x="570" y="290" text-anchor="middle" font-size="11.5" class="muted">the only layer allowed</text>
+  <text x="570" y="308" text-anchor="middle" font-size="11.5" class="muted">to know about both sides</text>
+  <line x1="500" y1="326" x2="640" y2="326" class="line" stroke-width="1" opacity="0.2"></line>
+  <text x="570" y="350" text-anchor="middle" font-size="11" class="fainter">wires one chat's transport</text>
+  <text x="570" y="366" text-anchor="middle" font-size="11" class="fainter">events to one encrypted session</text>
+
+  <!-- Cryptography box -->
+  <rect x="720" y="232" width="216" height="120" rx="10" class="box" stroke-width="1.4"></rect>
+  <text x="828" y="260" text-anchor="middle" font-size="11" letter-spacing="0.1em" class="muted">CRYPTOGRAPHY</text>
+  <text x="828" y="288" text-anchor="middle" font-size="13.5" font-weight="600">CryptoLayer</text>
+  <text x="828" y="320" text-anchor="middle" font-size="11.5" class="faint">embedded Python bridge</text>
+  <text x="828" y="338" text-anchor="middle" font-size="11.5" class="faint">has no idea Telegram exists</text>
+
+  <!-- UI box above session -->
+  <rect x="468" y="40" width="204" height="96" rx="10" class="box-ui" stroke-width="1.4" stroke-dasharray="5 5" opacity="0.8"></rect>
+  <text x="570" y="66" text-anchor="middle" font-size="11" letter-spacing="0.1em" class="muted">INTERFACE &middot; SWAPPABLE</text>
+  <text x="570" y="92" text-anchor="middle" font-size="13.5" font-weight="600">UiProvider</text>
+  <text x="570" y="116" text-anchor="middle" font-size="11.5" class="faint">Qt today, replaceable</text>
+
+  <!-- ===== connecting arrows and their labels, drawn on top of every box ===== -->
+
+  <!-- network -> transport -->
+  <line x1="174" y1="292" x2="222" y2="292" class="line" stroke-width="1.6" marker-end="url(#arrow)"></line>
+  <text x="198" y="278" text-anchor="middle" font-size="10.5" class="faint">TDLib</text>
+
+  <!-- transport <-> session -->
+  <line x1="420" y1="292" x2="466" y2="292" class="line" stroke-width="1.6" marker-end="url(#arrow)" marker-start="url(#arrow)"></line>
+  <text x="443" y="278" text-anchor="middle" font-size="10.5" class="faint">bytes</text>
+
+  <!-- session <-> crypto, label split across two short lines so it clears both boxes -->
+  <line x1="672" y1="292" x2="718" y2="292" class="line" stroke-width="1.6" marker-end="url(#arrow)" marker-start="url(#arrow)"></line>
+  <text x="695" y="278" text-anchor="middle" font-size="10.5" class="faint">encrypt</text>
+  <text x="695" y="312" text-anchor="middle" font-size="10.5" class="faint">decrypt</text>
+
+  <!-- ui <-> session -->
+  <line x1="570" y1="136" x2="570" y2="196" class="line" stroke-width="1.6" marker-end="url(#arrow)" marker-start="url(#arrow)"></line>
+  <text x="616" y="169" text-anchor="middle" font-size="10.5" class="faint">events, actions</text>
+
+  <!-- forbidden direct link, transport <-> crypto -->
+  <path d="M 322 356 C 322 470, 828 470, 828 356" class="accent-line" stroke-width="1.6" stroke-dasharray="2 7" stroke-linecap="round"></path>
+  <circle cx="575" cy="486" r="12" class="accent-line" fill="var(--surface)" stroke-width="1.6"></circle>
+  <line x1="569" y1="480" x2="581" y2="492" class="accent-line" stroke-width="1.6" stroke-linecap="round"></line>
+  <line x1="581" y1="480" x2="569" y2="492" class="accent-line" stroke-width="1.6" stroke-linecap="round"></line>
+  <text x="575" y="516" text-anchor="middle" font-size="11.5" font-weight="600" class="accent-text">no direct call, ever</text>
+  <text x="575" y="534" text-anchor="middle" font-size="11" class="fainter">Transport and Cryptography cannot reach each other</text>
+  <text x="575" y="550" text-anchor="middle" font-size="11" class="fainter">except by going through Session</text>
+</svg>
