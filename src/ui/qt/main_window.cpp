@@ -104,6 +104,18 @@ const QColor kIconEncryptedFg("#4fae4e");    // the same green as statusDot_ for
 // from the peer, plus the first letter of the name) - used as a fallback
 // when the chat has no photo yet, or it has not finished downloading (see
 // chatAvatarPixmap() below for the real-photo path).
+// Physical pixels a size x size pixmap needs to stay crisp on the current
+// screen's scaling (125%/150%/200% on Windows is common, not the
+// exception) - same fallback glyphPixmap() in icons.cpp already uses.
+// avatarPixmap()/chatAvatarPixmap() below did not account for this at
+// all (a plain size x size QPixmap, 1 physical pixel per logical one),
+// unlike every glyph icon in the app, which is why avatars specifically
+// looked soft/pixelated next to everything else on a scaled display.
+qreal currentDevicePixelRatio() {
+    QScreen* screen = QGuiApplication::primaryScreen();
+    return screen != nullptr ? screen->devicePixelRatio() : 1.0;
+}
+
 QPixmap avatarPixmap(const QString& title, int size) {
     static const QVector<QColor> kAvatarColors = {
         QColor("#e17076"), QColor("#eda86c"), QColor("#a695e7"), QColor("#7bc862"),
@@ -113,8 +125,11 @@ QPixmap avatarPixmap(const QString& title, int size) {
     QChar initial = trimmed.isEmpty() ? QChar('?') : trimmed.at(0).toUpper();
     int colorIndex = trimmed.isEmpty() ? 0 : static_cast<int>(qHash(trimmed) % static_cast<uint>(kAvatarColors.size()));
 
-    QPixmap pixmap(size, size);
+    qreal ratio = currentDevicePixelRatio();
+    int physicalSize = qRound(size * ratio);
+    QPixmap pixmap(physicalSize, physicalSize);
     pixmap.fill(Qt::transparent);
+    pixmap.setDevicePixelRatio(ratio);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
     // Vertical two-stop gradient rather than one flat fill: real Telegram's
@@ -159,8 +174,13 @@ QPixmap chatAvatarPixmap(const QString& title, const QString& photoPath, int siz
     if (photoPath.isEmpty()) {
         return avatarPixmap(title, size);
     }
+    qreal ratio = currentDevicePixelRatio();
     static QHash<QString, QPixmap> cache;
-    QString cacheKey = photoPath + QLatin1Char(':') + QString::number(size);
+    // Ratio in the key too, not just size: a plausible (if rare) multi-monitor
+    // setup with different scale factors would otherwise hand back a pixmap
+    // cached for the wrong screen's density.
+    QString cacheKey =
+        photoPath + QLatin1Char(':') + QString::number(size) + QLatin1Char('@') + QString::number(ratio);
     auto cached = cache.constFind(cacheKey);
     if (cached != cache.constEnd()) {
         return cached.value();
@@ -170,18 +190,32 @@ QPixmap chatAvatarPixmap(const QString& title, const QString& photoPath, int siz
     if (source.isNull()) {
         return avatarPixmap(title, size);
     }
-    QPixmap scaled = source.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    int physicalSize = qRound(size * ratio);
+    QPixmap scaled =
+        source.scaled(physicalSize, physicalSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    // QPixmap::scaled() does not carry a devicePixelRatio itself (result is
+    // physicalSize x physicalSize at ratio 1) - without setting it here,
+    // drawPixmap() below would read scaled's physical pixels as that many
+    // logical ones and place/size it wrong once ratio != 1.
+    scaled.setDevicePixelRatio(ratio);
 
-    QPixmap result(size, size);
+    QPixmap result(physicalSize, physicalSize);
     result.fill(Qt::transparent);
+    result.setDevicePixelRatio(ratio);
     QPainter painter(&result);
     painter.setRenderHint(QPainter::Antialiasing);
     QPainterPath clip;
     clip.addEllipse(0, 0, size, size);
     painter.setClipPath(clip);
-    // Center-crop: scaled may be wider or taller than size x size (KeepAspectRatioByExpanding
-    // only guarantees it covers size x size on both axes, not that it matches exactly).
-    painter.drawPixmap((size - scaled.width()) / 2, (size - scaled.height()) / 2, scaled);
+    // Center-crop: scaled may be wider or taller than physicalSize x
+    // physicalSize (KeepAspectRatioByExpanding only guarantees it covers
+    // that on both axes, not that it matches exactly). drawPixmap here
+    // takes logical coordinates (result has devicePixelRatio set), so
+    // scaled's own physical size has to be converted back to logical
+    // before centering, or a HiDPI scaled would be placed as if it were
+    // still physicalSize x physicalSize logical and drawn off-center.
+    QSizeF scaledLogical = QSizeF(scaled.size()) / ratio;
+    painter.drawPixmap(QPointF((size - scaledLogical.width()) / 2, (size - scaledLogical.height()) / 2), scaled);
     painter.end();
     // Unbounded but self-limiting in practice: keyed by a real Telegram
     // account's own chat count, which does not grow without the user
