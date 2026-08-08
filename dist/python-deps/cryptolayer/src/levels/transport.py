@@ -99,7 +99,16 @@ class Transport(Base):
         self.LOWER_LEVEL.send(raw_packet_bytes)
 
 
-    # Отправляем пакет и ожидаем подтверждение его получения
+    # Отправляем пакет и ожидаем подтверждение его получения. Раньше при
+    # таймауте (30 секунд без ack) эта функция вызывала САМА СЕБЯ вместо
+    # повторного цикла - каждый новый таймаут добавлял ещё один уровень
+    # рекурсии, который никогда не разворачивался, пока ack не придёт.
+    # На фоновом потоке (свой, обычно небольшой OS-стек, здесь - поток
+    # embedded Python-интерпретатора) достаточно накопленных таймаутов
+    # переполняли стек и роняли процесс без питоновского traceback -
+    # переполнение стека происходит на уровне C, мимо обычной обработки
+    # исключений Python. Теперь это цикл: то же самое поведение (повтор
+    # отправки каждые 30 секунд, пока нет ack), без роста стека.
     def send_with_pending_acknowledgment(self, raw_packet_bytes, packet_hash):
 
         with self.PENDING_ACK_PACKS_LOCK:
@@ -113,9 +122,11 @@ class Transport(Base):
             self.logger.info(f"wait ack...")
 
             if self.PENDING_ACK_PACKS.get(packet_hash, 0) >= 30:
-                self.logger.warning(f"timeout while wait ack")
-                self.send_with_pending_acknowledgment(raw_packet_bytes, packet_hash)
-                return
+                self.logger.warning(f"timeout while wait ack, resending")
+                with self.PENDING_ACK_PACKS_LOCK:
+                    self.PENDING_ACK_PACKS[packet_hash] = 0
+                self.LOWER_LEVEL.send(raw_packet_bytes)
+                continue
 
             with self.PENDING_ACK_PACKS_LOCK:
                 self.PENDING_ACK_PACKS[packet_hash] = self.PENDING_ACK_PACKS[packet_hash] + 0.5

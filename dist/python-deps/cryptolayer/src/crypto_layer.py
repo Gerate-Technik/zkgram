@@ -157,6 +157,38 @@ class CryptoLayer:
                 os.remove(local_path)
 
 
+    # Общий механизм ожидания ответа собеседника для всех трёх шагов
+    # рукопожатия (node id, подпись, ECDH-публичный ключ) - раньше каждый
+    # шаг был отдельным `while not X: time.sleep(0.1)` без таймаута и без
+    # повтора отправки, из-за чего сессия могла зависнуть навсегда без
+    # единой ошибки, если первый пакет потерялся (гонка старта: оба
+    # клиента жмут "начать шифрованную сессию" почти одновременно, и один
+    # успевает отправить раньше, чем другой поднял свой приёмник) или
+    # собеседник вообще не запустил сессию со своей стороны.
+    #
+    # check_fn: вернуть True, когда ответ уже получен (например,
+    # lambda: self.COMPANION_NODE_ID).
+    # resend_fn: переотправить свою часть (например,
+    # lambda: self.APPLICATION_LEVEL.send_my_node_id(self.NODE_ID)).
+    # description: только для сообщений статуса/лога.
+    def wait_for_companion(self, check_fn, resend_fn, description):
+        start = time.time()
+        last_resend = start
+        while not check_fn():
+            now = time.time()
+            elapsed = now - start
+            if elapsed > config.HANDSHAKE_TIMEOUT_SECONDS:
+                message = f"Timed out waiting for companion's {description} after {config.HANDSHAKE_TIMEOUT_SECONDS}s - they may not be running zkgram, or have not started an encrypted session on their side yet"
+                self.ui_provider.update_status("Signatures", message, "error")
+                self.LOGGER.error(message)
+                raise TimeoutError(message)
+            if now - last_resend > config.HANDSHAKE_RESEND_INTERVAL_SECONDS:
+                self.LOGGER.info(f"No {description} from companion yet, re-sending ours")
+                resend_fn()
+                last_resend = now
+            time.sleep(0.1)
+
+
     def init(self):
 
         # Создаем директорию с данными
@@ -322,8 +354,11 @@ class CryptoLayer:
         self.APPLICATION_LEVEL.send_my_node_id(self.NODE_ID)
         self.ui_provider.update_status("Signatures", "Waiting for companion node id...", "in_progress")
         self.LOGGER.info("Signatures: Waiting for companion node id...")
-        while not self.COMPANION_NODE_ID:
-            time.sleep(0.1)
+        self.wait_for_companion(
+            lambda: self.COMPANION_NODE_ID,
+            lambda: self.APPLICATION_LEVEL.send_my_node_id(self.NODE_ID),
+            "node id",
+        )
         self.ui_provider.update_status("Signatures", "Companion node id received!", "in_progress")
         self.LOGGER.info("Signatures: Companion node id received!")
 
@@ -341,8 +376,11 @@ class CryptoLayer:
             self.APPLICATION_LEVEL.send_my_sign(my_sign_public_bytes_X962)
             self.ui_provider.update_status("Signatures", "Waiting for companion signature...", "in_progress")
             self.LOGGER.info("Signatures: Waiting for companion signature...")
-            while not self.COMPANION_SIGN:
-                time.sleep(0.1)
+            self.wait_for_companion(
+                lambda: self.COMPANION_SIGN,
+                lambda: self.APPLICATION_LEVEL.send_my_sign(my_sign_public_bytes_X962),
+                "signature",
+            )
             self.ui_provider.update_status("Signatures", "Companion signature received!", "in_progress")
             self.LOGGER.info("Signatures: Companion signature received!")
 
@@ -425,8 +463,11 @@ class CryptoLayer:
 
         self.ui_provider.update_status("Encryption", "Waiting for companion public key...", "in_progress")
         self.LOGGER.info("Encryption: Waiting for companion public key...")
-        while not self.COMPANION_PUBLIC_KEY:
-            time.sleep(0.1)
+        self.wait_for_companion(
+            lambda: self.COMPANION_PUBLIC_KEY,
+            lambda: self.APPLICATION_LEVEL.send_my_public_key(my_pkey_bytes),
+            "public key",
+        )
 
         self.ui_provider.update_status("Encryption", "Companion public key received!", "in_progress")
         self.LOGGER.info("Encryption: Companion public key received!")
