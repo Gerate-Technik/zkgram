@@ -6,6 +6,18 @@
 //
 #pragma once
 
+// Unexpected() below is a macro from here, and this header did not include
+// it - it only ever compiled because every translation unit that reached
+// this file happened to have pulled assertion.h in earlier (lib_base's own
+// sources get it from base_pch.h). zkgram's sources have no such
+// precompiled header, so for them the macro is undefined and the call
+// parses as an undeclared function in a template body. GCC accepted that
+// silently until 14, warns about it under -Wtemplate-body, and rejects it
+// outright from 15 on - which is where distributions with a current
+// toolchain fail. Self-contained now, so it no longer depends on include
+// order. No cycle: assertion.h pulls in only <cstdlib> and <gsl/assert>.
+#include "base/assertion.h"
+
 #include <compare>
 #include <variant>
 #include <gsl/pointers>

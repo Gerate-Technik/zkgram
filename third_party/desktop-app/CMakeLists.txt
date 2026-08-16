@@ -17,6 +17,12 @@ set(DESKTOP_APP_USE_PACKAGED ON CACHE BOOL "" FORCE)
 get_filename_component(submodules_loc "." REALPATH)
 get_filename_component(cmake_loc "cmake" REALPATH)
 get_filename_component(third_party_loc "ThirdParty" REALPATH)
+# Upstream's own cmake_helpers sets this; the vendored subset never did, so
+# every include(${cmake_helpers_loc}/...) inside the copied cmake/ tree
+# resolved to an absolute "/external/..." path and failed. Only ever hit on
+# Linux, because the block in lib_base that uses it (D-Bus codegen) is
+# guarded by if (LINUX) - which is why the Windows build never noticed.
+get_filename_component(cmake_helpers_loc "cmake" REALPATH)
 
 include(cmake/variables.cmake)
 include(cmake/nice_target_sources.cmake)
@@ -43,6 +49,14 @@ add_subdirectory(cmake/external/gsl)
 add_library(external_qt INTERFACE IMPORTED GLOBAL)
 add_library(desktop-app::external_qt ALIAS external_qt)
 target_link_libraries(external_qt INTERFACE Qt::Core Qt::Gui Qt::Widgets Qt::Network Qt::Svg Qt::OpenGL Qt::OpenGLWidgets)
+
+if (LINUX)
+    # Qt::DBus on top: lib_base's Linux platform layer and the bundled
+    # kcoreaddons sources (kurlmimedata.cpp -> dbustypes_p.h) include
+    # QtDBus headers directly. Not needed on Windows, which is why the
+    # vendored list above never had it.
+    target_link_libraries(external_qt INTERFACE Qt::DBus)
+endif()
 
 # lib_ui includes some Qt private headers directly (e.g. QtGui/private/qfixed_p.h
 # in ui/style/style_core_font.h) - normal upstream tdesktop practice, these
@@ -90,7 +104,9 @@ add_library(desktop-app::external_qt_static_plugins ALIAS external_qt_static_plu
 # Scoped here, as a plain (non-cache) variable, so it only affects the
 # find_package() calls below and everything add_subdirectory()-ed afterward
 # (codegen, lib_ui), not anything already resolved in the parent scope.
-list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/x64-windows")
+if (WIN32)
+    list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/x64-windows")
+endif()
 
 # external_jpeg: required by lib_ui itself (not by codegen_style).
 # "vcpkg install libjpeg-turbo:x64-windows" provides the JPEG::JPEG target.
@@ -106,8 +122,18 @@ add_library(external_zlib INTERFACE IMPORTED GLOBAL)
 add_library(desktop-app::external_zlib ALIAS external_zlib)
 target_link_libraries(external_zlib INTERFACE ZLIB::ZLIB)
 
-# "vcpkg install lz4:x64-windows" provides the lz4::lz4 target.
-find_package(lz4 CONFIG REQUIRED)
+# "vcpkg install lz4:x64-windows" provides the lz4::lz4 target. Distro
+# packages generally do not: Debian/Ubuntu's liblz4-dev ships pkg-config
+# metadata and no CMake config package at all, so the CONFIG-mode lookup
+# below finds nothing and the whole configure fails. Fall back to
+# pkg-config in that case and build the same lz4::lz4 target by hand.
+find_package(lz4 CONFIG QUIET)
+if (NOT TARGET lz4::lz4)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DESKTOP_APP_LZ4 REQUIRED IMPORTED_TARGET liblz4)
+    add_library(lz4::lz4 INTERFACE IMPORTED)
+    target_link_libraries(lz4::lz4 INTERFACE PkgConfig::DESKTOP_APP_LZ4)
+endif()
 add_library(external_lz4 INTERFACE IMPORTED GLOBAL)
 add_library(desktop-app::external_lz4 ALIAS external_lz4)
 target_link_libraries(external_lz4 INTERFACE lz4::lz4)
@@ -115,6 +141,21 @@ target_link_libraries(external_lz4 INTERFACE lz4::lz4)
 add_subdirectory(cmake/external/ranges)
 add_subdirectory(cmake/external/expected)
 add_subdirectory(cmake/external/xxhash)
+
+if (LINUX)
+    # lib_base's Linux half is not optional: base/platform/linux/*.cpp are in
+    # its source list unconditionally, and they #include the D-Bus/GObject
+    # bindings that external_glib generates plus KShell/KUser/KSandbox from
+    # external_kcoreaddons. Neither external was in the vendored subset (it
+    # was assembled against Windows, where none of this compiles in), so
+    # ZKGRAM_UI=qt could never configure on Linux at all.
+    #
+    # external_glib additionally pulls cmake/external/glib/cppgir, which
+    # upstream carries as a git submodule - see the shim CMakeLists.txt there
+    # for how it binds to the distro's cppgir package instead.
+    add_subdirectory(cmake/external/glib)
+    add_subdirectory(cmake/external/kcoreaddons)
+endif()
 
 # codegen_style/codegen_emoji are host tools CMake invokes as custom build
 # steps (to generate style headers / emoji data) using whatever PATH the
@@ -179,7 +220,14 @@ endfunction()
 # /DEPENDENTLOADFLAG:0x0 is the last one on the link line (MSVC uses the last
 # occurrence of a repeated switch).
 add_library(zkgram_allow_nonsystem32_deps INTERFACE)
-target_link_options(zkgram_allow_nonsystem32_deps INTERFACE /DEPENDENTLOADFLAG:0x0)
+if (MSVC)
+    # MSVC-only switch. Unguarded, it reached GNU ld on Linux, which read it
+    # as an input filename ("cannot find /DEPENDENTLOADFLAG:0x0") and failed
+    # every link that pulls this target in - codegen_style, codegen_emoji and
+    # zkgram itself. The target stays defined unconditionally so the three
+    # target_link_libraries() calls referring to it need no guards of their own.
+    target_link_options(zkgram_allow_nonsystem32_deps INTERFACE /DEPENDENTLOADFLAG:0x0)
+endif()
 
 add_subdirectory(lib_rpl)
 add_subdirectory(lib_crl)

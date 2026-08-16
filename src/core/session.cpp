@@ -374,7 +374,25 @@ void Session::cacheHistory(ConversationId chatId, const std::vector<PlainMessage
     localCache_.saveHistory(static_cast<std::int64_t>(chatId), messages);
 }
 
-void Session::stop() {
+// Deliberately noexcept, and every step below is individually guarded.
+//
+// This is the shutdown path, and ~Session() calls it, where a destructor is
+// noexcept by default - so an exception escaping here does not surface as a
+// failure, it calls std::terminate() and aborts the process. That was the
+// crash on closing the window: CryptoLayer::stop() forwards any Python-side
+// exception as a std::runtime_error (see rethrowAsRuntimeError in
+// crypto_layer.cpp), nothing here caught it, and stopping a conversation
+// whose handshake never finished raises on the Python side rather than
+// failing quietly - the same "AES key is still None" state that
+// MainWindow::updateConversationControlsVisibility() already hides the
+// composer for.
+//
+// One conversation failing to shut down cleanly must also not skip the
+// rest, so each is stopped in its own try block instead of one around the
+// loop: whatever happens, the TDLib client still gets disconnected and every
+// init thread still gets joined - and an unjoined init thread would be its
+// own std::terminate() when the map is destroyed.
+void Session::stop() noexcept {
     // Threads are moved out and joined WITHOUT holding conversationsMutex_:
     // an init() thread's own work (CryptoLayer callbacks calling back into
     // sendBytes/registerReceiver, see wireAndStartConversation) needs that
@@ -384,14 +402,28 @@ void Session::stop() {
     {
         std::lock_guard<std::mutex> lock(conversationsMutex_);
         for (auto& [chatId, cryptoLayer] : conversations_) {
-            cryptoLayer->stop();
+            try {
+                cryptoLayer->stop();
+            } catch (const std::exception& error) {
+                logDebug("stop: chatId=" + std::to_string(chatId) +
+                          " CryptoLayer::stop() failed, continuing shutdown: " + error.what());
+            } catch (...) {
+                logDebug("stop: chatId=" + std::to_string(chatId) +
+                          " CryptoLayer::stop() failed with a non-standard exception, continuing shutdown");
+            }
         }
         for (auto& [chatId, thread] : initThreads_) {
             threadsToJoin.push_back(std::move(thread));
         }
         initThreads_.clear();
     }
-    telegramClient_.disconnect();
+    try {
+        telegramClient_.disconnect();
+    } catch (const std::exception& error) {
+        logDebug(std::string("stop: TelegramClient::disconnect() failed: ") + error.what());
+    } catch (...) {
+        logDebug("stop: TelegramClient::disconnect() failed with a non-standard exception");
+    }
     for (auto& thread : threadsToJoin) {
         if (thread.joinable()) {
             thread.join();

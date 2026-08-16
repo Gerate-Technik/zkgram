@@ -41,7 +41,12 @@ public:
     // itself - call startConversation()/startConversationWithCompanion()
     // once the user picks a chat.
     void start();
-    void stop();
+    // noexcept, and it means it - see the definition. ~Session() calls this,
+    // and a destructor is noexcept by default, so an exception getting out
+    // of here terminates the process instead of reporting anything. Safe to
+    // call more than once (the Qt entry point calls it explicitly after the
+    // event loop ends, and again via ~Session).
+    void stop() noexcept;
 
     // Checks whether the other side of chatId is also running zkgram
     // before startConversation() is called - see

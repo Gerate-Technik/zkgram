@@ -45,3 +45,10 @@ CMakeFiles/
 telegram_fork/
 build/Release/*.pdb
 *.pdb
+
+# Fetched by build.sh (see fetch_third_party): sources the vendored
+# third_party/desktop-app expects in place but does not carry, cloned from
+# upstream rather than committed here.
+/third_party/desktop-app/cmake/external/glib/cppgir/
+/third_party/desktop-app/ThirdParty/kcoreaddons/
+/third_party/desktop-app/ThirdParty/xdg-desktop-portal/
