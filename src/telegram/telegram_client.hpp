@@ -70,6 +70,10 @@ struct PlainMessage {
     // entirely the client's job - see MainWindow's grouping logic in
     // main_window.cpp, which is what this field feeds).
     std::int64_t mediaAlbumId = 0;
+    // TDLib's td_api::message::reply_to_ (messageReplyToMessage variant
+    // only - external/story replies are not surfaced), 0 if this message is
+    // not a reply to anything in the same chat.
+    MessageId replyToMessageId = 0;
 };
 
 class TelegramClient {
@@ -172,10 +176,17 @@ public:
     // Sends already-encrypted bytes as a plain text message to chatId. The
     // bytes must already be a valid UTF-8 encoding (crypto::CryptoLayer
     // produces a text-safe ciphertext representation before this is called).
-    void sendBytes(ChatId chatId, const Bytes& data);
+    // replyToMessageId, when non-zero, links the sent message to an earlier
+    // one in the same chat via TDLib's own reply mechanism (content-agnostic
+    // at this layer - it works the same whether the content is ciphertext
+    // or plaintext). Default 0 (no reply) keeps every existing call site
+    // (in particular crypto::CryptoLayer's sendBytes callback, wired in
+    // core::Session, which has no notion of a reply) unchanged.
+    void sendBytes(ChatId chatId, const Bytes& data, MessageId replyToMessageId = 0);
 
-    // Sends an already-encrypted local file as a document to chatId.
-    void sendFile(ChatId chatId, const std::string& filePath);
+    // Sends an already-encrypted local file as a document to chatId. See
+    // sendBytes above for replyToMessageId.
+    void sendFile(ChatId chatId, const std::string& filePath, MessageId replyToMessageId = 0);
 
     // One process-wide callback each (not per-chat) - the chat id comes
     // through as the first callback argument, dispatching to the right

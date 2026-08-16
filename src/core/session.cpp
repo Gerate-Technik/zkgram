@@ -82,18 +82,14 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
         }
         if (onFile) {
             onFile(filePath);
-            return;
         }
-        // No encrypted conversation for this chat, so the file was never
-        // CryptoLayer output - it is an ordinary Telegram attachment. It
-        // goes out as a plain message rather than through onFileReceived so
-        // that it lands under the UI's rules for live plain content (see
-        // onPlainMessageReceived below), the same as plain text does; a
-        // live attachment has no message id here, only the downloaded path.
-        PlainMessage plain;
-        plain.text = "File: " + filePath;
-        plain.photoPath = filePath;
-        uiProvider_->onPlainMessageReceived(chatId, plain);
+        // No "else" branch anymore: a plain (non-encrypted) chat's incoming
+        // document/photo already reaches the UI as a full PlainMessage
+        // (real id/date/mediaAlbumId, a "Document"/"Photo" placeholder
+        // text) via onPlainMessageReceived below, fired directly from
+        // telegram::TelegramClient::onNewMessage. This used to synthesize
+        // a second, id-less message here from just the downloaded path,
+        // which duplicated every plain incoming attachment as two bubbles.
     });
     // The plain-content half of onBytesReceived above: a chat that has no
     // CryptoLayer session has nothing to decrypt, and its live messages used
@@ -117,13 +113,26 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
         plain.date = message.date;
         plain.photoPath = message.photoPath;
         plain.senderName = message.senderName;
+        plain.mediaAlbumId = message.mediaAlbumId;
+        plain.replyToMessageId = message.replyToMessageId;
+        dataRegistry_.upsertMessage(MessageData{chatId, message.id, MessageOrigin::Plain, message.isOutgoing,
+                                                 message.text, message.photoPath, message.senderName, message.date,
+                                                 message.mediaAlbumId, message.replyToMessageId});
         uiProvider_->onPlainMessageReceived(chatId, plain);
     });
     telegramClient_.onHistoryPhotoReady([this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& path) {
+        if (MessageData* existing = dataRegistry_.message(chatId, messageId)) {
+            existing->photoPath = path;
+            dataRegistry_.notifyUpdated(existing);
+        }
         uiProvider_->onHistoryPhotoReady(chatId, messageId, path);
     });
     telegramClient_.onHistorySenderNameReady(
         [this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& name) {
+            if (MessageData* existing = dataRegistry_.message(chatId, messageId)) {
+                existing->senderName = name;
+                dataRegistry_.notifyUpdated(existing);
+            }
             uiProvider_->onHistorySenderNameReady(chatId, messageId, name);
         });
 
@@ -151,6 +160,8 @@ void Session::start() {
             entry.hasActiveConversation = conversations_.count(chat.id) != 0;
             entry.isChannel = chat.isChannel;
             entry.photoPath = chat.photoPath;
+            dataRegistry_.upsertPeer(PeerData{entry.id, entry.title, entry.lastMessagePreview, entry.unreadCount,
+                                               entry.hasActiveConversation, entry.isChannel, entry.photoPath});
             entries.push_back(std::move(entry));
         }
         uiProvider_->onChatListUpdated(entries);
@@ -183,7 +194,7 @@ std::vector<PlainMessage> convertHistory(const std::vector<telegram::PlainMessag
     converted.reserve(messages.size());
     for (const auto& message : messages) {
         converted.push_back(PlainMessage{message.id, message.isOutgoing, message.text, message.date, message.photoPath,
-                                          message.senderName, message.mediaAlbumId});
+                                          message.senderName, message.mediaAlbumId, message.replyToMessageId});
     }
     return converted;
 }
@@ -347,12 +358,12 @@ void Session::sendFile(ConversationId chatId, const std::string& filePath) {
     }
 }
 
-void Session::sendPlainText(ConversationId chatId, const std::string& text) {
-    telegramClient_.sendBytes(chatId, telegram::Bytes(text.begin(), text.end()));
+void Session::sendPlainText(ConversationId chatId, const std::string& text, std::int64_t replyToMessageId) {
+    telegramClient_.sendBytes(chatId, telegram::Bytes(text.begin(), text.end()), replyToMessageId);
 }
 
-void Session::sendPlainFile(ConversationId chatId, const std::string& filePath) {
-    telegramClient_.sendFile(chatId, filePath);
+void Session::sendPlainFile(ConversationId chatId, const std::string& filePath, std::int64_t replyToMessageId) {
+    telegramClient_.sendFile(chatId, filePath, replyToMessageId);
 }
 
 std::vector<PlainMessage> Session::loadCachedHistory(ConversationId chatId) const {

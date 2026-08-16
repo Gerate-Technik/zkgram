@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/data_registry.hpp"
 #include "core/local_cache.hpp"
 #include "core/ui_provider.hpp"
 #include "./crypto/crypto_layer.hpp"
@@ -97,8 +98,14 @@ public:
     // already reads as plain content instead of ciphertext, this is just
     // the write side of that: without it, such a chat could be read but
     // never actually written to unless the other side also ran zkgram.
-    void sendPlainText(ConversationId chatId, const std::string& text);
-    void sendPlainFile(ConversationId chatId, const std::string& filePath);
+    // replyToMessageId, when non-zero, links the sent message to an
+    // earlier one in the same chat (see telegram::TelegramClient::
+    // sendBytes/sendFile) - only meaningful for a plain chat's real TDLib
+    // reply; there is no equivalent for sendText/sendFile above yet (see
+    // TODO.md, threading a reply through crypto::CryptoLayer's own
+    // send callback is not done in this pass).
+    void sendPlainText(ConversationId chatId, const std::string& text, std::int64_t replyToMessageId = 0);
+    void sendPlainFile(ConversationId chatId, const std::string& filePath, std::int64_t replyToMessageId = 0);
 
     // See core::LocalCache's own class comment for why this exists (not
     // just a speed optimization - CryptoLayer's forward-secret session
@@ -110,6 +117,14 @@ public:
     std::vector<PlainMessage> loadCachedHistory(ConversationId chatId) const;
     void cacheHistory(ConversationId chatId, const std::vector<PlainMessage>& messages) const;
 
+    // The single entity store (see historyview-port-guide.md section 4.1 /
+    // core/data_registry.hpp's own comment) - populated alongside every
+    // uiProvider_ call this class already makes below, not instead of it
+    // yet: a UI can subscribe to this now (onItemUpdated/onPeerUpdated) to
+    // start migrating off the older per-signal UiProvider callbacks, without
+    // those callbacks being removed out from under it in the same change.
+    DataRegistry& dataRegistry() { return dataRegistry_; }
+
 private:
     void wireAndStartConversation(ConversationId chatId);
 
@@ -117,6 +132,7 @@ private:
     std::string dataDir_;
     std::string password_;
     LocalCache localCache_;
+    DataRegistry dataRegistry_;
     telegram::TelegramClient telegramClient_;
 
     std::mutex conversationsMutex_;

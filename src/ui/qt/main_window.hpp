@@ -216,12 +216,18 @@ public:
     Q_INVOKABLE void appendConversationStatus(qlonglong chatId, const QString& stage, const QString& message);
     Q_INVOKABLE void appendConversationPeerText(qlonglong chatId, const QString& text);
     Q_INVOKABLE void appendConversationFileReceived(qlonglong chatId, const QString& filePath);
-    // A live incoming message in a chat with no encrypted session - plain
-    // Telegram content, carrying its real message id (unlike
-    // appendConversationPeerText above, which is CryptoLayer plaintext and
-    // has none). See core::UiProvider::onPlainMessageReceived.
+    // A live message in a chat with no encrypted session - plain Telegram
+    // content, carrying its real message id (unlike appendConversationPeerText
+    // above, which is CryptoLayer plaintext and has none). See
+    // core::UiProvider::onPlainMessageReceived. isOutgoing distinguishes your
+    // own sent message echoed back by TDLib from one the other side sent -
+    // previously this was always drawn as incoming, since the caller never
+    // received is_outgoing_ at all (onNewMessage() dropped every outgoing
+    // message before it could reach here).
     Q_INVOKABLE void appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
-                                                 const QString& senderName, const QString& filePath);
+                                                 const QString& senderName, const QString& filePath,
+                                                 bool isOutgoing, qlonglong date, qlonglong mediaAlbumId,
+                                                 qlonglong replyToMessageId);
     Q_INVOKABLE void setConversationReady(qlonglong chatId);
 
     // Called by QtUiProvider via BlockingQueuedConnection: show a modal
@@ -262,11 +268,22 @@ private Q_SLOTS:
     // brand new session this run).
     void onSecretModeToggleClicked();
 
-    // Shows replyBar_ with a quoted preview of text (see replyToText_'s own
-    // comment for why this is a local quoting convenience, not a true
-    // protocol-level reply link) and focuses the composer.
-    void startReply(const QString& senderTitle, const QString& text);
+    // Shows replyBar_ with a quoted preview of text and focuses the
+    // composer. messageId, when non-zero, is a real TDLib message id
+    // (telegram::TelegramClient::sendBytes/sendFile's replyToMessageId) -
+    // onSendClicked() links to it via TDLib's own reply mechanism for a
+    // plain (non-encrypted) send. A CryptoLayer message has no TDLib id of
+    // its own to link against (messageId 0 here), so replying to one still
+    // falls back to prepending a quoted copy of its text, same as before.
+    void startReply(const QString& senderTitle, const QString& text, qlonglong messageId);
     void cancelReply();
+
+    // Wired to HistoryCanvas::onSelectionModeChanged - swaps headerRow_ for
+    // selectionToolbar_ (or back) and refreshes the "N selected" count.
+    void updateSelectionToolbar(bool active, int selectedCount);
+    void onSelectionForwardClicked();
+    void onSelectionCopyClicked();
+    void onSelectionDeleteClicked();
 
 protected:
     void closeEvent(class QCloseEvent* event) override;
@@ -315,9 +332,18 @@ private:
     // toggled on for it, see secretModeOn_/renderCurrentConversation) -
     // a secret message is still stored either way, so toggling secret
     // mode on later shows it without needing to refetch anything.
+    // date 0 means "unknown, stamp with the real time now" (a genuine live
+    // append) - a live plain message from TDLib passes its own real
+    // message.date_ instead, so it survives a cache reload with its
+    // original time (see StoredMessage::date's own comment) instead of
+    // reading as "now" forever. mediaAlbumId is stored on the message but
+    // does not (yet) trigger live grouping - only the history-load /
+    // cache-reload rebuild in renderCurrentConversation() groups by it, see
+    // groupAlbums(); a live-arriving album's parts still render as
+    // separate bubbles until the chat is reopened.
     void appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
                         const QString& filePath = QString(), qlonglong messageId = 0,
-                        const QString& senderName = QString());
+                        const QString& senderName = QString(), qint64 date = 0, qint64 mediaAlbumId = 0);
     // Rebuilds messages_ (a HistoryCanvas, see main_window.cpp) from
     // conversationMessages_[currentChatId_] - "attached"/"showTail" per
     // message (whether it joins the previous bubble/gets the pointed
@@ -465,15 +491,17 @@ private:
     // encryption would be a real trust problem, not just a missing label.
     QLabel* plainSendWarning_;
     // Reply-to-message preview (Ui::MessageBar, real widget - see
-    // zkgram_chat_style_stub.style's defaultMessageBar comment). No true
-    // TDLib/protocol-level reply link exists for crypto::CryptoLayer
-    // messages (a stream session has no message-id concept, same
-    // constraint already noted for "Edit"/"Forward") - replying quotes the
-    // original text into the sent message instead, this bar is only the
-    // picker/preview UI for that.
+    // zkgram_chat_style_stub.style's defaultMessageBar comment).
+    // replyToMessageId_ != 0 means a real TDLib reply link is possible for
+    // the next plain send (see onSendClicked()); it is 0 for a
+    // crypto::CryptoLayer message (a stream session has no message-id
+    // concept, same constraint already noted for "Edit"/"Forward"), in
+    // which case replying still falls back to quoting replyToText_ into
+    // the sent message.
     QWidget* replyBarRow_ = nullptr;
     Ui::MessageBar* replyBar_ = nullptr;
     QString replyToText_;
+    qlonglong replyToMessageId_ = 0;
     ChatInput* input_;
     // One button, not two - real Telegram Desktop's composer has a single
     // button that shows a mic icon when the field is empty and a send
@@ -484,8 +512,15 @@ private:
     Ui::IconButton* sendButton_;
     Ui::IconButton* sendFileButton_;
     QLineEdit* searchInput_;
+    QWidget* headerRow_;
     QLabel* companionAvatar_;
     QLabel* companionLabel_;
+    // Shown instead of headerRow_ while HistoryCanvas is in multi-message
+    // selection mode (see HistoryCanvas::onSelectionModeChanged) - "N
+    // selected" plus Forward/Copy/Delete, matching real Telegram's own
+    // selection toolbar replacing the chat header in the same slot.
+    QWidget* selectionToolbar_;
+    QLabel* selectionCountLabel_;
     // Per-chat secret-mode toggle/indicator, next to companionLabel_ in
     // the conversation header - see updateSecretModeIndicator() and
     // secretModeOn_'s own comment for what this actually controls.

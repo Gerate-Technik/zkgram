@@ -96,6 +96,7 @@ set(ZKGRAM_SOURCES
     src/crypto/python_bridge.cpp
     src/crypto/crypto_layer.cpp
     src/telegram/telegram_client.cpp
+    src/core/data_registry.cpp
     src/core/local_cache.cpp
     src/core/session.cpp
 )
@@ -149,6 +150,7 @@ if(ZKGRAM_UI STREQUAL "qt")
         src/ui/qt/qt_ui_provider.cpp
         src/ui/qt/main_window.cpp
         src/ui/qt/icons.cpp
+        src/ui/qt/chat_background.cpp
         src/ui/qt/resources.qrc
     )
     if(ZKGRAM_VENDOR_LIB_UI)

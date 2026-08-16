@@ -56,6 +56,8 @@ struct PlainMessage {
     std::string senderName;
     // See telegram::PlainMessage::mediaAlbumId's own comment.
     std::int64_t mediaAlbumId = 0;
+    // See telegram::PlainMessage::replyToMessageId's own comment.
+    std::int64_t replyToMessageId = 0;
 };
 
 class UiProvider {

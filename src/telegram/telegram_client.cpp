@@ -102,6 +102,18 @@ Bytes stringToBytes(const std::string& text) {
     return Bytes(text.begin(), text.end());
 }
 
+// Only the plain in-chat reply shape is surfaced (messageReplyToMessage) -
+// a reply to a story or an external chat's message (messageReplyToStory,
+// messageReplyToExternalMessage) has no local messageId in this chat to
+// link a bubble to, so those are left as "not a reply" (0) rather than
+// half-represented.
+std::int64_t replyToMessageIdFrom(const td_api::message& message) {
+    if (message.reply_to_ != nullptr && message.reply_to_->get_id() == td_api::messageReplyToMessage::ID) {
+        return static_cast<const td_api::messageReplyToMessage*>(message.reply_to_.get())->message_id_;
+    }
+    return 0;
+}
+
 // Extension-based only, no content sniffing: good enough to decide between
 // TDLib's inputMessagePhoto (inline preview on both ends) and the generic
 // inputMessageDocument fallback for everything else.
@@ -805,6 +817,7 @@ struct TelegramClient::Impl {
                     plain.text = previewFor(*messagePtr);
                     plain.date = messagePtr->date_;
                     plain.mediaAlbumId = messagePtr->media_album_id_;
+                    plain.replyToMessageId = replyToMessageIdFrom(*messagePtr);
                     // Only incoming messages need a sender name resolved -
                     // an outgoing one is always "you". messageSenderChat
                     // (an anonymous admin post, or a channel/group posting
@@ -1073,52 +1086,57 @@ struct TelegramClient::Impl {
         });
     }
 
+    // Previously bailed out entirely for any outgoing message
+    // (message.is_outgoing_), which meant a photo/document YOU sent never
+    // got a PlainMessage at all - no id, no date, no mediaAlbumId. Since
+    // MainWindow's album-grouping (main_window.cpp) merges consecutive
+    // StoredMessages that share a non-zero mediaAlbumId, an album you sent
+    // yourself could never be grouped: none of its parts ever arrived with
+    // an id to group by. PlainMessage is now built once, from fields common
+    // to every content type, and reported for both directions; only the
+    // text-specific side effects below (ciphertext decoding, the zkgram
+    // presence probe) still apply to incoming messages only - reprocessing
+    // your own outgoing ciphertext as if it were newly received would be
+    // wrong regardless of this fix.
     void onNewMessage(td_api::message& message) {
-        if (message.is_outgoing_ || message.content_ == nullptr) {
+        if (message.content_ == nullptr) {
             return;
         }
         ChatId chatId = message.chat_id_;
-        switch (message.content_->get_id()) {
-            case td_api::messageText::ID: {
-                auto* content = static_cast<td_api::messageText*>(message.content_.get());
-                if (content->text_ == nullptr || handlePotentialProbe(chatId, content->text_->text_)) {
-                    break;
-                }
-                if (onBytes_) {
-                    onBytes_(chatId, stringToBytes(content->text_->text_));
-                }
-                // The same message a second time, but as plain readable
-                // Telegram content instead of bytes to decrypt. Which of the
-                // two a given chat actually wants is core::Session's call -
-                // only it knows which chats have a CryptoLayer session - so
-                // both are offered and it picks; see its onBytesReceived()/
-                // onPlainMessageReceived() dispatchers. Before this existed
-                // only the bytes went out, and for a chat with no encrypted
-                // session they were dropped on the floor there, which is why
-                // a message arriving in an open plain chat never appeared
-                // until the chat was reopened and its history refetched.
-                if (onPlainMessage_) {
-                    PlainMessage plain;
-                    plain.id = message.id_;
-                    plain.isOutgoing = false;
-                    plain.text = content->text_->text_;
-                    plain.date = message.date_;
-                    onPlainMessage_(chatId, plain);
-                    // Resolved asynchronously and delivered through
-                    // onHistorySenderName_, exactly as for a history message
-                    // (see fetchMessageHistory) - the UI matches it up by
-                    // message id, which is why plain.id is a real one here.
-                    if (message.sender_id_ != nullptr &&
-                        message.sender_id_->get_id() == td_api::messageSenderUser::ID) {
-                        auto* sender = static_cast<td_api::messageSenderUser*>(message.sender_id_.get());
-                        requestSenderName(chatId, plain.id, sender->user_id_);
-                    }
-                }
-                break;
+        bool incoming = !message.is_outgoing_;
+
+        if (message.content_->get_id() == td_api::messageText::ID) {
+            auto* content = static_cast<td_api::messageText*>(message.content_.get());
+            if (content->text_ == nullptr) {
+                return;
             }
+            if (incoming && handlePotentialProbe(chatId, content->text_->text_)) {
+                return;
+            }
+            // The bytes-for-decryption path is incoming-only, same as
+            // before - core::Session's onBytesReceived dispatcher feeds
+            // this straight into crypto::CryptoLayer's decoder, which must
+            // never see a message this process itself already encrypted
+            // and sent.
+            if (incoming && onBytes_) {
+                onBytes_(chatId, stringToBytes(content->text_->text_));
+            }
+        }
+
+        // Built once, for every content type - see this function's own
+        // comment above for why outgoing messages need this now too.
+        PlainMessage plain;
+        plain.id = message.id_;
+        plain.isOutgoing = !incoming;
+        plain.date = message.date_;
+        plain.mediaAlbumId = message.media_album_id_;
+        plain.replyToMessageId = replyToMessageIdFrom(message);
+        plain.text = previewFor(message);
+
+        switch (message.content_->get_id()) {
             case td_api::messageDocument::ID: {
                 auto* content = static_cast<td_api::messageDocument*>(message.content_.get());
-                if (content->document_ != nullptr && content->document_->document_ != nullptr) {
+                if (incoming && content->document_ != nullptr && content->document_->document_ != nullptr) {
                     downloadIncomingFile(chatId, content->document_->document_->id_);
                 }
                 break;
@@ -1126,18 +1144,44 @@ struct TelegramClient::Impl {
             case td_api::messagePhoto::ID: {
                 // photo_->sizes_ is ordered smallest to largest; take the
                 // largest available size, same as a real Telegram client's
-                // "open in full size" would.
+                // "open in full size" would. Routed through
+                // requestHistoryPhoto/onHistoryPhoto_ (the same channel
+                // fetchMessageHistory uses), not downloadIncomingFile/
+                // onFile_ - a live photo needs the exact same "already
+                // local vs. still downloading" handling a history photo
+                // does (see requestHistoryPhoto's own comment), and reusing
+                // one channel means the UI has exactly one way to receive
+                // an async photo, regardless of whether it came from
+                // history or a live update.
                 auto* content = static_cast<td_api::messagePhoto*>(message.content_.get());
                 if (content->photo_ != nullptr && !content->photo_->sizes_.empty()) {
                     auto& largest = content->photo_->sizes_.back();
                     if (largest->photo_ != nullptr) {
-                        downloadIncomingFile(chatId, largest->photo_->id_);
+                        if (largest->photo_->local_ != nullptr && largest->photo_->local_->is_downloading_completed_) {
+                            plain.photoPath = largest->photo_->local_->path_;
+                        } else {
+                            requestHistoryPhoto(chatId, plain.id, *largest->photo_);
+                        }
                     }
                 }
                 break;
             }
             default:
                 break;
+        }
+
+        if (onPlainMessage_) {
+            onPlainMessage_(chatId, plain);
+            // Resolved asynchronously and delivered through
+            // onHistorySenderName_, exactly as for a history message (see
+            // fetchMessageHistory) - the UI matches it up by message id,
+            // which is why plain.id is a real one here. Incoming only: an
+            // outgoing message is always "you", nothing to resolve.
+            if (incoming && message.sender_id_ != nullptr &&
+                message.sender_id_->get_id() == td_api::messageSenderUser::ID) {
+                auto* sender = static_cast<td_api::messageSenderUser*>(message.sender_id_.get());
+                requestSenderName(chatId, plain.id, sender->user_id_);
+            }
         }
     }
 
@@ -1265,9 +1309,19 @@ struct TelegramClient::Impl {
     // a failed send (blocked by the recipient, chat restrictions, etc.)
     // used to fail completely silently, with nothing logged and no way to
     // tell a genuine delivery failure apart from network lag.
-    void sendMessageContent(ChatId chatId, td_api::object_ptr<td_api::InputMessageContent> content) {
+    // replyToMessageId 0 means "no reply" - reply_to_ stays null, matching
+    // every call site before reply support existed. td_api::sendMessage's
+    // 2nd param is a topic id (unused, this client has no forum-topic
+    // support), 3rd is reply_to_.
+    void sendMessageContent(ChatId chatId, td_api::object_ptr<td_api::InputMessageContent> content,
+                             MessageId replyToMessageId = 0) {
+        td_api::object_ptr<td_api::InputMessageReplyTo> replyTo;
+        if (replyToMessageId != 0) {
+            replyTo = td_api::make_object<td_api::inputMessageReplyToMessage>(replyToMessageId, nullptr, 0, "");
+        }
         sendWithHandler(
-            td_api::make_object<td_api::sendMessage>(chatId, nullptr, nullptr, nullptr, nullptr, std::move(content)),
+            td_api::make_object<td_api::sendMessage>(chatId, nullptr, std::move(replyTo), nullptr, nullptr,
+                                                       std::move(content)),
             [chatId](ObjectPtr object) {
                 if (object->get_id() == td_api::error::ID) {
                     auto* error = static_cast<td_api::error*>(object.get());
@@ -1277,17 +1331,17 @@ struct TelegramClient::Impl {
             });
     }
 
-    void sendPlainText(ChatId chatId, const std::string& text) {
+    void sendPlainText(ChatId chatId, const std::string& text, MessageId replyToMessageId = 0) {
         auto content = td_api::make_object<td_api::inputMessageText>();
         content->text_ = td_api::make_object<td_api::formattedText>(text, std::vector<td_api::object_ptr<td_api::textEntity>>());
-        sendMessageContent(chatId, std::move(content));
+        sendMessageContent(chatId, std::move(content), replyToMessageId);
     }
 
-    void sendBytes(ChatId chatId, const Bytes& data) {
-        sendPlainText(chatId, std::string(data.begin(), data.end()));
+    void sendBytes(ChatId chatId, const Bytes& data, MessageId replyToMessageId = 0) {
+        sendPlainText(chatId, std::string(data.begin(), data.end()), replyToMessageId);
     }
 
-    void sendFile(ChatId chatId, const std::string& filePath) {
+    void sendFile(ChatId chatId, const std::string& filePath, MessageId replyToMessageId = 0) {
         if (looksLikeImagePath(filePath)) {
             // inputMessagePhoto gives an inline preview on both ends instead
             // of a generic document icon; width_/height_ are left at 0
@@ -1300,7 +1354,7 @@ struct TelegramClient::Impl {
             photo->height_ = 0;
             auto content = td_api::make_object<td_api::inputMessagePhoto>();
             content->photo_ = std::move(photo);
-            sendMessageContent(chatId, std::move(content));
+            sendMessageContent(chatId, std::move(content), replyToMessageId);
             return;
         }
         // document_ takes an inputDocument wrapper (file + thumbnail +
@@ -1310,7 +1364,7 @@ struct TelegramClient::Impl {
         document->disable_content_type_detection_ = true;
         auto content = td_api::make_object<td_api::inputMessageDocument>();
         content->document_ = std::move(document);
-        sendMessageContent(chatId, std::move(content));
+        sendMessageContent(chatId, std::move(content), replyToMessageId);
     }
 
     std::string dataDir_;
@@ -1408,12 +1462,12 @@ void TelegramClient::probeZkgramPresence(ChatId chatId, std::function<void(bool)
     impl_->probeZkgramPresence(chatId, std::move(onResult));
 }
 
-void TelegramClient::sendBytes(ChatId chatId, const Bytes& data) {
-    impl_->sendBytes(chatId, data);
+void TelegramClient::sendBytes(ChatId chatId, const Bytes& data, MessageId replyToMessageId) {
+    impl_->sendBytes(chatId, data, replyToMessageId);
 }
 
-void TelegramClient::sendFile(ChatId chatId, const std::string& filePath) {
-    impl_->sendFile(chatId, filePath);
+void TelegramClient::sendFile(ChatId chatId, const std::string& filePath, MessageId replyToMessageId) {
+    impl_->sendFile(chatId, filePath, replyToMessageId);
 }
 
 void TelegramClient::onBytesReceived(std::function<void(ChatId, const Bytes&)> callback) {

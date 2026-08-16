@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QMessageBox>
 #include <QMetaObject>
 
@@ -60,6 +61,25 @@ std::string logFilePath() {
 
 int main(int argc, char** argv) {
     std::set_terminate(logUncaughtExceptionAndAbort);
+
+    // Must run before QApplication/QGuiApplication is constructed (Qt's own
+    // requirement - setting it later is a no-op). Without this, on a
+    // fractional OS display scale (125%/150%, common on Windows) Qt reports
+    // QScreen::devicePixelRatio() as that exact fraction (e.g. 1.5) and
+    // paints every widget's backing store at that ratio, while
+    // ui_integration.cpp's InstallUiRuntime() rounds the SAME value up to
+    // an integer (qRound(1.5) == 2) for style::SetDevicePixelRatio(), since
+    // the style system only ever prepares assets at a whole @1x/@2x/@3x
+    // multiplier - real tdesktop does the same thing (see cRetinaFactor()).
+    // The two ratios used to disagree (2 vs 1.5): bubble corner pixmaps
+    // were pre-rendered assuming a 2x surface, then painted onto a 1.5x
+    // one, landing on fractional pixel coordinates - the visible seams
+    // between the corner pixmaps and the flat-fill middle of a bubble were
+    // exactly that 0.75 coverage mismatch. Rounding Qt's own scale factor
+    // the same way here makes QScreen::devicePixelRatio() already return
+    // the rounded integer everywhere (including the actual paint surface),
+    // so both sides agree.
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::Round);
 
     QApplication app(argc, argv);
 

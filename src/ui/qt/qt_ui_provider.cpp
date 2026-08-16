@@ -81,7 +81,10 @@ void QtUiProvider::onPlainMessageReceived(zkgram::core::ConversationId conversat
                                Q_ARG(qlonglong, static_cast<qlonglong>(message.id)),
                                Q_ARG(QString, QString::fromStdString(message.text)),
                                Q_ARG(QString, QString::fromStdString(message.senderName)),
-                               Q_ARG(QString, QString::fromStdString(message.photoPath)));
+                               Q_ARG(QString, QString::fromStdString(message.photoPath)),
+                               Q_ARG(bool, message.isOutgoing), Q_ARG(qlonglong, static_cast<qlonglong>(message.date)),
+                               Q_ARG(qlonglong, static_cast<qlonglong>(message.mediaAlbumId)),
+                               Q_ARG(qlonglong, static_cast<qlonglong>(message.replyToMessageId)));
 }
 
 void QtUiProvider::onHistoryPhotoReady(zkgram::core::ConversationId conversation, std::int64_t messageId,

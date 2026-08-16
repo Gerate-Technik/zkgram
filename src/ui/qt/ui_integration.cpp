@@ -5,10 +5,23 @@
 #include "ui/effects/animations.h"
 
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QMetaObject>
+#include <QScreen>
 #include <QStandardPaths>
 
 namespace zkgram::ui::qt {
+
+namespace {
+// A fixed, explicitly requested value, not derived from the screen the
+// way DevicePixelRatio is - see InstallUiRuntime()'s own comment for why
+// style::SetScale() (not just StartManager()) had to be called for this to
+// have any visible effect on the hand-painted canvas code at all. 100
+// (real tdesktop's own default) read as too small once the pipeline
+// actually worked end to end; 150 read as too large - 120 is the
+// requested middle ground.
+constexpr int kZkgramScale = 120;
+}  // namespace
 
 void UiIntegration::postponeCall(FnMut<void()>&& callable) {
     // Marshalled onto qApp (always the GUI thread) regardless of which
@@ -86,7 +99,50 @@ void InstallUiRuntime(int argc, char** argv) {
     base::Integration::Set(&baseInstance);
     static UiIntegration instance;
     Ui::Integration::Set(&instance);
-    style::StartManager(style::kScaleDefault);
+
+    // style::DevicePixelRatio()/Scale() default to 1 / kScaleDefault (100)
+    // and nothing here ever changed them - every style-system-rendered
+    // asset (bubble corner masks, the tail icon, glyph icons) was prepared
+    // assuming a 1:1 pixel screen, then Qt's own automatic HiDPI upscaling
+    // stretched the already-rendered result to match the real Windows
+    // display scale (125%/150% are common) - the visible seams/blur at
+    // bubble corners the user reported are exactly what that mismatch
+    // looks like. Read the real ratio from the primary screen and set
+    // both: DevicePixelRatio (integer, for @2x/@3x asset selection) and
+    // Scale (percent, for precise fractional layout) - matching real
+    // tdesktop's own DPI-detection intent, not guessed values.
+    qreal devicePixelRatio =
+        QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->devicePixelRatio() : 1.0;
+    style::SetDevicePixelRatio(qMax(1, qRound(devicePixelRatio)));
+    // Scale (logical interface size) is deliberately NOT set to match the
+    // real device pixel ratio, unlike DevicePixelRatio above - real
+    // tdesktop treats these as two separate knobs (its own Settings has
+    // an independent "interface size" the user can pick independently of
+    // what the OS scale would suggest). Matching them 1:1 made the whole
+    // UI larger than wanted; kScaleDefault (100) afterwards read as too
+    // small on this display - kZkgramScale is a fixed middle ground the
+    // user picked explicitly, not derived from the screen.
+    //
+    // style::SetScale() is NOT redundant with StartManager() below, even
+    // though both take the same scale argument - they feed two completely
+    // separate mechanisms. StartManager(scale) forwards `scale` straight
+    // into each generated style module's own start(int scale) (see
+    // gen/styles/style_basic.cpp: `ConvertScale(13, scale)` etc.), which
+    // bakes it into every real .style-declared st:: value ONCE at
+    // startup - that part was already correctly scaling actual lib_ui
+    // widgets (the composer, buttons, input fields). SetScale(scale) is
+    // what sets the *global* accessor style::Scale() reads - the value
+    // every no-argument style::ConvertScale(x) call in this codebase's own
+    // hand-painted canvas code (HistoryCanvas/SidebarCanvas bubble/sidebar
+    // sizing, see main_window.cpp's bubbleMargin()/sidebarRowHeight()/etc.)
+    // resolves against. Without this call the global stayed at
+    // kScaleDefault (100) forever regardless of what StartManager was
+    // given, silently no-op-ing every one of those calls - the exact "the
+    // scale doesn't do anything" symptom reported, and why only genuine
+    // .style widgets (not the message list or sidebar) ever visibly
+    // responded to changing kZkgramScale.
+    style::SetScale(kZkgramScale);
+    style::StartManager(kZkgramScale);
     // Ui::Animations::Basic::start() (used by every animated real widget -
     // MaskedInputField's focus border, RoundButton's ripple, and now the
     // real chat bubble/theme code) hard-Expects() a live
