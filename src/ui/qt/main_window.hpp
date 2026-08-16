@@ -361,6 +361,20 @@ private:
     // countMessageRounding) are computed here, layout and painting are
     // entirely HistoryCanvas's own job.
     void renderCurrentConversation();
+    // Coalesced renderCurrentConversation(): schedules one rebuild soon
+    // instead of doing it right now. For the metadata that TDLib resolves
+    // one item at a time after a history page has already been shown -
+    // sender names and photos, see updateHistorySenderName()/
+    // updateHistoryPhoto(). Each of those arrives as its own separate
+    // callback, so a freshly opened chat produces a burst of up to one per
+    // message in the page, and each one used to trigger a full O(n) rebuild
+    // of the entire conversation (re-measuring every bubble, re-scaling
+    // every image) - quadratic in the page size, and precisely the "the
+    // message list takes forever to update after login" symptom. Nothing is
+    // lost by batching: renderCurrentConversation() always rebuilds from
+    // conversationMessages_, which every one of those callbacks has already
+    // updated by the time the render runs.
+    void scheduleConversationRender();
     void sendFilePath(const QString& filePath, const QString& label);
     void setControlsEnabled(bool enabled);
     void updateConversationControlsVisibility();
@@ -472,6 +486,13 @@ private:
     // stop processing events entirely and the window read as "Not
     // Responding" to Windows. See updateChatList()/flushSidebarRender().
     QTimer* sidebarRenderThrottleTimer_;
+    // Same idea as sidebarRenderThrottleTimer_ above, for the message list -
+    // see scheduleConversationRender(). Also remembers which chat the
+    // pending render was scheduled for, so a rebuild queued for a chat the
+    // user has since navigated away from is dropped rather than redrawing
+    // the newly opened one for no reason.
+    QTimer* conversationRenderThrottleTimer_;
+    qlonglong pendingConversationRenderChatId_ = 0;
     // The last real chat-list snapshot from updateChatList(), restored into
     // chatListWidget_ once the search box is cleared - search results
     // replace what chatListWidget_ shows, they never replace this cache.

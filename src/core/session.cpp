@@ -160,8 +160,24 @@ void Session::start() {
             entry.hasActiveConversation = conversations_.count(chat.id) != 0;
             entry.isChannel = chat.isChannel;
             entry.photoPath = chat.photoPath;
-            dataRegistry_.upsertPeer(PeerData{entry.id, entry.title, entry.lastMessagePreview, entry.unreadCount,
-                                               entry.hasActiveConversation, entry.isChannel, entry.photoPath});
+            // Only actually written when something about this peer changed.
+            // A chat-list push carries every known chat, but a push is
+            // almost always triggered by a change to one or two of them -
+            // re-writing all N regardless meant N PeerData overwrites and N
+            // peerUpdated_ emissions (each of which copies the whole slot
+            // list, see Signal::emit) per push, telling every subscriber
+            // that hundreds of unchanged chats had just changed.
+            PeerData peer{entry.id,
+                           entry.title,
+                           entry.lastMessagePreview,
+                           entry.unreadCount,
+                           entry.hasActiveConversation,
+                           entry.isChannel,
+                           entry.photoPath};
+            const PeerData* known = dataRegistry_.peer(entry.id);
+            if (known == nullptr || !(*known == peer)) {
+                dataRegistry_.upsertPeer(std::move(peer));
+            }
             entries.push_back(std::move(entry));
         }
         uiProvider_->onChatListUpdated(entries);
