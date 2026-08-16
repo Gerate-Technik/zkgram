@@ -370,18 +370,17 @@ QPixmap dotPixmap(int size, const QColor& color) {
 // fill this replaces. Left as named constants for now rather than adding
 // new .style declarations in the same pass as everything else changing
 // here; tracked in TODO.md, not silently accepted as finished.
-// Tightened to a narrower purple/lavender range (previous four colors
-// were also nominally purple, but spanned enough hue/lightness that the
-// gradient's outer, low-weight regions read as a colder, greener-looking
-// mix once blended - a side effect of inverse-distance interpolation
-// between points that were not close enough together). Kept the same 4
-// distinct control points (still a real mesh gradient, not a flat fill),
-// just clustered tighter in hue.
+// Pushed more saturated than the previous pass - that one fixed the
+// green-looking blend (too wide a hue/lightness spread between the 4
+// points) but landed on a fairly washed-out, grayish lavender. Same 4-
+// point mesh-gradient structure, just deeper/more saturated purple at
+// each point so the wallpaper itself reads as purple rather than pale
+// gray with a purple tint.
 constexpr GradientColors kWallpaperColors = {
-    QColor(0xE6, 0xDC, 0xF7),
-    QColor(0xC7, 0xB3, 0xEE),
-    QColor(0xDA, 0xCC, 0xF5),
-    QColor(0xB8, 0xA0, 0xE8),
+    QColor(0xDC, 0xC6, 0xF5),
+    QColor(0xB4, 0x8E, 0xE8),
+    QColor(0xC9, 0xA8, 0xF0),
+    QColor(0x9B, 0x6F, 0xDE),
 };
 
 QImage tintedWallpaperPattern() {
