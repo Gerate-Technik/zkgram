@@ -285,8 +285,18 @@ private Q_SLOTS:
     void onSelectionCopyClicked();
     void onSelectionDeleteClicked();
 
+    // Real Telegram Desktop's own shortcut: pressing Up in an empty
+    // composer edits your own last message in the current chat, no
+    // right-click needed - see the eventFilter() override below for why
+    // this needs an application-wide event filter rather than an
+    // overridden ChatInput::keyPressEvent (focus actually sits on
+    // Ui::InputField's own internal child widget, not on ChatInput
+    // itself, so a keyPressEvent override there would never see the key).
+    void editLastOutgoingMessage();
+
 protected:
     void closeEvent(class QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     struct StoredMessage {
@@ -521,6 +531,11 @@ private:
     // selection toolbar replacing the chat header in the same slot.
     QWidget* selectionToolbar_;
     QLabel* selectionCountLabel_;
+    // Fullscreen photo viewer, opened by clicking a photo/album bubble -
+    // see HistoryCanvas::onImageActivated. A plain QWidget* here for the
+    // same reason messages_ is (MediaViewer is defined in main_window.cpp,
+    // not this header) - cast back via asMediaViewer() at each use site.
+    QWidget* mediaViewer_;
     // Per-chat secret-mode toggle/indicator, next to companionLabel_ in
     // the conversation header - see updateSecretModeIndicator() and
     // secretModeOn_'s own comment for what this actually controls.

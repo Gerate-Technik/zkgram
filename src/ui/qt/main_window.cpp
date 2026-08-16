@@ -370,11 +370,18 @@ QPixmap dotPixmap(int size, const QColor& color) {
 // fill this replaces. Left as named constants for now rather than adding
 // new .style declarations in the same pass as everything else changing
 // here; tracked in TODO.md, not silently accepted as finished.
+// Tightened to a narrower purple/lavender range (previous four colors
+// were also nominally purple, but spanned enough hue/lightness that the
+// gradient's outer, low-weight regions read as a colder, greener-looking
+// mix once blended - a side effect of inverse-distance interpolation
+// between points that were not close enough together). Kept the same 4
+// distinct control points (still a real mesh gradient, not a flat fill),
+// just clustered tighter in hue.
 constexpr GradientColors kWallpaperColors = {
-    QColor(0xE0, 0xD5, 0xF5),  // very light lilac
-    QColor(0xB0, 0x95, 0xE0),  // soft purple
-    QColor(0xD4, 0xC5, 0xF0),  // light lavender
-    QColor(0x9B, 0x7F, 0xD4),  // medium purple
+    QColor(0xE6, 0xDC, 0xF7),
+    QColor(0xC7, 0xB3, 0xEE),
+    QColor(0xDA, 0xCC, 0xF5),
+    QColor(0xB8, 0xA0, 0xE8),
 };
 
 QImage tintedWallpaperPattern() {
@@ -450,6 +457,108 @@ private:
     qreal devicePixelRatio_ = 1.0;
     QImage cache_;
     bool cacheValid_ = false;
+};
+
+// Fullscreen photo viewer - real Telegram opens one of these on clicking
+// any photo in a chat (a dimmed overlay, the image centered and scaled to
+// fit, arrows/swipe between an album's other photos, Esc or a click
+// outside the image to close). This covers the single-image case and
+// album navigation between the photos the click's own bubble already has
+// loaded; it does not fetch anything over the network itself, and there
+// is no zoom/pan (real Telegram has both) - a real, working first version
+// of the feature, not the complete thing.
+class MediaViewer : public QWidget {
+public:
+    explicit MediaViewer(QWidget* parent) : QWidget(parent) {
+        setAttribute(Qt::WA_StyledBackground, true);
+        setFocusPolicy(Qt::StrongFocus);
+        hide();
+    }
+
+    void open(const QVector<QPixmap>& images, int startIndex) {
+        if (images.isEmpty()) {
+            return;
+        }
+        images_ = images;
+        index_ = qBound(0, startIndex, images_.size() - 1);
+        if (parentWidget() != nullptr) {
+            setGeometry(parentWidget()->rect());
+        }
+        show();
+        raise();
+        setFocus();
+        update();
+    }
+
+    void close() {
+        hide();
+        images_.clear();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (images_.isEmpty()) {
+            return;
+        }
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0, 0, 0, 220));
+        const QPixmap& pixmap = images_[index_];
+        QSize maxSize = size() - QSize(style::ConvertScale(80), style::ConvertScale(80));
+        QPixmap scaled = pixmap.scaled(maxSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        imageRect_ = QRect(QPoint((width() - scaled.width()) / 2, (height() - scaled.height()) / 2), scaled.size());
+        painter.drawPixmap(imageRect_, scaled);
+        if (images_.size() > 1) {
+            painter.setPen(Qt::white);
+            QFont font = QGuiApplication::font();
+            font.setPixelSize(style::ConvertScale(13));
+            painter.setFont(font);
+            QRect counterRect(0, height() - style::ConvertScale(36), width(), style::ConvertScale(24));
+            painter.drawText(counterRect, Qt::AlignCenter, QString("%1 / %2").arg(index_ + 1).arg(images_.size()));
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        // Clicking the image itself does nothing (no zoom yet, see this
+        // class's own comment) - only clicking OUTSIDE it closes, matching
+        // real Telegram's "click away to dismiss".
+        if (!imageRect_.contains(event->pos())) {
+            close();
+        }
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        switch (event->key()) {
+            case Qt::Key_Escape:
+                close();
+                return;
+            case Qt::Key_Left:
+                if (index_ > 0) {
+                    --index_;
+                    update();
+                }
+                return;
+            case Qt::Key_Right:
+                if (index_ + 1 < images_.size()) {
+                    ++index_;
+                    update();
+                }
+                return;
+            default:
+                break;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void resizeEvent(QResizeEvent*) override {
+        if (parentWidget() != nullptr) {
+            setGeometry(parentWidget()->rect());
+        }
+    }
+
+private:
+    QVector<QPixmap> images_;
+    int index_ = 0;
+    QRect imageRect_;
 };
 
 // A rounded rectangle path with an independent radius per corner - plain
@@ -834,6 +943,7 @@ public:
         totalHeight_ = 0;
         contentBottom_ = 0;
         lastTextItemIndex_ = -1;
+        loadingMore_ = false;
         resetSelectionState();
         updateScrollRange();
         viewport()->update();
@@ -847,6 +957,7 @@ public:
     // fixed for the sidebar/history auto-fill.
     void setItems(const QVector<HistoryEntry>& entries) {
         resetSelectionState();
+        loadingMore_ = false;
         items_.clear();
         items_.reserve(entries.size());
         for (const HistoryEntry& entry : entries) {
@@ -964,6 +1075,24 @@ public:
 
     void scrollToBottom() { verticalScrollBar()->setValue(verticalScrollBar()->maximum()); }
 
+    // Shown as a small fixed pill near the top of the viewport while an
+    // older-history page fetch (see MainWindow::maybeLoadMoreHistory()) is
+    // in flight - a real network round trip, not a synchronous local
+    // operation, so scrolling into the not-yet-arrived edge with nothing
+    // shown there read as "the app just freezes", not "still loading".
+    // Real infinite-scroll UX guidance is exactly this: prefetch earlier
+    // (see the scroll-threshold connect() in the MainWindow constructor)
+    // AND show a visible loading state for whatever the prefetch has not
+    // caught up with yet - a blank gap you scroll into always feels
+    // broken even when the fetch is progressing completely normally.
+    void setLoadingMore(bool loading) {
+        if (loadingMore_ == loading) {
+            return;
+        }
+        loadingMore_ = loading;
+        viewport()->update();
+    }
+
     // Whether the currently loaded messages are tall enough to need
     // scrolling at all - MainWindow::ensureHistoryFillsViewport() uses
     // this to decide whether to keep auto-loading older pages on chat
@@ -1002,13 +1131,47 @@ public:
         // valid is false.
         int index = -1;
     };
+    // First index whose own bottom edge (top + height) is past y - items_
+    // is laid out in strictly increasing top order (buildItem()/
+    // appendItem()/prependItems() all guarantee this; a hidden search-
+    // filtered item shares its neighbor's top rather than breaking the
+    // ordering, see relayoutFrom()'s own comment), so a linear scan over
+    // every loaded message just to find the handful actually near y is
+    // pure waste once a long scrollback session has thousands of items in
+    // items_ - paintEvent() already only PAINTS the visible slice, but
+    // was still walking the entire vector every single frame to find it,
+    // an O(n)-per-repaint cost that scrolling triggers continuously and
+    // that grows without bound the longer a chat's history gets loaded -
+    // exactly the "freezes further into scrollback" shape reported.
+    // std::lower_bound turns that into O(log n) to find where to start;
+    // itemAt()/itemIndexAt()/paintEvent() below all still scan forward
+    // linearly from there and bail out (continue for hidden, break past
+    // the target range) the moment they can, same as before - only the
+    // starting point changed, not the correctness-bearing logic.
+    int firstIndexNotBefore(int y) const {
+        int lo = 0;
+        int hi = items_.size();
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (items_[mid].top + items_[mid].height <= y) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
     // pos is in viewport-local coordinates, same convention as
     // QAbstractItemView::itemAt() (customContextMenuRequested's own
     // point), which is what this replaces.
     HitResult itemAt(const QPoint& pos) const {
         int y = pos.y() + verticalScrollBar()->value();
-        for (int i = 0; i < items_.size(); ++i) {
+        for (int i = firstIndexNotBefore(y); i < items_.size(); ++i) {
             const HistoryItem& item = items_[i];
+            if (item.top > y) {
+                break;
+            }
             if (item.hidden) {
                 continue;
             }
@@ -1059,21 +1222,53 @@ protected:
         background_.paint(painter, viewportRect);
         int scrollY = verticalScrollBar()->value();
         QRect visible = event->rect();
-        for (int i = 0; i < items_.size(); ++i) {
+        // Starts at the first item that could possibly intersect the
+        // visible rect (see firstIndexNotBefore()'s own comment) instead
+        // of scanning every loaded message from index 0 on every single
+        // repaint - the actual painted subset is unchanged, only how fast
+        // this loop finds it is.
+        for (int i = firstIndexNotBefore(visible.top() + scrollY); i < items_.size(); ++i) {
             const HistoryItem& item = items_[i];
+            int itemTop = item.top - scrollY;
+            if (itemTop > visible.bottom()) {
+                break;
+            }
             if (item.hidden) {
                 continue;
             }
-            int itemTop = item.top - scrollY;
             int itemBottom = itemTop + item.height;
-            // Virtualization: only items intersecting the actually
-            // exposed rect are painted at all, regardless of how many
-            // messages are loaded in total.
-            if (itemBottom < visible.top() || itemTop > visible.bottom()) {
+            if (itemBottom < visible.top()) {
                 continue;
             }
             paintItem(painter, item, itemTop, i == selectionItemIndex_, i);
         }
+        if (loadingMore_) {
+            paintLoadingIndicator(painter, viewportRect);
+        }
+    }
+
+    // A small fixed pill, centered near the top of the viewport,
+    // independent of scroll position - see setLoadingMore()'s own comment
+    // for why this exists at all.
+    void paintLoadingIndicator(QPainter& painter, const QRect& viewportRect) const {
+        QString text = "Loading...";
+        QFont font = QGuiApplication::font();
+        font.setPixelSize(style::ConvertScale(12));
+        QFontMetrics metrics(font);
+        int paddingH = style::ConvertScale(14);
+        int height = style::ConvertScale(26);
+        int width = metrics.horizontalAdvance(text) + paddingH * 2;
+        int top = style::ConvertScale(10);
+        QRect pillRect((viewportRect.width() - width) / 2, top, width, height);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 140));
+        painter.drawRoundedRect(pillRect, height / 2.0, height / 2.0);
+        painter.setPen(Qt::white);
+        painter.setFont(font);
+        painter.drawText(pillRect, Qt::AlignCenter, text);
+        painter.restore();
     }
 
     void resizeEvent(QResizeEvent* event) override {
@@ -1104,6 +1299,23 @@ protected:
         }
         int index = itemIndexAt(event->pos());
         bool selectable = index >= 0 && items_[index].kind != MessageKind::System;
+
+        // Ctrl+click toggles selection directly - the same shortcut real
+        // Telegram Desktop uses, and independent of both the context
+        // menu's "Select" action and the long-press timer below (a
+        // trackpad/right-click setup where either of those turns out to
+        // be unreliable still has this as a plain, unambiguous left-click
+        // gesture).
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            if (selectable) {
+                if (!multiSelectMode_) {
+                    enterSelectionMode(index);
+                } else {
+                    toggleItemSelected(index);
+                }
+            }
+            return;
+        }
 
         // Already in selection mode: a plain click just toggles the
         // checkbox under it, never starts a text drag-select (the two
@@ -1164,11 +1376,68 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent* event) override {
+        // A quick click (the long-press timer never fired, so no
+        // selection-mode entry happened because of this press) landing on
+        // an image/album opens the media viewer - checked here, on
+        // release, rather than on press, so a long-press-to-select still
+        // takes priority and a click that turns into a drag does not
+        // accidentally open anything.
+        bool wasQuickPress = longPressTimer_ && longPressTimer_->isActive();
         if (longPressTimer_) {
             longPressTimer_->stop();
         }
         selecting_ = false;
+        if (wasQuickPress && !multiSelectMode_ && event->button() == Qt::LeftButton &&
+            !event->modifiers().testFlag(Qt::ControlModifier) &&
+            (event->pos() - longPressStartPos_).manhattanLength() <= 6) {
+            tryActivateImageAt(event->pos());
+        }
         QAbstractScrollArea::mouseReleaseEvent(event);
+    }
+
+    void tryActivateImageAt(const QPoint& pos) {
+        int index = itemIndexAt(pos);
+        if (index < 0 || !onImageActivated) {
+            return;
+        }
+        const HistoryItem& item = items_[index];
+        int bubbleLeft = computeBubbleLeft(item);
+        int padding = bubblePadding(item.fillsBubble);
+        int rowMargin = kRowVerticalMargin(item.attached);
+        int bubbleTop = (item.top - verticalScrollBar()->value()) + rowMargin / 2;
+        QPoint local = pos - QPoint(bubbleLeft + padding, bubbleTop + padding);
+        if (!item.albumPixmaps.isEmpty()) {
+            for (int k = 0; k < item.albumLayout.size(); ++k) {
+                if (item.albumLayout[k].contains(local)) {
+                    onImageActivated(item.albumPixmaps, k);
+                    return;
+                }
+            }
+        } else if (item.isImage && QRect(QPoint(0, 0), item.pixmap.size()).contains(local)) {
+            onImageActivated(QVector<QPixmap>{item.pixmap}, 0);
+        }
+    }
+
+    // Same bubbleLeft geometry paintItem() computes inline - factored out
+    // here too so tryActivateImageAt()'s hit-testing stays exactly in
+    // sync with where the image is actually painted, the same discipline
+    // textOrigin() already follows for text hit-testing.
+    int computeBubbleLeft(const HistoryItem& item) const {
+        int viewportWidth = viewport()->width();
+        int padding = bubblePadding(item.fillsBubble);
+        int bubbleOuterWidth = item.contentWidth + padding * 2;
+        int bubbleLeft;
+        if (item.kind == MessageKind::Outgoing) {
+            bubbleLeft = viewportWidth - bubbleOuterWidth - sideMargin();
+        } else if (item.kind == MessageKind::Incoming) {
+            bubbleLeft = sideMargin();
+        } else {
+            bubbleLeft = (viewportWidth - bubbleOuterWidth) / 2;
+        }
+        if (multiSelectMode_ && item.kind != MessageKind::System) {
+            bubbleLeft += qRound(checkboxGutterWidth() * selectionReveal_);
+        }
+        return bubbleLeft;
     }
 
     void mouseDoubleClickEvent(QMouseEvent* event) override {
@@ -1411,6 +1680,14 @@ public:
     // file rather than introducing Qt signals/Q_OBJECT for one callback.
     std::function<void(bool active, int selectedCount)> onSelectionModeChanged;
 
+    // Fired by tryActivateImageAt() (see mouseReleaseEvent) when a quick
+    // click lands on a photo/album bubble - MainWindow wires this to open
+    // its MediaViewer. images/startIndex is the whole album (or a single-
+    // element vector for a standalone photo) and which one was actually
+    // clicked, so the viewer can open already showing the right one and
+    // still let the user step to its neighbors.
+    std::function<void(const QVector<QPixmap>&, int)> onImageActivated;
+
     void enterSelectionMode(int startIndex) {
         // Bounds-checked before touching mode state at all: the
         // long-press timer (see mousePressEvent) fires up to 450ms after
@@ -1459,7 +1736,10 @@ private:
 
     int itemIndexAt(const QPoint& pos) const {
         int y = pos.y() + verticalScrollBar()->value();
-        for (int i = 0; i < items_.size(); ++i) {
+        for (int i = firstIndexNotBefore(y); i < items_.size(); ++i) {
+            if (items_[i].top > y) {
+                break;
+            }
             if (items_[i].hidden) {
                 continue;
             }
@@ -1511,8 +1791,8 @@ private:
                 // Real algorithm (Ui::LayoutMediaGroup, ui/grouped_layout.cpp -
                 // groups by aspect ratio into balanced rows, not a naive
                 // grid), not a guess at how Telegram's mosaic looks.
-                auto layout = Ui::LayoutMediaGroup(sizes, /*maxWidth=*/style::ConvertScale(280),
-                                                    /*minWidth=*/style::ConvertScale(100), /*spacing=*/2);
+                auto layout = Ui::LayoutMediaGroup(sizes, /*maxWidth=*/style::ConvertScale(340),
+                                                    /*minWidth=*/style::ConvertScale(120), /*spacing=*/2);
                 int maxRight = 0;
                 int maxBottom = 0;
                 item.albumPixmaps.reserve(static_cast<int>(layout.size()));
@@ -1539,7 +1819,7 @@ private:
         QPixmap pixmap;
         item.isImage = !entry.filePath.isEmpty() && pixmap.load(entry.filePath);
         if (item.isImage) {
-            item.pixmap = pixmap.scaledToWidth(style::ConvertScale(280), Qt::SmoothTransformation);
+            item.pixmap = pixmap.scaledToWidth(style::ConvertScale(340), Qt::SmoothTransformation);
             item.contentWidth = item.pixmap.width();
             item.contentHeight = item.pixmap.height();
             item.fillsBubble = true;
@@ -1887,6 +2167,7 @@ private:
     // totalHeight_ once prependItems() has been called at least once.
     int contentBottom_ = 0;
     int lastTextItemIndex_ = -1;
+    bool loadingMore_ = false;
 };
 
 // MainWindow::messages_ is declared as a plain QWidget* in the header (see
@@ -1895,6 +2176,13 @@ private:
 // always knows the true type, hence the cast.
 HistoryCanvas* asCanvas(QWidget* widget) {
     return static_cast<HistoryCanvas*>(widget);
+}
+
+// Same reasoning as asCanvas() above - MediaViewer, like HistoryCanvas, is
+// defined in this file rather than main_window.hpp, so MainWindow's own
+// member is a plain QWidget* and gets cast back here at each use site.
+MediaViewer* asMediaViewer(QWidget* widget) {
+    return static_cast<MediaViewer*>(widget);
 }
 
 // RippleButton (a hand-rolled QPushButton + QVariantAnimation ripple) is
@@ -2533,14 +2821,37 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     historyCanvas->onSelectionModeChanged = [this](bool active, int count) {
         updateSelectionToolbar(active, count);
     };
+    // Parented to chatPage_ (the whole split-view page, sidebar included),
+    // not conversationColumn - a fullscreen viewer covering only the
+    // message pane and leaving the sidebar visible beside it would not
+    // match real Telegram's own fullscreen overlay.
+    mediaViewer_ = new MediaViewer(chatPage_);
+    historyCanvas->onImageActivated = [this](const QVector<QPixmap>& images, int index) {
+        asMediaViewer(mediaViewer_)->open(images, index);
+    };
     layout->addWidget(messages_);
 
     // Same trigger point as tdesktop's HistoryView::ListWidget detecting
-    // the top of the scroll area reached (see maybeLoadMoreHistory()) -
-    // a small threshold, not scrollbar value == 0 exactly, so the request
-    // fires a little before the user actually hits the very top.
-    connect(historyCanvas->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
-        if (value <= 40) {
+    // the top of the scroll area reached (see maybeLoadMoreHistory()) - a
+    // threshold measured from the scrollbar's own current minimum, not a
+    // fixed absolute value: value <= 40 assumed the range always started
+    // at 0, which stopped being true once prependItems() started giving
+    // older history negative top coordinates (see its own comment) - the
+    // scrollbar's minimum goes negative after the first loaded page, so a
+    // fixed "<= 40" either fires on every single scroll position
+    // afterwards or, depending on how far negative things had gone,
+    // stops firing at the right time at all. A generous threshold
+    // (roughly a screen's worth of rows) rather than the old 40px also
+    // gives the network request more lead time to complete BEFORE the
+    // user's eye actually reaches the loaded edge - a request that only
+    // starts a few pixels before the edge is a real fetch and, unlike a
+    // synchronous local operation, has real network latency;
+    // scrolling straight into that not-yet-arrived edge is what read as
+    // "the app just freezes and messages don't load in time" - see also
+    // setLoadingMore()'s own comment for the second half of that fix (a
+    // visible indicator instead of blank space while it is in flight).
+    connect(historyCanvas->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, historyCanvas](int value) {
+        if (value <= historyCanvas->verticalScrollBar()->minimum() + style::ConvertScale(600)) {
             maybeLoadMoreHistory();
         }
     });
@@ -2759,6 +3070,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     secretModeToggle_->setClickedCallback([this] { onSecretModeToggleClicked(); });
     connect(chatSearchInput_, &QLineEdit::textChanged, this, &MainWindow::onChatSearchTextChanged);
     connect(searchDebounceTimer_, &QTimer::timeout, this, &MainWindow::onChatSearchDebounceTimeout);
+
+    // Application-wide, not installed on input_/field_ directly: Key_Up
+    // actually arrives at Ui::InputField's own internal child widget, not
+    // at ChatInput or even Ui::InputField itself, so a filter scoped to
+    // either of those would never see it - see eventFilter()'s own
+    // comment for the rest of the reasoning (editLastOutgoingMessage()).
+    qApp->installEventFilter(this);
 }
 
 void MainWindow::setSession(zkgram::core::Session* session) {
@@ -2870,6 +3188,44 @@ void MainWindow::cancelReply() {
     replyToText_.clear();
     replyToMessageId_ = 0;
     replyBarRow_->hide();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::KeyPress) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (keyEvent->key() == Qt::Key_Up && keyEvent->modifiers() == Qt::NoModifier) {
+            auto* widget = qobject_cast<QWidget*>(watched);
+            // input_->isAncestorOf(widget) - not widget == input_ - because
+            // the key actually lands on Ui::InputField's own internal
+            // child, several levels below the ChatInput wrapper (see this
+            // function's own header comment).
+            if (widget != nullptr && input_ != nullptr && input_->isAncestorOf(widget) &&
+                input_->toPlainText().isEmpty()) {
+                editLastOutgoingMessage();
+                return true;
+            }
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::editLastOutgoingMessage() {
+    if (currentChatId_ == 0) {
+        return;
+    }
+    const QVector<StoredMessage>& stored = conversationMessages_.value(currentChatId_);
+    for (auto it = stored.crbegin(); it != stored.crend(); ++it) {
+        if (it->kind == MessageKind::Outgoing) {
+            // Same local-only convenience as the context menu's "Edit"
+            // action (see showMessageContextMenu()'s own comment) - just
+            // reachable without a right-click/long-press: refills the
+            // composer with the text, does not touch what the companion
+            // already received.
+            input_->setPlainText(it->text);
+            input_->setFocus();
+            return;
+        }
+    }
 }
 
 void MainWindow::updateSelectionToolbar(bool active, int selectedCount) {
@@ -3331,9 +3687,15 @@ void MainWindow::maybeLoadMoreHistory() {
         return;
     }
     historyLoadingMore_.insert(chatId);
+    if (chatId == currentChatId_) {
+        asCanvas(messages_)->setLoadingMore(true);
+    }
     session_->loadMoreMessageHistory(chatId, oldestId, [this, chatId](const std::vector<zkgram::core::PlainMessage>& messages) {
         QMetaObject::invokeMethod(this, [this, chatId, messages] {
             historyLoadingMore_.remove(chatId);
+            if (chatId == currentChatId_) {
+                asCanvas(messages_)->setLoadingMore(false);
+            }
             if (messages.empty()) {
                 historyExhausted_.insert(chatId);
                 return;
@@ -3665,6 +4027,14 @@ void MainWindow::renderCurrentConversation() {
     }
     asCanvas(messages_)->setItems(entries);
     asCanvas(messages_)->scrollToBottom();
+    // setItems() above resets HistoryCanvas's own loadingMore_ flag along
+    // with the rest of its per-conversation state (see setLoadingMore()'s
+    // own comment) - re-synced here in case a page fetch for this exact
+    // chat was already in flight (started before this rebuild, e.g. this
+    // function ran because a live message arrived while scrolled up) so
+    // the indicator does not just vanish out from under a request that is
+    // still genuinely pending.
+    asCanvas(messages_)->setLoadingMore(historyLoadingMore_.contains(currentChatId_));
 }
 
 void MainWindow::appendConversationStatus(qlonglong chatId, const QString& stage, const QString& message) {
