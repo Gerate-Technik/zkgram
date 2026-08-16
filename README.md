@@ -1,3 +1,5 @@
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/Fjqkb37va)
+
 # zkgram
 
 **A real end-to-end encrypted messenger that runs on top of your existing Telegram account.**
