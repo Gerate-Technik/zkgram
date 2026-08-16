@@ -54,10 +54,22 @@ std::string logFilePath() {
 // main_window.cpp's logDebug() - see TODO.md, the Next-button investigation).
 // Plain std::ofstream, not Qt: this file has no Qt dependency and should
 // not gain one just for this.
+//
+// The stream is opened once and kept open, rather than reopened per line.
+// This runs on the TDLib receive thread, and the noisy call sites are the
+// per-chat ones (requestChatPhoto, onFileUpdate): right after login, a few
+// hundred chats each announcing their avatar meant a few hundred
+// open+write+close syscall triples on the very thread that has to keep
+// draining TDLib's update queue, which is exactly the phase that felt
+// slow. Still flushed per line so a crash keeps the tail of the log - that
+// was the only thing the reopen-every-time version really bought.
 void logDebug(const std::string& message) {
-    std::ofstream file(logFilePath(), std::ios::app);
+    static std::mutex mutex;
+    static std::ofstream file(logFilePath(), std::ios::app);
+    std::lock_guard<std::mutex> lock(mutex);
     if (file) {
         file << message << "\n";
+        file.flush();
     }
 }
 
@@ -292,8 +304,18 @@ struct TelegramClient::Impl {
         sendNotify(td_api::make_object<td_api::getOption>("version"));
 
         while (running_) {
-            auto response = clientManager_.receive(1.0);
+            // Normally block for a full second waiting for the next update,
+            // but only briefly while a coalesced chat-list snapshot is still
+            // pending (see publishChatList/flushChatList): the trailing edge
+            // of a burst is flushed from here, and waiting a whole second
+            // for it would show up as the sidebar visibly lagging behind
+            // the last update of every burst.
+            auto response = clientManager_.receive(chatListDirty_ ? 0.05 : 1.0);
             if (!response.object) {
+                // Nothing left in the queue - the burst (if any) is over,
+                // so publish whatever is pending immediately instead of
+                // waiting out the rate limit.
+                flushChatList(/*force=*/true);
                 continue;
             }
             // processUpdate/handler eventually call into onBytesReceived_/
@@ -310,19 +332,19 @@ struct TelegramClient::Impl {
             try {
                 if (response.request_id == 0) {
                     processUpdate(std::move(response.object));
-                    continue;
-                }
-                Handler handler;
-                {
-                    std::lock_guard<std::mutex> lock(handlersMutex_);
-                    auto it = handlers_.find(response.request_id);
-                    if (it != handlers_.end()) {
-                        handler = std::move(it->second);
-                        handlers_.erase(it);
+                } else {
+                    Handler handler;
+                    {
+                        std::lock_guard<std::mutex> lock(handlersMutex_);
+                        auto it = handlers_.find(response.request_id);
+                        if (it != handlers_.end()) {
+                            handler = std::move(it->second);
+                            handlers_.erase(it);
+                        }
                     }
-                }
-                if (handler) {
-                    handler(std::move(response.object));
+                    if (handler) {
+                        handler(std::move(response.object));
+                    }
                 }
             } catch (const std::exception&) {
                 // No logger at this layer (see docs/README.md on layering) -
@@ -331,6 +353,10 @@ struct TelegramClient::Impl {
                 // TODO.md.
             } catch (...) {
             }
+            // Rate-limited (not forced): mid-burst this publishes at most
+            // once per kChatListPublishInterval, and the update just
+            // processed above is already folded into chats_ either way.
+            flushChatList(/*force=*/false);
         }
     }
 
@@ -701,24 +727,92 @@ struct TelegramClient::Impl {
         publishChatList();
     }
 
+    // Marks the chat list as changed; the actual snapshot is built and
+    // pushed later, from the receive loop, by flushChatList() below.
+    //
+    // This used to build and push a full snapshot synchronously on every
+    // single chat-related update, and that was the reason the sidebar
+    // crawled for the first minute or so after login. Logging in makes
+    // TDLib replay the whole account at once: one updateNewChat, at least
+    // one updateChatPosition, usually an updateChatLastMessage and an
+    // updateChatReadInbox per chat, plus an updateFile per avatar as it
+    // downloads - several thousand updates for a normal account. Each one
+    // landed here and paid for the entire list, not just the chat that
+    // changed: an O(N log N) sort, N ChatSummary copies (three heap-allocated
+    // strings each), then N more copies into core::ChatListEntry, N
+    // DataRegistry::upsertPeer calls, N QVariantMap allocations in
+    // QtUiProvider, and finally a queued cross-thread event carrying that
+    // whole list to the GUI thread. Thousands of updates times hundreds of
+    // chats is tens of millions of allocations, and the GUI thread had to
+    // drain every one of those queued snapshots (copying the list and
+    // rescanning it for metadata each time) even though
+    // MainWindow's own render throttle then threw all but a few away.
+    //
+    // Coalescing at the source is what actually fixes it: the work is
+    // proportional to how often the list is *shown*, not to how many
+    // updates TDLib happens to send, and the intermediate states were never
+    // visible to the user in the first place.
+    void publishChatList() { chatListDirty_ = true; }
+
+    // At most one snapshot per kChatListPublishInterval while updates keep
+    // arriving; force=true (queue drained, see loop()) publishes right away
+    // so the final state of a burst is never left sitting in chats_.
+    void flushChatList(bool force) {
+        // The callback check belongs here, not (only) in publishChatListNow():
+        // clearing chatListDirty_ while there is still nobody to publish to
+        // would drop everything TDLib announced between connect() and
+        // loadChatList() installing the callback, and nothing would resend it.
+        // Left dirty instead, so the first flush after loadChatList()
+        // publishes the accumulated state.
+        if (!chatListDirty_ || !chatListCallback_) {
+            return;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (!force && now - lastChatListPublish_ < kChatListPublishInterval) {
+            return;
+        }
+        chatListDirty_ = false;
+        lastChatListPublish_ = now;
+        publishChatListNow();
+    }
+
     // order_ == 0 means "not (or no longer) in this list" per TDLib's own
     // convention - filtered out rather than shown as a zero-order entry.
     // Higher order sorts first (TDLib's ordering key, not a timestamp).
-    void publishChatList() {
+    void publishChatListNow() {
         if (!chatListCallback_) {
             return;
         }
-        std::vector<ChatSummary> summaries;
-        summaries.reserve(chats_.size());
-        for (auto& [id, entry] : chats_) {
+        // Sorted as (order, id) pairs first, then materialized in that
+        // order - the comparator used to look each chat up in chats_ (a
+        // std::map) on every single comparison, turning an O(N log N) sort
+        // into O(N log^2 N) with a tree walk in the inner loop, and it did
+        // so through the non-const operator[], which would have silently
+        // default-inserted a blank ChatEntry for any id not present.
+        // The id tie-break is not cosmetic either: std::sort is not stable,
+        // so chats sharing an order (TDLib gives pinned chats equal order
+        // values) could come back in a different sequence on every push and
+        // visibly swap places in the sidebar for no reason.
+        std::vector<std::pair<std::int64_t, ChatId>> ordered;
+        ordered.reserve(chats_.size());
+        for (const auto& [id, entry] : chats_) {
             if (entry.order == 0) {
                 continue;
             }
+            ordered.emplace_back(entry.order, id);
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
+            return a.first != b.first ? a.first > b.first : a.second < b.second;
+        });
+
+        std::vector<ChatSummary> summaries;
+        summaries.reserve(ordered.size());
+        for (const auto& orderedChat : ordered) {
+            ChatId id = orderedChat.second;
+            const ChatEntry& entry = chats_.at(id);
             summaries.push_back(
                 ChatSummary{id, entry.title, entry.lastMessagePreview, entry.unreadCount, entry.isChannel, entry.photoPath});
         }
-        std::sort(summaries.begin(), summaries.end(),
-                  [this](const ChatSummary& a, const ChatSummary& b) { return chats_[a.id].order > chats_[b.id].order; });
         chatListCallback_(summaries);
     }
 
@@ -1412,6 +1506,13 @@ struct TelegramClient::Impl {
     };
     std::map<ChatId, ChatEntry> chats_;
     std::function<void(const std::vector<ChatSummary>&)> chatListCallback_;
+    // Coalescing state for publishChatList()/flushChatList(). Only ever
+    // touched from the receive-loop thread (every publishChatList() call
+    // site is reached from processUpdate() or from a response handler, both
+    // of which run in loop()), so no mutex.
+    static constexpr std::chrono::milliseconds kChatListPublishInterval{250};
+    bool chatListDirty_ = false;
+    std::chrono::steady_clock::time_point lastChatListPublish_{};
     // fileId -> chatId for avatar downloads in flight - separate from
     // pendingFiles_ (incoming message attachments), see requestChatPhoto()/
     // onFileUpdate().
