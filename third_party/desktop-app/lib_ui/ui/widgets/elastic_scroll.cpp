@@ -1,0 +1,2076 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+#include "ui/widgets/elastic_scroll.h"
+
+#include "ui/painter.h"
+#include "ui/ui_utility.h"
+#include "base/options.h"
+#include "base/qt/qt_common_adapters.h"
+#include "styles/style_widgets.h"
+
+#include <QtGui/QWindow>
+#include <QtCore/QtMath>
+#include <QtWidgets/QScroller>
+#include <QtWidgets/QApplication>
+
+namespace Ui {
+namespace {
+
+[[nodiscard]] int ComputeScrollTo(
+		int toFrom,
+		int toTill,
+		int toMin,
+		int toMax,
+		int current,
+		int size) {
+	if (toFrom < toMin) {
+		toFrom = toMin;
+	} else if (toFrom > toMax) {
+		toFrom = toMax;
+	}
+	const auto exact = (toTill < 0);
+
+	const auto curBottom = current + size;
+	auto scToFrom = toFrom;
+	if (!exact && toFrom >= current) {
+		if (toTill < toFrom) {
+			toTill = toFrom;
+		}
+		if (toTill <= curBottom) {
+			return current;
+		}
+
+		scToFrom = toTill - size;
+		if (scToFrom > toFrom) {
+			scToFrom = toFrom;
+		}
+		if (scToFrom == current) {
+			return current;
+		}
+	} else {
+		scToFrom = toFrom;
+	}
+	return scToFrom;
+}
+
+constexpr auto kOverscrollFromThreshold = -(1 << 30);
+constexpr auto kOverscrollTillThreshold = (1 << 30);
+constexpr auto kTouchOverscrollMultiplier = 2;
+
+// Rubber-band physics matching WebKit / Chromium
+// (blink::ElasticOverscrollControllerExponential), which in turn
+// replicate the native macOS feel: linear stretch = accumulated
+// overscroll / stiffness while dragging, and a critically damped
+// spring x(t) = (x0 + v0 * amplitude * t) * e^(-stiffness * t / period)
+// on release, seeded with the tracked scroll velocity.
+constexpr auto kRubberBandStiffness = 20.;
+constexpr auto kRubberBandAmplitude = 0.31;
+constexpr auto kRubberBandPeriod = 1.6;
+constexpr auto kRubberBandMaxReturnDuration = crl::time(1000);
+constexpr auto kVelocityZeroingTimeout = crl::time(100);
+constexpr auto kMinimumOverscrollBeforeStretch = 10;
+
+// Pull-to-action sides need to follow the finger much closer than the
+// plain bounce: this approximates the initial slope (~0.55) of the
+// native iOS UIScrollView rubber band, which hosts the same pull
+// affordances in Telegram for iOS, stiffened for a trackpad. Past the
+// pull distance the stretch continues with the plain bounce stiffness,
+// so the content stays contained.
+constexpr auto kPullBandStiffness = 2.5;
+
+// The stretch mapping of a pull side is a single curve anchored at
+// zero stretch, soft over the pull distance and stiff beyond it. The
+// overscroll default only positions the resting point on that curve,
+// so collapsing from an expanded default re-traverses the soft range
+// while pulling deeper than the distance stays stiff.
+[[nodiscard]] float64 PullAccumulatedFromOverscroll(
+		float64 value,
+		float64 distance) {
+	return (value <= distance)
+		? value * kPullBandStiffness
+		: distance * kPullBandStiffness
+			+ (value - distance) * kRubberBandStiffness;
+}
+
+[[nodiscard]] float64 PullOverscrollFromAccumulated(
+		float64 value,
+		float64 distance) {
+	const auto softAccumulated = distance * kPullBandStiffness;
+	return (value <= softAccumulated)
+		? value / kPullBandStiffness
+		: distance + (value - softAccumulated) / kRubberBandStiffness;
+}
+
+// Real macOS trackpad flings top out well below this, so anything
+// higher is an artifact of the per-event-pair velocity estimation.
+constexpr auto kMaxTrackedVelocity = 6000.;
+
+} // namespace
+
+// Flick scroll taken from
+// http://qt-project.org/doc/qt-4.8
+// /demos-embedded-anomaly-src-flickcharm-cpp.html
+
+ElasticScrollBar::ElasticScrollBar(
+	QWidget *parent,
+	const style::ScrollArea &st,
+	Qt::Orientation orientation)
+: RpWidget(parent)
+, _st(st)
+, _hideTimer([=] { toggle(false); })
+, _shown(!_st.hiding)
+, _vertical(orientation == Qt::Vertical) {
+	setAttribute(Qt::WA_NoMousePropagation);
+}
+
+void ElasticScrollBar::refreshGeometry() {
+	if (_st.barHidden) {
+		hide();
+		return;
+	}
+	update();
+	const auto skip = _st.deltax;
+	const auto fullSkip = _st.deltat + _st.deltab;
+	const auto extSize = _vertical ? height() : width();
+	const auto thickness = (_vertical ? width() : height()) - 2 * skip;
+	const auto minSize = fullSkip + 2 * thickness;
+	if (_state.fullSize <= 0
+		|| _state.visibleFrom >= _state.visibleTill
+		|| extSize < minSize) {
+		_bar = _area = QRect();
+		hide();
+		return;
+	}
+	const auto available = extSize - fullSkip;
+	_area = _vertical
+		? QRect(skip, _st.deltat, thickness, available)
+		: QRect(_st.deltat, skip, available, thickness);
+	const auto barMin = std::min(st::scrollBarMin, available / 2);
+	const auto visibleHeight = _state.visibleTill - _state.visibleFrom;
+	const auto scrollableHeight = _state.fullSize - visibleHeight;
+	const auto barWanted = (available * visibleHeight) / _state.fullSize;
+	if (barWanted >= available) {
+		_bar = _area = QRect();
+		hide();
+		return;
+	}
+	const auto bar = std::max(barMin, barWanted);
+	const auto outsideBar = available - bar;
+
+	const auto scale = [&](int value) {
+		return (outsideBar * value) / scrollableHeight;
+	};
+	const auto barFrom = scale(_state.visibleFrom);
+	const auto barTill = barFrom + bar;
+	const auto cutFrom = std::clamp(barFrom, 0, available - thickness);
+	const auto cutTill = std::clamp(barTill, thickness, available);
+	const auto cutBar = cutTill - cutFrom;
+	_bar = _vertical
+		? QRect(_area.x(), _area.y() + cutFrom, _area.width(), cutBar)
+		: QRect(_area.x() + cutFrom, _area.y(), cutBar, _area.height());
+	if (isHidden()) {
+		show();
+	}
+}
+
+bool ElasticScrollBar::barHighlighted() const {
+	return _overBar || _dragging;
+}
+
+void ElasticScrollBar::toggle(bool shown, anim::type animated) {
+	const auto instant = (animated == anim::type::instant);
+	const auto changed = (_shown != shown);
+	_shown = shown;
+	if (instant) {
+		_shownAnimation.stop();
+	}
+	if (_shown && _st.hiding) {
+		_hideTimer.callOnce(_st.hiding);
+	}
+	if (changed && !instant) {
+		_shownAnimation.start(
+			[=] { update(); },
+			_shown ? 0. : 1.,
+			_shown ? 1. : 0.,
+			_st.duration);
+	}
+	update();
+}
+
+void ElasticScrollBar::toggleOver(bool over, anim::type animated) {
+	const auto instant = (animated == anim::type::instant);
+	const auto changed = (_over != over);
+	_over = over;
+	if (instant) {
+		_overAnimation.stop();
+	}
+	if (!instant && changed) {
+		_overAnimation.start(
+			[=] { update(); },
+			_over ? 0. : 1.,
+			_over ? 1. : 0.,
+			_st.duration);
+	}
+	update();
+}
+
+void ElasticScrollBar::toggleOverBar(bool over, anim::type animated) {
+	const auto instant = (animated == anim::type::instant);
+	const auto wasHighlight = barHighlighted();
+	_overBar = over;
+	if (instant) {
+		_barHighlightAnimation.stop();
+	} else {
+		startBarHighlightAnimation(wasHighlight);
+	}
+	update();
+}
+
+void ElasticScrollBar::toggleDragging(bool dragging, anim::type animated) {
+	const auto instant = (animated == anim::type::instant);
+	const auto wasHighlight = barHighlighted();
+	_dragging = dragging;
+	if (instant) {
+		_barHighlightAnimation.stop();
+	} else {
+		startBarHighlightAnimation(wasHighlight);
+	}
+	update();
+}
+
+void ElasticScrollBar::startBarHighlightAnimation(bool wasHighlighted) {
+	if (barHighlighted() == wasHighlighted) {
+		return;
+	}
+	const auto highlighted = !wasHighlighted;
+	_barHighlightAnimation.start(
+		[=] { update(); },
+		highlighted ? 0. : 1.,
+		highlighted ? 1. : 0.,
+		_st.duration);
+}
+
+rpl::producer<int> ElasticScrollBar::visibleFromDragged() const {
+	return _visibleFromDragged.events();
+}
+
+void ElasticScrollBar::updateState(ScrollState state) {
+	if (_state != state) {
+		_state = state;
+		refreshGeometry();
+		toggle(true);
+	}
+}
+
+void ElasticScrollBar::paintEvent(QPaintEvent *e) {
+	if (_bar.isEmpty() || _st.barHidden) {
+		hide();
+		return;
+	}
+	const auto barHighlight = _barHighlightAnimation.value(
+		barHighlighted() ? 1. : 0.);
+	const auto over = std::max(
+		_overAnimation.value(_over ? 1. : 0.),
+		barHighlight);
+	const auto shown = std::max(
+		_shownAnimation.value(_shown ? 1. : 0.),
+		over);
+	if (shown < 1. / 255) {
+		return;
+	}
+	QPainter p(this);
+	p.setPen(Qt::NoPen);
+	auto bg = anim::color(_st.bg, _st.bgOver, over);
+	bg.setAlpha(anim::interpolate(0, bg.alpha(), shown));
+	auto bar = anim::color(_st.barBg, _st.barBgOver, barHighlight);
+	bar.setAlpha(anim::interpolate(0, bar.alpha(), shown));
+	const auto radius = (_st.round < 0)
+		? (std::min(_area.width(), _area.height()) / 2.)
+		: _st.round;
+	if (radius) {
+		PainterHighQualityEnabler hq(p);
+		p.setBrush(bg);
+		p.drawRoundedRect(_area, radius, radius);
+		p.setBrush(bar);
+		p.drawRoundedRect(_bar, radius, radius);
+	} else {
+		p.fillRect(_area, bg);
+		p.fillRect(_bar, bar);
+	}
+}
+
+void ElasticScrollBar::enterEventHook(QEnterEvent *e) {
+	_hideTimer.cancel();
+	setMouseTracking(true);
+	toggleOver(true);
+}
+
+void ElasticScrollBar::leaveEventHook(QEvent *e) {
+	if (!_dragging) {
+		setMouseTracking(false);
+	}
+	toggleOver(false);
+	toggleOverBar(false);
+	if (_st.hiding && _shown) {
+		_hideTimer.callOnce(_st.hiding);
+	}
+}
+
+int ElasticScrollBar::scaleToBar(int change) const {
+	const auto scrollable = _state.fullSize
+		- (_state.visibleTill - _state.visibleFrom);
+	const auto outsideBar = (_vertical ? _area.height() : _area.width())
+		- (_vertical ? _bar.height() : _bar.width());
+	return (outsideBar <= 0 || scrollable <= outsideBar)
+		? change
+		: (change * scrollable / outsideBar);
+}
+
+void ElasticScrollBar::mouseMoveEvent(QMouseEvent *e) {
+	toggleOverBar(_bar.contains(e->pos()));
+	if (_dragging && !_bar.isEmpty()) {
+		const auto position = e->globalPos();
+		const auto delta = position - _dragPosition;
+		_dragPosition = position;
+		if (auto change = scaleToBar(_vertical ? delta.y() : delta.x())) {
+			if (base::OppositeSigns(_dragOverscrollAccumulated, change)) {
+				const auto overscroll = (change < 0)
+					? std::max(_dragOverscrollAccumulated + change, 0)
+					: std::min(_dragOverscrollAccumulated + change, 0);
+				const auto delta = overscroll - _dragOverscrollAccumulated;
+				_dragOverscrollAccumulated = overscroll;
+				change -= delta;
+			}
+			if (change) {
+				const auto now = std::clamp(
+					_state.visibleFrom + change,
+					std::min(_state.visibleFrom, 0),
+					std::max(
+						_state.visibleFrom,
+						(_state.visibleFrom
+							+ (_state.fullSize - _state.visibleTill))));
+				const auto delta = now - _state.visibleFrom;
+				if (change != delta) {
+					_dragOverscrollAccumulated
+						= (base::OppositeSigns(
+							_dragOverscrollAccumulated,
+							change)
+							? change
+							: (_dragOverscrollAccumulated + change));
+				}
+				_visibleFromDragged.fire_copy(now);
+			}
+		}
+	}
+}
+
+void ElasticScrollBar::mousePressEvent(QMouseEvent *e) {
+	if (_bar.isEmpty()) {
+		return;
+	}
+	toggleDragging(true);
+	_dragPosition = e->globalPos();
+	_dragOverscrollAccumulated = 0;
+	if (!_overBar) {
+		const auto start = _vertical ? _area.y() : _area.x();
+		const auto full = _vertical ? _area.height() : _area.width();
+		const auto bar = _vertical ? _bar.height() : _bar.width();
+		const auto half = bar / 2;
+		const auto middle = std::clamp(
+			_vertical ? e->pos().y() : e->pos().x(),
+			start + half,
+			start + full + half - bar);
+		const auto range = _state.visibleFrom
+			+ (_state.fullSize - _state.visibleTill);
+		const auto from = range * (middle - half - start) / (full - bar);
+		_visibleFromDragged.fire_copy(from);
+	}
+}
+
+void ElasticScrollBar::mouseReleaseEvent(QMouseEvent *e) {
+	toggleDragging(false);
+	if (!_over) {
+		setMouseTracking(false);
+	}
+}
+
+void ElasticScrollBar::resizeEvent(QResizeEvent *e) {
+	refreshGeometry();
+}
+
+bool ElasticScrollBar::eventHook(QEvent *e) {
+	setAttribute(Qt::WA_NoMousePropagation, e->type() != QEvent::Wheel);
+	return RpWidget::eventHook(e);
+}
+
+ElasticScroll::ElasticScroll(
+	QWidget *parent,
+	const style::ScrollArea &st,
+	Qt::Orientation orientation)
+: RpWidget(parent)
+, _st(st)
+, _bar(std::make_unique<ElasticScrollBar>(this, _st, orientation))
+, _touchTimer([=] { _touchRightButton = true; })
+, _touchScrollTimer([=] { touchScrollTimer(); })
+, _vertical(orientation == Qt::Vertical)
+, _position(Position{ 0, 0 })
+, _movement(Movement::None) {
+	setAttribute(Qt::WA_AcceptTouchEvents);
+
+	_bar->visibleFromDragged(
+	) | rpl::on_next([=](int from) {
+		tryScrollTo(from, false);
+	}, _bar->lifetime());
+
+	static const auto &OptionQScroller = base::options::lookup<bool>(
+		kOptionQScroller);
+
+	rpl::single(
+		rpl::empty
+	) | rpl::then(
+		OptionQScroller.changes()
+	) | rpl::on_next([=] {
+		if (OptionQScroller.value()) {
+			_scroller = QScroller::scroller(this);
+			SetupScrollerPhysics(_scroller);
+		} else if (_scroller) {
+			QObject deleter;
+			_scroller->setParent(&deleter);
+		}
+
+		if (!_scroller) {
+			return;
+		}
+
+		connect(
+			_scroller,
+			&QScroller::stateChanged,
+			[=](QScroller::State state) {
+				if (state == QScroller::Scrolling) {
+					ScrollerStopper::Instance().activate(_scroller);
+				}
+			});
+	}, lifetime());
+}
+
+ElasticScroll::~ElasticScroll() {
+	// Destroy the _bar cleanly (keeping _bar == nullptr) to avoid a crash:
+	//
+	// _bar destructor may send LeaveEvent to ElasticScroll,
+	// which will try to toggle(false) the _bar in leaveEventHook.
+	base::take(_bar);
+
+	// Stop watching _widget: its teardown may resize / move it (for
+	// example VerticalLayout rows remove themselves from the layout),
+	// and we shouldn't fire _position / _movement updates into subscribers
+	// while our owner is already being destroyed.
+	if (_widget) {
+		_widget->removeEventFilter(this);
+	}
+}
+
+void ElasticScroll::setHandleTouch(bool handle) {
+	if (_touchDisabled != handle) {
+		return;
+	}
+	_touchDisabled = !handle;
+	constexpr auto attribute = Qt::WA_AcceptTouchEvents;
+	setAttribute(attribute, handle);
+	if (_widget) {
+		if (handle) {
+			_widgetAcceptsTouch = _widget->testAttribute(attribute);
+			if (!_widgetAcceptsTouch) {
+				_widget->setAttribute(attribute);
+			}
+		} else {
+			if (!_widgetAcceptsTouch) {
+				_widget->setAttribute(attribute, false);
+			}
+		}
+	}
+}
+
+bool ElasticScroll::viewportEvent(QEvent *e) {
+	const auto type = e->type();
+	if (type == QEvent::Wheel) {
+		return handleWheelEvent(static_cast<QWheelEvent*>(e));
+	} else if (type == QEvent::TouchBegin
+		|| type == QEvent::TouchUpdate
+		|| type == QEvent::TouchEnd
+		|| type == QEvent::TouchCancel) {
+		handleTouchEvent(static_cast<QTouchEvent*>(e));
+		return true;
+	}
+	return false;
+}
+
+QWidget *ElasticScroll::viewport() const {
+	return _widget;
+}
+
+void ElasticScroll::touchDeaccelerate(int32 elapsed) {
+	int32 x = _touchSpeed.x();
+	int32 y = _touchSpeed.y();
+	_touchSpeed.setX((x == 0) ? x : (x > 0) ? qMax(0, x - elapsed) : qMin(0, x + elapsed));
+	_touchSpeed.setY((y == 0) ? y : (y > 0) ? qMax(0, y - elapsed) : qMin(0, y + elapsed));
+}
+
+void ElasticScroll::overscrollReturn() {
+	_overscrollReturning = true;
+	_ignoreMomentumFromOverscroll = _overscroll;
+	if (overscrollFinish()) {
+		_overscrollReturnAnimation.stop();
+		return;
+	} else if (_overscrollReturnAnimation.animating()) {
+		return;
+	}
+	_movement = Movement::Returning;
+	overscrollSpringStart((_overscroll < 0) ? -1 : 1);
+}
+
+bool ElasticScroll::overscrollSpringSide(int side) const {
+	const auto type = (side < 0) ? _overscrollTypeFrom : _overscrollTypeTill;
+	return !side ? false : (type != OverscrollType::None);
+}
+
+bool ElasticScroll::overscrollPullSide(int side) const {
+	// Virtual and pull-flagged sides host pull-to-action controls (the
+	// stories strip in the chat list, the pull to the next channel in
+	// the chat history), which follow the finger with a much softer
+	// stiffness over the pull distance and stretch without a
+	// minimum-delta threshold. They share the linear mapping and
+	// spring return dynamics with the plain bounce sides.
+	if (!side) {
+		return false;
+	}
+	const auto type = (side < 0) ? _overscrollTypeFrom : _overscrollTypeTill;
+	return (type == OverscrollType::Virtual)
+		|| (type == OverscrollType::Real
+			&& ((side < 0) ? _overscrollPullFrom : _overscrollPullTill) > 0);
+}
+
+float64 ElasticScroll::overscrollPullDistance(int side) const {
+	if (!overscrollPullSide(side)) {
+		return 0.;
+	}
+	const auto distance = (side < 0)
+		? _overscrollPullFrom
+		: _overscrollPullTill;
+	return distance ? float64(distance) : 1e9;
+}
+
+bool ElasticScroll::overscrollCollapsing() const {
+	const auto stretch = _overscroll - currentOverscrollDefault();
+	return (stretch != 0) && base::OppositeSigns(stretch, _overscroll);
+}
+
+void ElasticScroll::trackWheelVelocity(
+		Qt::ScrollPhase phase,
+		int delta,
+		crl::time timestamp) {
+	// Elapsed time is measured between the events' own timestamps: when
+	// the main thread stalls, queued momentum events arrive back-to-back
+	// and processing-time deltas of 1-2ms would inflate the velocity by
+	// an order of magnitude, launching the release bounce way too far.
+	const auto eventTime = timestamp ? timestamp : crl::now();
+	const auto momentum = (phase == Qt::ScrollMomentum);
+	if (phase != Qt::ScrollUpdate && !momentum) {
+		if (phase == Qt::ScrollBegin) {
+			_wheelVelocity = 0.;
+			_wheelVelocityTime = 0;
+			_lastWheelEventTime = eventTime;
+			_pendingOverscrollDelta = 0;
+		}
+		_lastWheelPhaseMomentum = false;
+		return;
+	}
+	// The gap between the fingers lifting and the first momentum event
+	// has no defined duration, so if it is too long to measure velocity
+	// from, keep the velocity tracked from the finger-driven updates
+	// instead of zeroing it: a fling may deliver ScrollBegin followed
+	// directly by momentum events, making that first event the only
+	// velocity sample there is.
+	const auto elapsed = _lastWheelEventTime
+		? (eventTime - _lastWheelEventTime)
+		: crl::time(0);
+	if (elapsed > 0 && elapsed < kVelocityZeroingTimeout) {
+		const auto limit = kMaxTrackedVelocity * style::Scale() / 100.;
+		_wheelVelocity = std::clamp(delta * 1000. / elapsed, -limit, limit);
+		_wheelVelocityTime = crl::now();
+	} else if (!momentum || _lastWheelPhaseMomentum) {
+		_wheelVelocity = 0.;
+		_wheelVelocityTime = crl::now();
+	}
+	_lastWheelEventTime = eventTime;
+	_lastWheelPhaseMomentum = momentum;
+}
+
+void ElasticScroll::overscrollSpringStart(int side) {
+	_springSide = side;
+	_springTarget = (side < 0)
+		? _overscrollDefaultFrom
+		: _overscrollDefaultTill;
+	_springX0 = _overscroll - _springTarget;
+	_springV0 = (_wheelVelocityTime
+		&& (crl::now() - _wheelVelocityTime <= kVelocityZeroingTimeout))
+		? _wheelVelocity
+		: 0.;
+	// A fling bounce starts right at the edge with x0 == 0 and only the
+	// velocity pushing the stretch out, so the extension direction is
+	// taken from the stretch when there is one and from the edge side
+	// otherwise.
+	const auto reference = _springX0 ? _springX0 : float64(_springSide);
+	const auto push = _springV0 * kRubberBandAmplitude;
+	const auto decay = kRubberBandStiffness / kRubberBandPeriod;
+	_springPeakTime = ((push != 0.) && ((push > 0.) == (reference > 0.)))
+		? std::max(0., (1. / decay) - (_springX0 / push))
+		: 0.;
+	_overscrollReturnAnimation.start(
+		[=] { overscrollSpringUpdate(); },
+		0.,
+		1.,
+		kRubberBandMaxReturnDuration);
+}
+
+void ElasticScroll::overscrollBounce(int side, float64 velocity) {
+	_overscrollReturning = true;
+	_ignoreMomentumFromOverscroll = side;
+	_movement = Movement::Returning;
+	_wheelVelocity = velocity;
+	_wheelVelocityTime = crl::now();
+	overscrollSpringStart(side);
+}
+
+void ElasticScroll::overscrollSpringUpdate() {
+	const auto progress = _overscrollReturnAnimation.value(1.);
+	const auto time = progress * kRubberBandMaxReturnDuration / 1000.;
+	const auto decay = kRubberBandStiffness / kRubberBandPeriod;
+	const auto value = (_springX0 + (_springV0 * kRubberBandAmplitude * time))
+		* std::exp(-decay * time);
+	const auto rounded = int(base::SafeRound(value));
+	const auto reference = _springX0 ? _springX0 : float64(_springSide);
+	const auto crossed = (value == 0.)
+		? (_springX0 != 0.)
+		: ((value > 0.) != (reference > 0.));
+	if (!_overscrollReturning
+		|| !_springSide
+		|| crossed
+		|| !_overscrollReturnAnimation.animating()
+		|| (!rounded && time >= _springPeakTime)) {
+		overscrollSpringFinish();
+		return;
+	}
+	applyOverscroll(_springTarget + rounded);
+}
+
+void ElasticScroll::overscrollSpringFinish() {
+	_overscrollReturnAnimation.stop();
+	_overscrollReturning = false;
+	_springSide = 0;
+	_overscrollAccumulated = currentOverscrollDefaultAccumulated();
+	const auto weak = base::make_weak(this);
+	applyOverscroll(_springTarget);
+	if (weak) {
+		_movement = Movement::None;
+	}
+}
+
+auto ElasticScroll::computeAccumulatedParts() const ->AccumulatedParts {
+	const auto baseAccumulated = currentOverscrollDefaultAccumulated();
+	const auto returnProgress = _overscrollReturnAnimation.value(
+		_overscrollReturning ? 1. : 0.);
+	const auto relativeAccumulated = (1. - returnProgress)
+		* (_overscrollAccumulated - baseAccumulated);
+	return {
+		.base = baseAccumulated,
+		.relative = int(base::SafeRound(relativeAccumulated)),
+	};
+}
+
+void ElasticScroll::overscrollReturnCancel() {
+	_movement = Movement::Progress;
+	if (!_overscrollReturning) {
+		return;
+	}
+	_overscrollReturnAnimation.stop();
+	_overscrollReturning = false;
+	_springSide = 0;
+	_overscrollAccumulated = currentOverscrollDefaultAccumulated()
+		+ overscrollToAccumulated(
+			_overscroll,
+			_overscroll - currentOverscrollDefault());
+	applyAccumulatedScroll();
+}
+
+int ElasticScroll::currentOverscrollDefault() const {
+	return (_overscroll < 0)
+		? _overscrollDefaultFrom
+		: (_overscroll > 0)
+		? _overscrollDefaultTill
+		: 0;
+}
+
+int ElasticScroll::currentOverscrollDefaultAccumulated() const {
+	return (_overscrollAccumulated < 0)
+		? (_overscrollDefaultFrom ? kOverscrollFromThreshold : 0)
+		: (_overscrollAccumulated > 0)
+		? (_overscrollDefaultTill ? kOverscrollTillThreshold : 0)
+		: 0;
+}
+
+void ElasticScroll::overscrollCheckReturnFinish() {
+	if (!_overscrollReturning) {
+		return;
+	} else if (!_overscrollReturnAnimation.animating()) {
+		_overscrollReturning = false;
+		_overscrollAccumulated = currentOverscrollDefaultAccumulated();
+		_movement = Movement::None;
+	} else if (overscrollFinish()) {
+		_overscrollReturnAnimation.stop();
+	}
+}
+
+bool ElasticScroll::overscrollFinish() {
+	if (_overscroll != currentOverscrollDefault()) {
+		return false;
+	}
+	_overscrollReturning = false;
+	_overscrollAccumulated = currentOverscrollDefaultAccumulated();
+	_movement = Movement::None;
+	_springSide = 0;
+	return true;
+}
+
+void ElasticScroll::innerResized() {
+	_innerResizes.fire({});
+}
+
+int ElasticScroll::scrollWidth() const {
+	return (_vertical || !_widget)
+		? width()
+		: std::max(_widget->width(), width());
+}
+
+int ElasticScroll::scrollHeight() const {
+	return (!_vertical || !_widget)
+		? height()
+		: std::max(_widget->height(), height());
+}
+
+int ElasticScroll::scrollLeftMax() const {
+	return scrollWidth() - width();
+}
+
+int ElasticScroll::scrollTopMax() const {
+	return scrollHeight() - height();
+}
+
+int ElasticScroll::scrollLeft() const {
+	return _vertical ? 0 : _state.visibleFrom;
+}
+
+int ElasticScroll::scrollTop() const {
+	return _vertical ? _state.visibleFrom : 0;
+}
+
+void ElasticScroll::touchScrollTimer() {
+	auto nowTime = crl::now();
+	if (_touchScrollState == TouchScrollState::Acceleration && _touchWaitingAcceleration && (nowTime - _touchAccelerationTime) > 40) {
+		_touchScrollState = TouchScrollState::Manual;
+		sendWheelEvent(Qt::ScrollEnd);
+		touchResetSpeed();
+	} else if (_touchScrollState == TouchScrollState::Auto || _touchScrollState == TouchScrollState::Acceleration) {
+		int32 elapsed = int32(nowTime - _touchTime);
+		QPoint delta = _touchSpeed * elapsed / 1000;
+		sendWheelEvent(
+			_touchPress ? Qt::ScrollUpdate : Qt::ScrollMomentum,
+			delta);
+
+		if (_touchSpeed.isNull()) {
+			_touchScrollState = TouchScrollState::Manual;
+			sendWheelEvent(Qt::ScrollEnd);
+			_touchScroll = false;
+			_touchScrollTimer.cancel();
+		} else {
+			_touchTime = nowTime;
+		}
+		touchDeaccelerate(elapsed);
+	}
+}
+
+void ElasticScroll::touchUpdateSpeed() {
+	const auto nowTime = crl::now();
+	if (_touchPreviousPositionValid) {
+		const int elapsed = nowTime - _touchSpeedTime;
+		if (elapsed) {
+			const QPoint newPixelDiff = (_touchPosition - _touchPreviousPosition);
+			const QPoint pixelsPerSecond = newPixelDiff * (1000 / elapsed);
+
+			// fingers are inacurates, we ignore small changes to avoid stopping the autoscroll because
+			// of a small horizontal offset when scrolling vertically
+			const int newSpeedY = (qAbs(pixelsPerSecond.y()) > kFingerAccuracyThreshold) ? pixelsPerSecond.y() : 0;
+			const int newSpeedX = (qAbs(pixelsPerSecond.x()) > kFingerAccuracyThreshold) ? pixelsPerSecond.x() : 0;
+			if (_touchScrollState == TouchScrollState::Auto) {
+				const int oldSpeedY = _touchSpeed.y();
+				const int oldSpeedX = _touchSpeed.x();
+				if ((oldSpeedY <= 0 && newSpeedY <= 0) || ((oldSpeedY >= 0 && newSpeedY >= 0)
+					&& (oldSpeedX <= 0 && newSpeedX <= 0)) || (oldSpeedX >= 0 && newSpeedX >= 0)) {
+					_touchSpeed.setY(std::clamp((oldSpeedY + (newSpeedY / 4)), -kMaxScrollAccelerated, +kMaxScrollAccelerated));
+					_touchSpeed.setX(std::clamp((oldSpeedX + (newSpeedX / 4)), -kMaxScrollAccelerated, +kMaxScrollAccelerated));
+				} else {
+					_touchSpeed = QPoint();
+				}
+			} else {
+				// we average the speed to avoid strange effects with the last delta
+				if (!_touchSpeed.isNull()) {
+					_touchSpeed.setX(std::clamp((_touchSpeed.x() / 4) + (newSpeedX * 3 / 4), -kMaxScrollFlick, +kMaxScrollFlick));
+					_touchSpeed.setY(std::clamp((_touchSpeed.y() / 4) + (newSpeedY * 3 / 4), -kMaxScrollFlick, +kMaxScrollFlick));
+				} else {
+					_touchSpeed = QPoint(newSpeedX, newSpeedY);
+				}
+			}
+		}
+	} else {
+		_touchPreviousPositionValid = true;
+	}
+	_touchSpeedTime = nowTime;
+	_touchPreviousPosition = _touchPosition;
+}
+
+void ElasticScroll::touchResetSpeed() {
+	_touchSpeed = QPoint();
+	_touchPreviousPositionValid = false;
+}
+
+bool ElasticScroll::eventHook(QEvent *e) {
+	if (filterOutTouchEvent(e)) {
+		if (e->type() == QEvent::TouchCancel
+			&& !_touchDisabled
+			&& _widget
+			&& _widget->testAttribute(Qt::WA_AcceptTouchEvents)) {
+			// If touch was cancelled for me, send the cancel
+			// event to the widget as well.
+			//
+			// In case scroll owner handled touch himself using
+			// _customTouchProcess hook and wants to cancel any
+			// actions here, we want to cancel them in widget too.
+			QTouchEvent ev(QEvent::TouchCancel);
+			ev.setTimestamp(crl::now());
+			QGuiApplication::sendEvent(_widget, &ev);
+		}
+		return true;
+	}
+	switch (e->type()) {
+	case QEvent::ScrollPrepare: {
+		QScrollPrepareEvent *se = static_cast<QScrollPrepareEvent *>(e);
+		se->setViewportSize(QSizeF(viewport()->size()));
+		se->setContentPosRange(QRectF(
+			0,
+			0,
+			_vertical ? 0 : _state.fullSize - width(),
+			_vertical ? _state.fullSize - height() : 0));
+		se->setContentPos(QPointF(
+			_vertical ? 0 : _state.visibleFrom,
+			_vertical ? _state.visibleFrom : 0));
+		se->accept();
+		return true;
+	}
+	case QEvent::Scroll: {
+		QScrollEvent *se = static_cast<QScrollEvent *>(e);
+		const auto state = _scroller->state();
+		const auto phase = state == QScroller::Pressed
+			? Qt::ScrollBegin
+			: state == QScroller::Dragging
+			? Qt::ScrollUpdate
+			: state == QScroller::Scrolling
+			? Qt::ScrollMomentum
+			: Qt::ScrollEnd;
+		const auto pixels
+			= (se->contentPos() + se->overshootDistance()).toPoint();
+		const auto delta
+			= -(_state.visibleFrom - (_vertical ? pixels.y() : pixels.x()));
+		// Capture the fling velocity before this event is tracked: at the
+		// boundary QScroller clamps the delta, so the sample it produces
+		// underestimates the speed the fling actually hit the edge with.
+		const auto velocity = (_wheelVelocityTime
+			&& (crl::now() - _wheelVelocityTime <= kVelocityZeroingTimeout))
+			? _wheelVelocity
+			: 0.;
+		const auto weak = base::make_weak(this);
+		const auto result = handleScrollEvent(phase, delta);
+		if (!weak) {
+			return true;
+		}
+		if (phase == Qt::ScrollMomentum
+			&& velocity != 0.
+			&& _scroller
+			&& _scroller->state() == QScroller::Scrolling
+			&& !_overscrollReturnAnimation.animating()
+			&& _overscroll == currentOverscrollDefault()) {
+			// QScroller's overshoot is disabled, so a fling just stops
+			// dead at the boundary of the range QScroller knows about.
+			const auto side = (velocity < 0.) ? -1 : 1;
+			const auto target = _state.visibleFrom + side;
+			if (willScrollTo(target) != target) {
+				if (side > 0 && requestBottomContent(1)) {
+					// The boundary wasn't a real edge: more content was
+					// appended below, let the fling continue into it.
+					if (weak) {
+						ResendScrollerPrepare(_scroller);
+					}
+					return true;
+				}
+				if (!weak) {
+					return true;
+				}
+				const auto &allowed = (side < 0)
+					? _overscrollAllowFrom
+					: _overscrollAllowTill;
+				if (overscrollSpringSide(side)
+					&& (!allowed || allowed())) {
+					// A real edge: hand the residual velocity over to the
+					// rubber-band spring for the bounce.
+					_scroller->stop();
+					_wheelPos = {};
+					overscrollBounce(side, velocity);
+				}
+			}
+		}
+		return result;
+	}
+	}
+	return RpWidget::eventHook(e);
+}
+
+void ElasticScroll::wheelEvent(QWheelEvent *e) {
+	if (handleWheelEvent(e)) {
+		e->accept();
+	} else {
+		e->ignore();
+	}
+}
+
+void ElasticScroll::paintEvent(QPaintEvent *e) {
+	if (!_overscrollBg) {
+		return;
+	}
+	const auto fillFrom = std::max(-_state.visibleFrom, 0);
+	const auto content = _widget
+		? (_vertical ? _widget->height() : _widget->width())
+		: 0;
+	const auto fillTill = content
+		? (std::max(_state.visibleTill - content, 0) + _contentBottomInset)
+		: (_vertical ? height() : width());
+	if (!fillFrom && !fillTill) {
+		return;
+	}
+	auto p = QPainter(this);
+	if (fillFrom) {
+		p.fillRect(
+			0,
+			0,
+			_vertical ? width() : fillFrom,
+			_vertical ? fillFrom : height(),
+			*_overscrollBg);
+	}
+	if (fillTill) {
+		p.fillRect(
+			_vertical ? 0 : (width() - fillTill),
+			_vertical ? (height() - fillTill) : 0,
+			_vertical ? width() : fillTill,
+			_vertical ? fillTill : height(),
+			*_overscrollBg);
+	}
+}
+
+bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+	if (_customWheelProcess
+		&& _customWheelProcess(static_cast<QWheelEvent*>(e.get()))) {
+		return true;
+	}
+	const auto phase = e->phase();
+	auto ownAxisLocked = false;
+	if (_wheelDirectionLocked || _crossAxisWheelProcess) {
+		const auto lockDelta = ScrollDeltaF(e, touch);
+		const auto locked = _wheelDirectionLocked
+			? _wheelDirectionLock.update(phase, lockDelta)
+			: std::nullopt;
+		if (!_wheelDirectionLocked || phase == Qt::NoScrollPhase) {
+			const auto own = _vertical ? lockDelta.y() : lockDelta.x();
+			const auto cross = _vertical ? lockDelta.x() : lockDelta.y();
+			if (std::abs(cross) > std::abs(own)
+				&& _crossAxisWheelProcess
+				&& _crossAxisWheelProcess(lockDelta.toPoint(), phase)) {
+				return true;
+			}
+		} else if (locked
+			&& ((*locked == Qt::Horizontal) == _vertical)) {
+			// Accept the event only if the cross-axis process consumed
+			// it: accepting a phased wheel event locks the rest of the
+			// gesture onto this widget (QApplicationPrivate::wheel_widget
+			// delivers all the following events straight here), starving
+			// the widgets under the cursor - like the swipe-to-reply
+			// handler on the history list - of the ScrollUpdate stream.
+			return _crossAxisWheelProcess
+				&& _crossAxisWheelProcess(
+					(_vertical
+						? QPoint(qRound(lockDelta.x()), 0)
+						: QPoint(0, qRound(lockDelta.y()))),
+					phase);
+		} else {
+			ownAxisLocked = locked.has_value();
+		}
+	}
+	const auto now = crl::now();
+	const auto guard = gsl::finally([&] {
+		_lastScroll = now;
+	});
+	auto unmultiplied = ScrollDelta(e, touch);
+	if (ownAxisLocked) {
+		if (_vertical) {
+			unmultiplied.setX(0);
+		} else {
+			unmultiplied.setY(0);
+		}
+	}
+	const auto multiply = e->modifiers()
+		& (Qt::ControlModifier | Qt::ShiftModifier);
+	const auto pixels = multiply
+		? QPoint(
+			(unmultiplied.x() * std::max(width(), 120) / 120.),
+			(unmultiplied.y() * std::max(height(), 120) / 120.))
+		: unmultiplied;
+	auto ignore = false;
+	auto delta = _vertical ? -pixels.y() : -pixels.x();
+	if (!ownAxisLocked
+		&& std::abs(_vertical ? pixels.x() : pixels.y()) >= std::abs(delta)) {
+		ignore = true;
+		delta = 0;
+	}
+	if (phase == Qt::NoScrollPhase) {
+		if (_overscroll == currentOverscrollDefault()) {
+			const auto weak = base::make_weak(this);
+			requestBottomContent(delta);
+			if (!weak) {
+				return true;
+			}
+			tryScrollTo(_state.visibleFrom + delta);
+			_movement = Movement::None;
+		} else if (!_overscrollReturnAnimation.animating()) {
+			overscrollReturn();
+		}
+		return true;
+	} else if (_scroller && !touch) {
+		// QScroller only provides in-range kinetics (its overshoot is
+		// disabled), so while any overscroll state is active - a stretch,
+		// an accumulated default (like the expanded stories strip), a
+		// pending below-threshold delta or a running bounce - and whenever
+		// the delta pushes past an edge, the raw phased events go through
+		// the elastic overscroll physics directly instead of QScroller.
+		const auto elastic = _overscroll
+			|| _overscrollAccumulated
+			|| _pendingOverscrollDelta
+			|| _overscrollReturning;
+		const auto target = _state.visibleFrom + delta;
+		if (elastic || (delta && willScrollTo(target) != target)) {
+			if (!_wheelPos.isNull()
+				|| _scroller->state() != QScroller::Inactive) {
+				_scroller->stop();
+				_wheelPos = {};
+			}
+			// Pass no timestamp: with QScroller enabled the velocity is
+			// also tracked from its synthetic events, which carry none,
+			// and mixing the events' own clock with the processing-time
+			// one would corrupt the estimation at the transition.
+			return handleScrollEvent(phase, delta, ignore, touch);
+		}
+		switch (phase) {
+		case Qt::ScrollBegin:
+		case Qt::ScrollUpdate: {
+			if (phase == Qt::ScrollBegin
+				&& !pixels.isNull()
+				&& _scroller->state() == QScroller::Scrolling) {
+				// On macOS, when Qt loses the race detecting that a
+				// momentum phase follows the finger lift, the OS momentum
+				// stream leaks through as ScrollBegin + ScrollMomentum.
+				// A real begin (fingers resting on the pad) carries a
+				// zero delta, so a delta-carrying begin while our fling
+				// runs is that leak - pressing would catch and kill the
+				// fling. If this ever swallows a real begin, the next
+				// ScrollUpdate finds _wheelPos null and presses instead.
+				break;
+			}
+			const auto wasNull = _wheelPos.isNull();
+			if (wasNull) {
+				_wheelPos = QPoint(width(), height()) / 2;
+			} else {
+				_wheelPos += pixels;
+			}
+			_scroller->handleInput(wasNull
+				? QScroller::InputPress
+				: QScroller::InputMove, _wheelPos, now);
+		} break;
+		case Qt::ScrollEnd:
+		case Qt::ScrollMomentum: {
+			if (!_wheelPos.isNull()) {
+				_scroller->handleInput(
+					QScroller::InputRelease,
+					_wheelPos,
+					now);
+				_wheelPos = {};
+			}
+		} break;
+		}
+		return true;
+	}
+	return handleScrollEvent(
+		phase,
+		delta,
+		ignore,
+		touch,
+		crl::time(e->timestamp()));
+}
+
+bool ElasticScroll::requestBottomContent(int delta) {
+	if (!_bottomContentRequest
+		|| _insideBottomContentRequest
+		|| _overscroll
+		|| delta <= 0) {
+		return false;
+	}
+	const auto target = _state.visibleFrom + delta;
+	if (willScrollTo(target) >= target) {
+		return false;
+	}
+	const auto request = _bottomContentRequest;
+	const auto weak = base::make_weak(this);
+	_insideBottomContentRequest = true;
+	const auto result = request();
+	if (weak) {
+		_insideBottomContentRequest = false;
+	}
+	return result;
+}
+
+bool ElasticScroll::handleScrollEvent(
+		Qt::ScrollPhase phase,
+		int delta,
+		bool ignore,
+		bool touch,
+		crl::time timestamp) {
+	const auto momentum = (phase == Qt::ScrollMomentum)
+		|| (phase == Qt::ScrollEnd);
+	trackWheelVelocity(phase, delta, timestamp);
+	if (_ignoreMomentumFromOverscroll) {
+		if (!momentum) {
+			_ignoreMomentumFromOverscroll = 0;
+		} else if (_springSide) {
+			if (!base::OppositeSigns(_springSide, delta)) {
+				return true;
+			}
+			// Opposite-direction input during the bounce is a new
+			// gesture whose begin was lost to the momentum-phase
+			// race (Qt may deliver it as a bare momentum stream),
+			// so interrupt the spring like a real begin would.
+			_ignoreMomentumFromOverscroll = 0;
+			overscrollReturnCancel();
+		} else if (!_overscrollReturnAnimation.animating()
+			&& !base::OppositeSigns(_ignoreMomentumFromOverscroll, delta)) {
+			return true;
+		}
+	}
+	if (!momentum) {
+		overscrollReturnCancel();
+	}
+	// Chromium's ReconcileStretchAndScroll: scrolling away from the
+	// stretch consumes it 1:1 instead of unwinding through the force
+	// mapping, otherwise a canceled bounce glues the view to the edge
+	// for (stiffness * stretch) of input travel. Runs before the
+	// momentum return branch so that a leaked momentum-phased gesture
+	// unwinds the stretch instead of restarting the spring first.
+	if (delta
+		&& _overscroll != currentOverscrollDefault()
+		&& !_overscrollReturnAnimation.animating()
+		&& overscrollSpringSide(_overscroll)) {
+		const auto base = currentOverscrollDefault();
+		const auto stretch = _overscroll - base;
+		if (base::OppositeSigns(stretch, delta)) {
+			const auto unwound = (stretch < 0)
+				? std::min(stretch + delta, 0)
+				: std::max(stretch + delta, 0);
+			delta -= unwound - stretch;
+			_overscrollAccumulated = currentOverscrollDefaultAccumulated()
+				+ overscrollToAccumulated(_overscroll, unwound);
+			applyOverscroll(base + unwound);
+		}
+	}
+	if (momentum) {
+		auto returning = (_overscroll != currentOverscrollDefault())
+			&& !_overscrollReturnAnimation.animating();
+		// A momentum fling that retracts a pull (the stretch points
+		// back toward the content, which only happens around an
+		// expanded overscroll default) keeps feeding the collapse
+		// instead of bouncing back to the default, otherwise the
+		// return spring outruns the decaying fling between events and
+		// the pull never collapses. ScrollEnd still starts the return.
+		if (returning
+			&& (phase == Qt::ScrollMomentum)
+			&& overscrollCollapsing()) {
+			returning = false;
+		}
+		if (returning) {
+			overscrollReturn();
+		} else if (!_overscrollReturnAnimation.animating()) {
+			_movement = (phase == Qt::ScrollEnd)
+				? Movement::None
+				: Movement::Momentum;
+		}
+	}
+	if (!_overscroll) {
+		const auto normalTo = willScrollTo(_state.visibleFrom + delta);
+		delta -= normalTo - _state.visibleFrom;
+		applyScrollTo(normalTo);
+		if (delta > 0) {
+			const auto weak = base::make_weak(this);
+			const auto added = requestBottomContent(delta);
+			if (!weak) {
+				return true;
+			} else if (added) {
+				const auto retryTo = willScrollTo(_state.visibleFrom + delta);
+				delta -= retryTo - _state.visibleFrom;
+				applyScrollTo(retryTo);
+				if (!weak) {
+					return true;
+				}
+				ResendScrollerPrepare(_scroller);
+			}
+		}
+	}
+	if (!delta) {
+		return !ignore;
+	}
+	if (touch) {
+		delta *= kTouchOverscrollMultiplier;
+	}
+	if (!_overscrollAccumulated
+		&& overscrollSpringSide(delta)
+		&& !overscrollPullSide(delta)) {
+		if (base::OppositeSigns(_pendingOverscrollDelta, delta)) {
+			_pendingOverscrollDelta = 0;
+		}
+		_pendingOverscrollDelta += delta;
+		const auto minimum = style::ConvertScale(
+			kMinimumOverscrollBeforeStretch);
+		if (std::abs(_pendingOverscrollDelta) < minimum) {
+			return true;
+		}
+		delta = base::take(_pendingOverscrollDelta);
+	} else {
+		_pendingOverscrollDelta = 0;
+	}
+	const auto accumulated = _overscrollAccumulated + delta;
+	const auto type = (accumulated < 0)
+		? _overscrollTypeFrom
+		: (accumulated > 0)
+		? _overscrollTypeTill
+		: OverscrollType::None;
+	const auto &allowed = (accumulated < 0)
+		? _overscrollAllowFrom
+		: _overscrollAllowTill;
+	if (type == OverscrollType::None
+		|| (allowed && !allowed())
+		|| base::OppositeSigns(_overscrollAccumulated, accumulated)) {
+		_overscrollAccumulated = 0;
+	} else {
+		_overscrollAccumulated = accumulated;
+	}
+	applyAccumulatedScroll();
+	if (momentum
+		&& !_overscrollReturnAnimation.animating()
+		&& _overscroll != currentOverscrollDefault()
+		&& overscrollSpringSide(_overscroll)
+		&& !overscrollCollapsing()) {
+		overscrollReturn();
+	}
+	return true;
+}
+
+void ElasticScroll::applyAccumulatedScroll() {
+	overscrollCheckReturnFinish();
+	const auto parts = computeAccumulatedParts();
+	const auto baseOverscroll = (_overscrollAccumulated < 0)
+		? _overscrollDefaultFrom
+		: (_overscrollAccumulated > 0)
+		? _overscrollDefaultTill
+		: 0;
+	applyOverscroll(baseOverscroll
+		+ overscrollFromAccumulated(_overscrollAccumulated, parts.relative));
+}
+
+int ElasticScroll::overscrollFromAccumulated(
+		int side,
+		int accumulated) const {
+	if (!overscrollSpringSide(side)) {
+		return 0;
+	}
+	const auto sign = (side < 0) ? -1 : 1;
+	const auto distance = overscrollPullDistance(side);
+	const auto base = std::abs(float64((side < 0)
+		? _overscrollDefaultFrom
+		: _overscrollDefaultTill));
+	const auto baseAccumulated = PullAccumulatedFromOverscroll(
+		base,
+		distance);
+	const auto total = baseAccumulated + sign * accumulated;
+	const auto visual = (total < 0)
+		? -PullOverscrollFromAccumulated(-total, distance)
+		: PullOverscrollFromAccumulated(total, distance);
+	return int(base::SafeRound(sign * (visual - base)));
+}
+
+int ElasticScroll::overscrollToAccumulated(int side, int overscroll) const {
+	if (!overscrollSpringSide(side)) {
+		return 0;
+	}
+	const auto sign = (side < 0) ? -1 : 1;
+	const auto distance = overscrollPullDistance(side);
+	const auto base = std::abs(float64((side < 0)
+		? _overscrollDefaultFrom
+		: _overscrollDefaultTill));
+	const auto baseAccumulated = PullAccumulatedFromOverscroll(
+		base,
+		distance);
+	const auto visual = base + sign * overscroll;
+	const auto total = (visual < 0)
+		? -PullAccumulatedFromOverscroll(-visual, distance)
+		: PullAccumulatedFromOverscroll(visual, distance);
+	return int(base::SafeRound(sign * (total - baseAccumulated)));
+}
+
+bool ElasticScroll::eventFilter(QObject *obj, QEvent *e) {
+	const auto result = RpWidget::eventFilter(obj, e);
+	if (obj == _widget.data()) {
+		if (filterOutTouchEvent(e)) {
+			return true;
+		} else if (e->type() == QEvent::Resize) {
+			const auto weak = base::make_weak(this);
+			reanchorOverscroll();
+			if (weak) {
+				updateState();
+			}
+			if (weak) {
+				_innerResizes.fire({});
+			}
+		} else if (e->type() == QEvent::Move) {
+			updateState();
+		}
+		return result;
+	}
+	return false;
+}
+
+bool ElasticScroll::filterOutTouchEvent(QEvent *e) {
+	const auto type = e->type();
+	if (type == QEvent::TouchBegin
+		|| type == QEvent::TouchUpdate
+		|| type == QEvent::TouchEnd
+		|| type == QEvent::TouchCancel) {
+		const auto ev = static_cast<QTouchEvent*>(e);
+		if ((ev->type() == QEvent::TouchCancel && !ev->device())
+			|| (ev->device()->type() == base::TouchDevice::TouchScreen)) {
+			if (_customTouchProcess && _customTouchProcess(ev)) {
+				return true;
+			} else if (!_touchDisabled) {
+				handleTouchEvent(ev);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void ElasticScroll::handleTouchEvent(QTouchEvent *e) {
+	if (!e->touchPoints().isEmpty()) {
+		_touchPreviousPosition = _touchPosition;
+		_touchPosition = e->touchPoints().cbegin()->screenPos().toPoint();
+	}
+
+	switch (e->type()) {
+	case QEvent::TouchBegin: {
+		if (_touchPress || e->touchPoints().isEmpty()) {
+			return;
+		}
+		_touchPress = true;
+		if (_touchScrollState == TouchScrollState::Auto) {
+			_touchScrollState = TouchScrollState::Acceleration;
+			_touchMaybePressing = false;
+			_touchWaitingAcceleration = true;
+			_touchAccelerationTime = crl::now();
+			touchUpdateSpeed();
+			_touchStart = _touchPosition;
+		} else {
+			_touchScroll = false;
+			_touchMaybePressing = true;
+			_touchTimer.callOnce(QApplication::startDragTime());
+		}
+		_touchStart = _touchPreviousPosition = _touchPosition;
+		_touchRightButton = false;
+		sendWheelEvent(Qt::ScrollBegin);
+	} break;
+
+	case QEvent::TouchUpdate: {
+		if (!_touchPress) {
+			return;
+		}
+		if (!_touchScroll
+			&& ((_touchPosition - _touchStart).manhattanLength()
+				>= QApplication::startDragDistance())) {
+			_touchTimer.cancel();
+			_touchScroll = true;
+			_touchMaybePressing = false;
+			touchUpdateSpeed();
+		}
+		if (_touchScroll) {
+			if (_touchScrollState == TouchScrollState::Manual) {
+				touchScrollUpdated();
+			} else if (_touchScrollState == TouchScrollState::Acceleration) {
+				touchUpdateSpeed();
+				_touchAccelerationTime = crl::now();
+				if (_touchSpeed.isNull()) {
+					_touchScrollState = TouchScrollState::Manual;
+				}
+			}
+		}
+	} break;
+
+	case QEvent::TouchEnd: {
+		if (!_touchPress) {
+			return;
+		}
+		_touchPress = false;
+		auto weak = base::make_weak(this);
+		if (_touchScroll) {
+			if (_touchScrollState == TouchScrollState::Manual) {
+				_touchScrollState = TouchScrollState::Auto;
+				_touchPreviousPositionValid = false;
+				_touchScrollTimer.callEach(15);
+				_touchTime = crl::now();
+			} else if (_touchScrollState == TouchScrollState::Auto) {
+				_touchScrollState = TouchScrollState::Manual;
+				_touchScroll = false;
+				touchResetSpeed();
+			} else if (_touchScrollState == TouchScrollState::Acceleration) {
+				_touchScrollState = TouchScrollState::Auto;
+				_touchWaitingAcceleration = false;
+				_touchPreviousPositionValid = false;
+			}
+		} else if (window()) { // one short tap -- like left mouse click, one long tap -- like right mouse click
+			Qt::MouseButton btn(_touchRightButton ? Qt::RightButton : Qt::LeftButton);
+
+			if (weak) SendSynteticMouseEvent(this, QEvent::MouseMove, Qt::NoButton, _touchStart);
+			if (weak) SendSynteticMouseEvent(this, QEvent::MouseButtonPress, btn, _touchStart);
+			if (weak) SendSynteticMouseEvent(this, QEvent::MouseButtonRelease, btn, _touchStart);
+
+			if (weak && _touchRightButton) {
+				auto windowHandle = window()->windowHandle();
+				auto localPoint = windowHandle->mapFromGlobal(_touchStart);
+				QContextMenuEvent ev(QContextMenuEvent::Mouse, localPoint, _touchStart, QGuiApplication::keyboardModifiers());
+				ev.setTimestamp(crl::now());
+				QGuiApplication::sendEvent(windowHandle, &ev);
+			}
+		}
+		if (weak) {
+			_touchTimer.cancel();
+			_touchRightButton = false;
+			_touchMaybePressing = false;
+		}
+	} break;
+
+	case QEvent::TouchCancel: {
+		_touchPress = false;
+		_touchScroll = false;
+		_touchMaybePressing = false;
+		_touchScrollState = TouchScrollState::Manual;
+		_touchTimer.cancel();
+	} break;
+	}
+}
+
+void ElasticScroll::touchScrollUpdated() {
+	//touchScroll(_touchPosition - _touchPreviousPosition);
+	const auto phase = !_touchPress
+		? Qt::ScrollMomentum
+		: Qt::ScrollUpdate;
+	sendWheelEvent(phase, _touchPosition - _touchPreviousPosition);
+	touchUpdateSpeed();
+}
+
+void ElasticScroll::disableScroll(bool dis) {
+	_disabled = dis;
+	if (_disabled && _st.hiding) {
+		_bar->toggle(false);
+	}
+}
+
+void ElasticScroll::updateState() {
+	_dirtyState = false;
+	if (!_widget) {
+		setState({});
+		return;
+	}
+	auto from = (_vertical ? -_widget->y() : -_widget->x())
+		- _contentBottomInset;
+	auto till = from + (_vertical ? height() : width());
+	const auto wasFullSize = _state.fullSize;
+	const auto nowFullSize = _vertical ? scrollHeight() : scrollWidth();
+	if (wasFullSize > nowFullSize) {
+		const auto wasOverscroll = std::max(
+			_state.visibleTill - wasFullSize,
+			0);
+		const auto nowOverscroll = std::max(till - nowFullSize, 0);
+		const auto delta = std::max(
+			std::min(nowOverscroll - wasOverscroll, from),
+			0);
+		if (delta) {
+			applyScrollTo(from - delta);
+			return;
+		}
+	}
+	setState({
+		.visibleFrom = from,
+		.visibleTill = till,
+		.fullSize = nowFullSize,
+	});
+}
+
+void ElasticScroll::setState(ScrollState state) {
+	if (_overscroll < 0
+		&& (state.visibleFrom > 0
+			|| (!state.visibleFrom
+				&& _overscrollTypeFrom == OverscrollType::Real))) {
+		_overscroll = _overscrollDefaultFrom = 0;
+		overscrollFinish();
+		_overscrollReturnAnimation.stop();
+	} else if (_overscroll > 0
+		&& (state.visibleTill < state.fullSize
+			|| (state.visibleTill == state.fullSize
+				&& _overscrollTypeTill == OverscrollType::Real))) {
+		_overscroll = _overscrollDefaultTill = 0;
+		overscrollFinish();
+		_overscrollReturnAnimation.stop();
+	}
+	if (_state == state) {
+		_position = Position{ _state.visibleFrom, _overscroll };
+		return;
+	}
+	const auto weak = base::make_weak(this);
+	const auto old = _state.visibleFrom;
+	_state = state;
+	updateBarState();
+	if (weak) {
+		_position = Position{ _state.visibleFrom, _overscroll };
+	}
+	if (weak && _state.visibleFrom != old) {
+		_scrollValueUpdated.fire_copy(_state.visibleFrom);
+		if (weak) {
+			_scrolls.fire({});
+		}
+	}
+}
+
+void ElasticScroll::applyScrollTo(int position, bool synthMouseMove) {
+	if (_disabled || !_widget) {
+		return;
+	}
+	const auto weak = base::make_weak(this);
+	_dirtyState = true;
+	const auto was = _widget->geometry();
+	_widget->move(
+		_vertical ? _widget->x() : (-position - _contentBottomInset),
+		_vertical ? (-position - _contentBottomInset) : _widget->y());
+	if (weak) {
+		const auto now = _widget->geometry();
+		const auto wasFrom = _vertical ? was.y() : was.x();
+		const auto wasTill = wasFrom
+			+ (_vertical ? was.height() : was.width());
+		const auto nowFrom = _vertical ? now.y() : now.x();
+		const auto nowTill = nowFrom
+			+ (_vertical ? now.height() : now.width());
+		const auto mySize = _vertical ? height() : width();
+		if ((wasFrom > 0 && wasFrom < mySize)
+			|| (wasTill > 0 && wasTill < mySize)
+			|| (nowFrom > 0 && nowFrom < mySize)
+			|| (nowTill > 0 && nowTill < mySize)) {
+			update();
+		}
+		if (_dirtyState) {
+			updateState();
+		}
+		if (weak && synthMouseMove) {
+			SendSynteticMouseEvent(this, QEvent::MouseMove, Qt::NoButton);
+		}
+	}
+}
+
+void ElasticScroll::applyOverscroll(int overscroll) {
+	if (_overscroll == overscroll) {
+		return;
+	}
+	_overscroll = overscroll;
+	const auto max = _state.fullSize
+		- (_state.visibleTill - _state.visibleFrom);
+	if (_overscroll > 0) {
+		const auto added = (_overscrollTypeTill == OverscrollType::Real)
+			? _overscroll
+			: 0;
+		applyScrollTo(max + added);
+	} else if (_overscroll < 0) {
+		applyScrollTo((_overscrollTypeFrom == OverscrollType::Real)
+			? _overscroll
+			: 0);
+	} else {
+		applyScrollTo(std::clamp(_state.visibleFrom, 0, max));
+	}
+	updateBarState();
+}
+
+// The scroll value an active Real overscroll is pinned to, from fresh sizes
+std::optional<int> ElasticScroll::lookupOverscrollPinnedEdge() const {
+	if (_overscroll < 0 && _overscrollTypeFrom == OverscrollType::Real) {
+		return 0;
+	} else if (_overscroll > 0 && _overscrollTypeTill == OverscrollType::Real) {
+		return (_vertical ? scrollHeight() : scrollWidth()) - (_vertical ? height() : width());
+	}
+	return std::nullopt;
+}
+
+void ElasticScroll::reanchorOverscroll() {
+	// Keep the widget past the (possibly moved) edge after a resize, or
+	// setState() would read the stale position as a scroll away from the
+	// edge and cancel the bounce.
+	if (const auto edge = lookupOverscrollPinnedEdge()) {
+		applyScrollTo(*edge + _overscroll, false);
+	}
+}
+
+void ElasticScroll::updateBarState() {
+	// Virtual overscroll never moves the inner widget, so it never
+	// reaches the state the bar squishes its thumb from - fold it in,
+	// making the thumb behave the same as with Real overscroll.
+	auto state = _state;
+	const auto shift = ((_overscroll < 0
+		&& _overscrollTypeFrom == OverscrollType::Virtual)
+		|| (_overscroll > 0
+			&& _overscrollTypeTill == OverscrollType::Virtual))
+		? _overscroll
+		: 0;
+	state.visibleFrom += shift;
+	state.visibleTill += shift;
+	_bar->updateState(state);
+}
+
+int ElasticScroll::willScrollTo(int position) const {
+	return std::clamp(
+		position,
+		std::min(_state.visibleFrom, 0),
+		std::max(
+			_state.visibleFrom,
+			(_state.visibleFrom
+				+ (_state.fullSize - _state.visibleTill))));
+}
+
+void ElasticScroll::tryScrollTo(int position, bool synthMouseMove) {
+	applyScrollTo(willScrollTo(position), synthMouseMove);
+}
+
+void ElasticScroll::sendWheelEvent(Qt::ScrollPhase phase, QPoint delta) {
+	auto e = QWheelEvent(
+		mapFromGlobal(_touchPosition),
+		_touchPosition,
+		delta,
+		delta,
+		Qt::NoButton,
+		Qt::KeyboardModifiers(), // Ignore Ctrl/Shift fast scroll on touch.
+		phase,
+		false,
+		Qt::MouseEventSynthesizedByApplication);
+	handleWheelEvent(&e, true);
+}
+
+void ElasticScroll::setBarTopInset(int inset) {
+	if (_barTopInset == inset) {
+		return;
+	}
+	_barTopInset = inset;
+	auto event = QResizeEvent(size(), size());
+	resizeEvent(&event);
+}
+
+void ElasticScroll::setBarBottomInset(int inset) {
+	if (_barBottomInset == inset) {
+		return;
+	}
+	_barBottomInset = inset;
+	auto event = QResizeEvent(size(), size());
+	resizeEvent(&event);
+}
+
+void ElasticScroll::setContentBottomInset(int inset) {
+	if (_contentBottomInset == inset) {
+		return;
+	}
+	_contentBottomInset = inset;
+	if (_widget) {
+		const auto position = _state.visibleFrom;
+		_widget->move(
+			_vertical ? _widget->x() : (-position - _contentBottomInset),
+			_vertical ? (-position - _contentBottomInset) : _widget->y());
+	}
+	update();
+}
+
+void ElasticScroll::resizeEvent(QResizeEvent *e) {
+	const auto rtl = (layoutDirection() == Qt::RightToLeft);
+	_bar->setGeometry(_vertical
+		? QRect(
+			(rtl ? 0 : (width() - _st.width)),
+			_barTopInset,
+			_st.width,
+			std::max(0, height() - _barTopInset - _barBottomInset))
+		: QRect(0, height() - _st.width, width(), _st.width));
+	_geometryChanged.fire({});
+	reanchorOverscroll();
+	updateState();
+}
+
+void ElasticScroll::moveEvent(QMoveEvent *e) {
+	_geometryChanged.fire({});
+}
+
+void ElasticScroll::keyPressEvent(QKeyEvent *e) {
+	const auto key = e->key();
+	if (!_widget) {
+		e->ignore();
+		return;
+	} else if ((key == Qt::Key_Up || key == Qt::Key_Down)
+		&& (e->modifiers().testFlag(Qt::AltModifier)
+			|| e->modifiers().testFlag(Qt::ControlModifier))) {
+		e->ignore();
+	} else if (_widget && (key == Qt::Key_Escape || key == Qt::Key_Back)) {
+		((QObject*)_widget.data())->event(e);
+	} else if (key == Qt::Key_Up
+		|| key == Qt::Key_Down
+		|| key == Qt::Key_PageUp
+		|| key == Qt::Key_PageDown) {
+		const auto up = (key == Qt::Key_Up) || (key == Qt::Key_PageUp);
+		const auto step = (key == Qt::Key_Up || key == Qt::Key_Down)
+			? style::ConvertScale(20)
+			: height();
+		if (!up) {
+			const auto weak = base::make_weak(this);
+			requestBottomContent(step);
+			if (!weak) {
+				return;
+			}
+		}
+		tryScrollTo(_state.visibleFrom + (up ? -step : step));
+	} else if (key == Qt::Key_Home || key == Qt::Key_End) {
+		tryScrollTo((key == Qt::Key_Home) ? 0 : scrollTopMax());
+	} else {
+		// Let keys we don't handle (e.g. typed characters) propagate to
+		// the parent widget instead of being silently accepted here.
+		e->ignore();
+	}
+}
+
+void ElasticScroll::enterEventHook(QEnterEvent *e) {
+	if (_bar && !_disabled) {
+		_bar->toggle(true);
+	}
+}
+
+void ElasticScroll::leaveEventHook(QEvent *e) {
+	if (_bar) {
+		_bar->toggle(false);
+	}
+}
+
+void ElasticScroll::scrollTo(ScrollToRequest request) {
+	scrollToY(request.ymin, request.ymax);
+}
+
+void ElasticScroll::scrollToWidget(not_null<QWidget*> widget) {
+	if (const auto local = _widget.data()) {
+		const auto position = Ui::MapFrom(
+			local,
+			widget.get(),
+			QPoint(0, 0));
+		const auto from = _vertical ? position.y() : position.x();
+		const auto till = _vertical
+			? (position.y() + widget->height())
+			: (position.x() + widget->width());
+		scrollToY(from, till);
+	}
+}
+
+void ElasticScroll::scrollToY(int toTop, int toBottom) {
+	if (_vertical) {
+		scrollTo(toTop, toBottom);
+	}
+}
+
+int ElasticScroll::computeScrollToY(int toTop, int toBottom) {
+	if (const auto inner = _widget.data()) {
+		SendPendingMoveResizeEvents(inner);
+	}
+	SendPendingMoveResizeEvents(this);
+	return ComputeScrollTo(
+		toTop,
+		toBottom,
+		0,
+		scrollTopMax(),
+		scrollTop(),
+		height());
+}
+
+void ElasticScroll::scrollTo(int toFrom, int toTill) {
+	if (const auto inner = _widget.data()) {
+		SendPendingMoveResizeEvents(inner);
+	}
+	SendPendingMoveResizeEvents(this);
+
+	int toMin = std::min(_state.visibleFrom, 0);
+	int toMax = std::max(
+		_state.visibleFrom,
+		_state.visibleFrom + _state.fullSize - _state.visibleTill);
+	if (toFrom < toMin) {
+		toFrom = toMin;
+	} else if (toFrom > toMax) {
+		toFrom = toMax;
+	}
+	bool exact = (toTill < 0);
+
+	int curFrom = _state.visibleFrom, curRange = _state.visibleTill - _state.visibleFrom, curTill = curFrom + curRange, scTo = toFrom;
+	if (!exact && toFrom >= curFrom) {
+		if (toTill < toFrom) toTill = toFrom;
+		if (toTill <= curTill) return;
+
+		scTo = toTill - curRange;
+		if (scTo > toFrom) scTo = toFrom;
+		if (scTo == curFrom) return;
+	} else {
+		scTo = toFrom;
+	}
+	// Scrolling to the pinned edge value to keep the overscroll displacement
+	if (const auto edge = lookupOverscrollPinnedEdge(); edge == scTo) {
+		scTo += _overscroll;
+	}
+	applyScrollTo(scTo);
+	ResendScrollerPrepare(_scroller);
+}
+
+void ElasticScroll::doSetOwnedWidget(object_ptr<QWidget> w) {
+	constexpr auto attribute = Qt::WA_AcceptTouchEvents;
+	if (_widget) {
+		_widget->removeEventFilter(this);
+		if (!_touchDisabled && !_widgetAcceptsTouch) {
+			_widget->setAttribute(attribute, false);
+		}
+	}
+	_widget = std::move(w);
+	if (_widget) {
+		if (_widget->parentWidget() != this) {
+			_widget->setParent(this);
+			_widget->show();
+		}
+		_widget->lower();
+		_bar->raise();
+		_widget->installEventFilter(this);
+		if (!_touchDisabled) {
+			_widgetAcceptsTouch = _widget->testAttribute(attribute);
+			if (!_widgetAcceptsTouch) {
+				_widget->setAttribute(attribute);
+			}
+		}
+		updateState();
+	}
+}
+
+object_ptr<QWidget> ElasticScroll::doTakeWidget() {
+	return std::move(_widget);
+}
+
+void ElasticScroll::updateBars() {
+	_bar->update();
+}
+
+QWidget *ElasticScroll::widget() const {
+	return _widget.data();
+}
+
+void ElasticScroll::setOverscrollTypes(
+		OverscrollType from,
+		OverscrollType till) {
+	const auto fromChanged = (_overscroll < 0)
+		&& (_overscrollTypeFrom != from);
+	const auto tillChanged = (_overscroll > 0)
+		&& (_overscrollTypeTill != till);
+	_overscrollTypeFrom = from;
+	_overscrollTypeTill = till;
+	if (fromChanged) {
+		switch (_overscrollTypeFrom) {
+		case OverscrollType::None:
+			_overscroll = _overscrollAccumulated = 0;
+			_overscrollReturnAnimation.stop();
+			overscrollFinish();
+			applyScrollTo(0);
+			break;
+		case OverscrollType::Virtual:
+			applyScrollTo(0);
+			break;
+		case OverscrollType::Real:
+			applyScrollTo(_overscroll);
+			break;
+		}
+	} else if (tillChanged) {
+		const auto max = _state.fullSize
+			- (_state.visibleTill - _state.visibleFrom);
+		switch (_overscrollTypeTill) {
+		case OverscrollType::None:
+			_overscroll = _overscrollAccumulated = 0;
+			_overscrollReturnAnimation.stop();
+			overscrollFinish();
+			applyScrollTo(max);
+			break;
+		case OverscrollType::Virtual:
+			applyScrollTo(max);
+			break;
+		case OverscrollType::Real:
+			applyScrollTo(max + _overscroll);
+			break;
+		}
+	}
+}
+
+void ElasticScroll::setOverscrollPullDistances(int from, int till) {
+	if (_overscrollPullFrom == from && _overscrollPullTill == till) {
+		return;
+	}
+	_overscrollPullFrom = from;
+	_overscrollPullTill = till;
+	if (_overscroll) {
+		_overscrollAccumulated = currentOverscrollDefaultAccumulated()
+			+ overscrollToAccumulated(
+				_overscroll,
+				_overscroll - currentOverscrollDefault());
+	}
+}
+
+void ElasticScroll::setOverscrollDefaults(int from, int till, bool shift) {
+	Expects(from <= 0 && till >= 0);
+
+	if (_state.visibleFrom > 0
+		|| (!_state.visibleFrom
+			&& _overscrollTypeFrom != OverscrollType::Virtual)) {
+		from = 0;
+	}
+	if (_state.visibleTill < _state.fullSize
+		|| (_state.visibleTill == _state.fullSize
+			&& _overscrollTypeTill != OverscrollType::Virtual)) {
+		till = 0;
+	}
+	const auto fromChanged = (_overscrollDefaultFrom != from);
+	const auto tillChanged = (_overscrollDefaultTill != till);
+	const auto changed = (fromChanged && _overscroll < 0)
+		|| (tillChanged && _overscroll > 0);
+	const auto movement = _movement.current();
+	if (_overscrollReturnAnimation.animating()) {
+		overscrollReturnCancel();
+	}
+	_overscrollDefaultFrom = from;
+	_overscrollDefaultTill = till;
+	if (changed) {
+		const auto delta = (_overscroll < 0)
+			? (_overscroll - (shift ? 0 : _overscrollDefaultFrom))
+			: (_overscroll - (shift ? 0 : _overscrollDefaultTill));
+		_overscrollAccumulated = currentOverscrollDefaultAccumulated()
+			+ overscrollToAccumulated(_overscroll, delta);
+	}
+	if (movement == Movement::Momentum || movement == Movement::Returning) {
+		if (_overscroll != currentOverscrollDefault()) {
+			overscrollReturn();
+		}
+	}
+}
+
+void ElasticScroll::clearOverscroll() {
+	const auto from = _overscrollTypeFrom;
+	const auto till = _overscrollTypeTill;
+	setOverscrollDefaults(0, 0);
+	if (_overscroll < 0) {
+		setOverscrollTypes(OverscrollType::None, till);
+	} else if (_overscroll > 0) {
+		setOverscrollTypes(from, OverscrollType::None);
+	} else {
+		return;
+	}
+	setOverscrollTypes(from, till);
+}
+
+void ElasticScroll::returnToOverscrollDefaults() {
+	overscrollReturn();
+}
+
+void ElasticScroll::setOverscrollBg(QColor bg) {
+	_overscrollBg = bg;
+	update();
+}
+
+void ElasticScroll::setOverscrollEdges(
+		Fn<bool()> allowTop,
+		Fn<bool()> allowBottom) {
+	_overscrollAllowFrom = std::move(allowTop);
+	_overscrollAllowTill = std::move(allowBottom);
+}
+
+void ElasticScroll::setBottomContentRequest(Fn<bool()> request) {
+	_bottomContentRequest = std::move(request);
+}
+
+rpl::producer<> ElasticScroll::scrolls() const {
+	return _scrolls.events();
+}
+
+rpl::producer<> ElasticScroll::innerResizes() const {
+	return _innerResizes.events();
+}
+
+rpl::producer<> ElasticScroll::geometryChanged() const {
+	return _geometryChanged.events();
+}
+
+ElasticScrollPosition ElasticScroll::position() const {
+	return _position.current();
+}
+
+rpl::producer<ElasticScrollPosition> ElasticScroll::positionValue() const {
+	return _position.value();
+}
+
+ElasticScrollMovement ElasticScroll::movement() const {
+	return _movement.current();
+}
+
+rpl::producer<ElasticScrollMovement> ElasticScroll::movementValue() const {
+	return _movement.value();
+}
+
+rpl::producer<bool> ElasticScroll::touchMaybePressing() const {
+	return _touchMaybePressing.value();
+}
+
+} // namespace Ui

@@ -1,0 +1,10 @@
+<RCC>
+  <qresource prefix="/gui/fonts">
+    <file>OpenSans-Regular.ttf</file>
+    <file>OpenSans-Italic.ttf</file>
+    <file>OpenSans-SemiBold.ttf</file>
+    <file>OpenSans-SemiBoldItalic.ttf</file>
+    <file>Vazirmatn-UI-NL-Regular.ttf</file>
+    <file>Vazirmatn-UI-NL-SemiBold.ttf</file>
+  </qresource>
+</RCC>

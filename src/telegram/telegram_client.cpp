@@ -804,6 +804,7 @@ struct TelegramClient::Impl {
                     plain.isOutgoing = messagePtr->is_outgoing_;
                     plain.text = previewFor(*messagePtr);
                     plain.date = messagePtr->date_;
+                    plain.mediaAlbumId = messagePtr->media_album_id_;
                     // Only incoming messages need a sender name resolved -
                     // an outgoing one is always "you". messageSenderChat
                     // (an anonymous admin post, or a channel/group posting

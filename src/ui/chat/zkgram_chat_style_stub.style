@@ -1,0 +1,737 @@
+// Not part of real Telegram Desktop - a stand-in for boxes/polls.style,
+// which ui/chat/chat_style.cpp includes as styles/style_polls.h for 10 poll
+// answer-highlight icons. zkgram has no poll feature, and the real
+// polls.style pulls in boxes.style (-> intro.style, userpic_button.style),
+// none of which anything else here needs - so only the 10 declarations
+// chat_style.cpp actually references are kept, copied verbatim from
+// telegram_fork/tdesktop/Telegram/SourceFiles/boxes/polls.style.
+
+using "ui/chat/chat.style";
+
+historyPollChoiceRight: icon {{ "poll_choice_right", activeButtonFg }};
+historyPollChoiceWrong: icon {{ "poll_choice_wrong", activeButtonFg }};
+historyPollOutChoiceRight: icon {{ "poll_choice_right", historyFileOutIconFg }};
+historyPollOutChoiceRightSelected: icon {{ "poll_choice_right", historyFileOutIconFgSelected }};
+historyPollInChoiceRight: icon {{ "poll_choice_right", historyFileInIconFg }};
+historyPollInChoiceRightSelected: icon {{ "poll_choice_right", historyFileInIconFgSelected }};
+historyPollOutChosen: icon {{ "poll_select_check", historyFileOutIconFg }};
+historyPollOutChosenSelected: icon {{ "poll_select_check", historyFileOutIconFgSelected }};
+historyPollInChosen: icon {{ "poll_select_check", historyFileInIconFg }};
+historyPollInChosenSelected: icon {{ "poll_select_check", historyFileInIconFgSelected }};
+
+// The style::Markdown struct family below (ui/chat/chat_style.h's
+// richPageStyle field: std::optional<style::Markdown>) is only usable as
+// a type here - the real Instant View markdown renderer that fills it in
+// is not part of zkgram (chat_style.cpp just default-constructs an empty
+// optional and never touches these fields for a plain 1:1 chat). The
+// struct declarations themselves are self-contained (only TextStyle/Check/
+// FlatLabel/InfiniteRadialAnimation, all already available), so they are
+// copied verbatim from iv/iv.style rather than vendoring that whole file,
+// which pulls in chat_helpers.style's box/premium/calls graph for an
+// Instant View article reader zkgram does not have. No "default*" instance
+// declarations are included - nothing here ever constructs a style::Markdown
+// instance, only declares the type.
+MarkdownBlockSkips {
+	paragraph: pixels;
+	heading: pixels;
+	code: pixels;
+	rule: pixels;
+	quote: pixels;
+	displayMath: pixels;
+	table: pixels;
+	photo: pixels;
+	video: pixels;
+	audio: pixels;
+	map: pixels;
+	channel: pixels;
+	groupedMedia: pixels;
+	relatedArticle: pixels;
+	embedPost: pixels;
+	placeholder: pixels;
+}
+MarkdownList {
+	indent: pixels;
+	continuationIndent: pixels;
+	markerWidth: pixels;
+	markerSkip: pixels;
+	bulletRadius: pixels;
+	bulletLeftShift: pixels;
+	bulletFg: color;
+	taskCheck: Check;
+}
+MarkdownQuotePaintColors {
+	blockquote: color;
+	pre: color;
+	preBg: color;
+}
+MarkdownPullquote {
+	padding: margins;
+	maxWidth: pixels;
+}
+MarkdownRule {
+	fg: color;
+	height: pixels;
+}
+MarkdownDisplayMath {
+	padding: margins;
+	align: align;
+	textSize: pixels;
+	maxRenderWidth: pixels;
+	maxRenderHeight: pixels;
+	fg: color;
+	fallbackStyle: TextStyle;
+	fallbackBg: color;
+	fallbackRadius: pixels;
+	fallbackPadding: margins;
+	overflowWidth: pixels;
+	overflowFg: color;
+}
+MarkdownTable {
+	cellPadding: margins;
+	border: pixels;
+	borderFg: color;
+	radius: pixels;
+	headerBg: color;
+	headerBgOpacity: double;
+	headerStyle: TextStyle;
+	bodyStyle: TextStyle;
+	captionSkip: pixels;
+	minColumnWidth: pixels;
+	overflowWidth: pixels;
+	overflowFg: color;
+	scrollbarSkip: pixels;
+	scrollbarHeight: pixels;
+	scrollbarMinThumbWidth: pixels;
+}
+MarkdownDetails {
+	headerPadding: margins;
+	bodyPadding: margins;
+	border: pixels;
+	borderFg: color;
+	headerBg: color;
+	bodyBg: color;
+	summaryFg: color;
+	radius: pixels;
+	summaryStyle: TextStyle;
+	icon: icon;
+	iconSkip: pixels;
+	stateSkip: pixels;
+}
+MarkdownEmbedPost {
+	padding: margins;
+	accentWidth: pixels;
+	accentFg: color;
+	accentSkip: pixels;
+	headerGap: pixels;
+	avatarSize: pixels;
+	avatarRadius: pixels;
+	authorStyle: TextStyle;
+	authorFg: color;
+	dateStyle: TextStyle;
+	dateFg: color;
+	bodySkip: pixels;
+	captionSkip: pixels;
+}
+MarkdownPlaceholder {
+	padding: margins;
+	minHeight: pixels;
+	border: pixels;
+	radius: pixels;
+	bg: color;
+	bgActive: color;
+	rippleBg: color;
+	borderFg: color;
+	spinnerWidth: pixels;
+	spinnerSize: pixels;
+	spinnerFg: color;
+	captionSkip: pixels;
+	labelStyle: TextStyle;
+	labelFg: color;
+	labelFgActive: color;
+}
+MarkdownPhoto {
+	padding: margins;
+	captionSkip: pixels;
+	progressSize: pixels;
+	progressWidth: pixels;
+	progressBg: color;
+	progressFg: color;
+	fallbackBg: color;
+	fallbackFg: color;
+}
+MarkdownAudio {
+	padding: margins;
+	captionSkip: pixels;
+	textSkip: pixels;
+	border: pixels;
+	borderFg: color;
+	bg: color;
+	radius: pixels;
+	titleStyle: TextStyle;
+	titleFg: color;
+	subtitleStyle: TextStyle;
+	subtitleFg: color;
+}
+MarkdownChannelButton {
+	padding: margins;
+	border: pixels;
+	borderFg: color;
+	bg: color;
+	radius: pixels;
+	textStyle: TextStyle;
+	textFg: color;
+}
+MarkdownChannel {
+	padding: margins;
+	border: pixels;
+	borderFg: color;
+	bg: color;
+	radius: pixels;
+	textSkip: pixels;
+	buttonSkip: pixels;
+	titleStyle: TextStyle;
+	titleFg: color;
+	subtitleStyle: TextStyle;
+	subtitleFg: color;
+	button: MarkdownChannelButton;
+}
+MarkdownRelatedArticle {
+	padding: margins;
+	border: pixels;
+	borderFg: color;
+	bg: color;
+	radius: pixels;
+	headerPadding: margins;
+	headerBg: color;
+	separator: pixels;
+	separatorFg: color;
+	textSkip: pixels;
+	footerSkip: pixels;
+	thumbnailSize: pixels;
+	thumbnailSkip: pixels;
+	thumbnailRadius: pixels;
+	titleLines: int;
+	subtitleLines: int;
+	footerLines: int;
+	titleStyle: TextStyle;
+	titleFg: color;
+	subtitleStyle: TextStyle;
+	subtitleFg: color;
+	footerStyle: TextStyle;
+	footerFg: color;
+}
+MarkdownGroupedMedia {
+	padding: margins;
+	captionSkip: pixels;
+	itemSkip: pixels;
+	radius: pixels;
+	slideshowMinHeight: pixels;
+	overlayOpacity: double;
+	fallbackBg: color;
+	fallbackFg: color;
+	navButtonSize: pixels;
+	navButtonSkip: pixels;
+	navButtonBg: color;
+	navButtonBgOver: color;
+	navPreviousIcon: icon;
+	navPreviousIconOver: icon;
+	navNextIcon: icon;
+	navNextIconOver: icon;
+	dotSize: pixels;
+	dotSkip: pixels;
+	dotsBottomSkip: pixels;
+	dotsBgOpacity: double;
+}
+MarkdownFailure {
+	label: FlatLabel;
+	width: pixels;
+	skip: pixels;
+}
+MarkdownEmbedOverlay {
+	scrimBg: color;
+	bg: color;
+	loading: InfiniteRadialAnimation;
+	size: size;
+	margin: margins;
+	padding: margins;
+	errorLabel: FlatLabel;
+	errorPadding: margins;
+}
+Markdown {
+	textPalette: TextPalette;
+	markBgOpacity: double;
+	textColor: color;
+	supplementaryTextColor: color;
+	body: TextStyle;
+	heading1: TextStyle;
+	heading2: TextStyle;
+	heading3: TextStyle;
+	heading4: TextStyle;
+	heading5: TextStyle;
+	heading6: TextStyle;
+	footer: TextStyle;
+	code: TextStyle;
+	pagePadding: margins;
+	pageMaxWidth: pixels;
+	textPadding: margins;
+	mediaPadding: margins;
+	blockSkips: MarkdownBlockSkips;
+	list: MarkdownList;
+	quoteIndent: pixels;
+	quoteReadableMinWidth: pixels;
+	quotePaintColors: MarkdownQuotePaintColors;
+	pullquote: MarkdownPullquote;
+	quoteAuthorStyle: TextStyle;
+	rule: MarkdownRule;
+	displayMath: MarkdownDisplayMath;
+	table: MarkdownTable;
+	details: MarkdownDetails;
+	embedPost: MarkdownEmbedPost;
+	placeholder: MarkdownPlaceholder;
+	photo: MarkdownPhoto;
+	audio: MarkdownAudio;
+	channel: MarkdownChannel;
+	relatedArticle: MarkdownRelatedArticle;
+	groupedMedia: MarkdownGroupedMedia;
+	failure: MarkdownFailure;
+}
+
+// The default* instances below (copied verbatim from iv/iv.style, one
+// icon substituted - see comment at that line) give richPageStyle's
+// style::color/icon fields real, palette-attached storage. This is not
+// optional: ChatStyle::assignPalette() unconditionally reads
+// richPageStyle.textPalette.linkFg->c on every palette (re)assignment,
+// including the very first one in the constructor - a default-constructed
+// style::color's ColorData* is uninitialized (see style::internal::Color's
+// constructor, Qt::Uninitialized), so leaving richPageStyle unpopulated
+// crashed with an access violation inside QColor::operator== the first
+// time any bubble was painted. The content of these values is never
+// actually seen (zkgram has no Instant-View-style rich markdown-in-message
+// rendering), only their presence as valid attached storage matters.
+
+defaultMarkdownTextPalette: TextPalette(defaultTextPalette) {
+	linkFg: windowActiveTextFg;
+}
+defaultMarkdownBodyStyle: TextStyle(historyTextStyle) {
+	lineHeight: 24px;
+}
+defaultMarkdownCodeStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(14px);
+	lineHeight: 22px;
+}
+defaultMarkdownDisplayMathFallbackStyle: TextStyle(defaultMarkdownCodeStyle) {
+}
+defaultMarkdownTableHeaderStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(16px semibold);
+	lineHeight: 24px;
+}
+defaultMarkdownQuoteAuthorStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: semiboldFont;
+	lineHeight: 24px;
+}
+defaultMarkdownBlockSkips: MarkdownBlockSkips {
+	paragraph: 12px;
+	heading: 16px;
+	code: 12px;
+	rule: 12px;
+	quote: 12px;
+	displayMath: 12px;
+	table: 12px;
+	photo: 12px;
+	video: 12px;
+	audio: 12px;
+	map: 12px;
+	channel: 8px;
+	groupedMedia: 12px;
+	relatedArticle: 0px;
+	embedPost: 12px;
+	placeholder: 12px;
+}
+defaultMarkdownList: MarkdownList {
+	indent: 28px;
+	continuationIndent: 22px;
+	markerWidth: 22px;
+	markerSkip: 8px;
+	bulletRadius: 2px;
+	bulletLeftShift: 0px;
+	bulletFg: windowFg;
+	taskCheck: defaultCheck;
+}
+defaultMarkdownQuotePaintColors: MarkdownQuotePaintColors {
+	blockquote: windowActiveTextFg;
+	pre: windowSubTextFg;
+	preBg: windowBgOver;
+}
+defaultMarkdownPullquote: MarkdownPullquote {
+	padding: margins(0px, 18px, 0px, 18px);
+	maxWidth: 420px;
+}
+defaultMarkdownRule: MarkdownRule {
+	fg: boxDividerBg;
+	height: 1px;
+}
+defaultMarkdownDisplayMath: MarkdownDisplayMath {
+	padding: margins(10px, 12px, 10px, 12px);
+	align: align(center);
+	textSize: 20px;
+	maxRenderWidth: 1600px;
+	maxRenderHeight: 1200px;
+	fg: windowFg;
+	fallbackStyle: defaultMarkdownDisplayMathFallbackStyle;
+	fallbackBg: windowBgOver;
+	fallbackRadius: 6px;
+	fallbackPadding: margins(10px, 12px, 10px, 12px);
+	overflowWidth: 4px;
+	overflowFg: windowSubTextFg;
+}
+ivFormulaPreviewScroll: ScrollArea(defaultScrollArea) {
+	barHidden: true;
+}
+ivFormulaSectionTitle: FlatLabel(defaultSubsectionTitle) {
+	minWidth: 0px;
+}
+ivFormulaPreviewLabelMargin: margins(22px, 4px, 22px, 4px);
+ivFormulaPreviewMargin: margins(22px, 0px, 22px, 10px);
+ivFormulaPreviewPadding: margins(10px, 10px, 10px, 10px);
+ivFormulaPreviewMinHeight: 72px;
+ivFormulaPreviewRadius: 8px;
+ivFormulaPreviewBg: windowBgOver;
+ivFormulaPreviewFg: windowFg;
+ivFormulaSourceField: InputField(defaultInputField) {
+	textMargins: margins(0px, 6px, 0px, 4px);
+	placeholderFg: placeholderFg;
+	placeholderFgActive: placeholderFgActive;
+	placeholderScale: 0.;
+	placeholderFont: normalFont;
+	placeholderShift: -50px;
+	heightMin: 33px;
+}
+defaultMarkdownTable: MarkdownTable {
+	cellPadding: margins(8px, 10px, 8px, 10px);
+	border: 1px;
+	borderFg: inputBorderFg;
+	radius: defaultTable.radius;
+	headerBg: windowBgOver;
+	headerBgOpacity: 1.0;
+	headerStyle: defaultMarkdownTableHeaderStyle;
+	bodyStyle: defaultMarkdownBodyStyle;
+	captionSkip: 7px;
+	minColumnWidth: 96px;
+	overflowWidth: 4px;
+	overflowFg: windowSubTextFg;
+	scrollbarSkip: 4px;
+	scrollbarHeight: 12px;
+	scrollbarMinThumbWidth: 24px;
+}
+defaultMarkdownDetailsSummaryStyle: TextStyle(defaultTextStyle) {
+	font: font(12px);
+	linkUnderline: kLinkUnderlineNever;
+	lineHeight: 18px;
+}
+defaultMarkdownDetails: MarkdownDetails {
+	headerPadding: margins(8px, 12px, 8px, 12px);
+	bodyPadding: margins(10px, 12px, 10px, 12px);
+	border: 1px;
+	borderFg: inputBorderFg;
+	headerBg: windowBgOver;
+	bodyBg: windowBg;
+	summaryFg: windowFg;
+	radius: 6px;
+	summaryStyle: defaultMarkdownDetailsSummaryStyle;
+	icon: icon {{ "history_down_arrow", windowSubTextFg }};
+	iconSkip: 8px;
+	stateSkip: 8px;
+}
+defaultMarkdownEmbedPostAuthorStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(16px semibold);
+}
+defaultMarkdownEmbedPostDateStyle: TextStyle(defaultMarkdownDetailsSummaryStyle) {
+}
+defaultMarkdownEmbedPostAccentWidth: 3px;
+defaultMarkdownEmbedPost: MarkdownEmbedPost {
+	padding: margins(8px, 0px, 8px, 0px);
+	accentWidth: defaultMarkdownEmbedPostAccentWidth;
+	accentFg: windowActiveTextFg;
+	accentSkip: 12px;
+	headerGap: 10px;
+	avatarSize: 40px;
+	avatarRadius: 20px;
+	authorStyle: defaultMarkdownEmbedPostAuthorStyle;
+	authorFg: windowFg;
+	dateStyle: defaultMarkdownEmbedPostDateStyle;
+	dateFg: windowSubTextFg;
+	bodySkip: 10px;
+	captionSkip: 12px;
+}
+defaultMarkdownPlaceholder: MarkdownPlaceholder {
+	padding: margins(16px, 24px, 16px, 24px);
+	minHeight: 48px;
+	border: defaultMarkdownEmbedPostAccentWidth;
+	radius: 16px;
+	bg: windowBgOver;
+	bgActive: windowBgOver;
+	rippleBg: windowBgRipple;
+	borderFg: windowActiveTextFg;
+	spinnerWidth: 4px;
+	spinnerSize: 24px;
+	spinnerFg: windowActiveTextFg;
+	captionSkip: 14px;
+	labelStyle: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(16px semibold);
+	}
+	labelFg: windowSubTextFg;
+	labelFgActive: windowActiveTextFg;
+}
+defaultMarkdownPhoto: MarkdownPhoto {
+	padding: margins(0px, 0px, 0px, 0px);
+	captionSkip: 12px;
+	progressSize: 36px;
+	progressWidth: 3px;
+	progressBg: windowSubTextFg;
+	progressFg: windowFg;
+	fallbackBg: windowBgOver;
+	fallbackFg: windowSubTextFg;
+}
+defaultMarkdownAudioTitleStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(16px semibold);
+}
+defaultMarkdownAudioSubtitleStyle: TextStyle(defaultMarkdownDetailsSummaryStyle) {
+}
+defaultMarkdownAudio: MarkdownAudio {
+	padding: margins(8px, 12px, 8px, 12px);
+	captionSkip: 14px;
+	textSkip: 8px;
+	border: 1px;
+	borderFg: inputBorderFg;
+	bg: windowBgOver;
+	radius: 6px;
+	titleStyle: defaultMarkdownAudioTitleStyle;
+	titleFg: windowFg;
+	subtitleStyle: defaultMarkdownAudioSubtitleStyle;
+	subtitleFg: windowSubTextFg;
+}
+defaultMarkdownChannelTitleStyle: TextStyle(defaultMarkdownAudioTitleStyle) {
+}
+defaultMarkdownChannelSubtitleStyle: TextStyle(defaultMarkdownDetailsSummaryStyle) {
+}
+defaultMarkdownChannelButtonStyle: TextStyle(defaultMarkdownChannelTitleStyle) {
+}
+defaultMarkdownSidesMargin: margins(18px, 0px, 18px, 0px);
+defaultMarkdownChannelButton: MarkdownChannelButton {
+	padding: defaultMarkdownSidesMargin;
+	border: 0px;
+	borderFg: windowActiveTextFg;
+	bg: windowBgOver;
+	radius: 0px;
+	textStyle: defaultMarkdownChannelButtonStyle;
+	textFg: windowActiveTextFg;
+}
+defaultMarkdownChannel: MarkdownChannel {
+	padding: margins(18px, 8px, 18px, 8px);
+	border: 0px;
+	borderFg: inputBorderFg;
+	bg: windowBgOver;
+	radius: 0px;
+	textSkip: 8px;
+	buttonSkip: 18px;
+	titleStyle: defaultMarkdownChannelTitleStyle;
+	titleFg: windowFg;
+	subtitleStyle: defaultMarkdownChannelSubtitleStyle;
+	subtitleFg: windowSubTextFg;
+	button: defaultMarkdownChannelButton;
+}
+defaultMarkdownRelatedArticleTitleStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(16px semibold);
+	lineHeight: 22px;
+}
+defaultMarkdownRelatedArticleSubtitleStyle: TextStyle(defaultMarkdownBodyStyle) {
+	font: font(15px);
+	lineHeight: 21px;
+}
+defaultMarkdownRelatedArticleFooterStyle: TextStyle(defaultMarkdownDetailsSummaryStyle) {
+}
+defaultMarkdownRelatedArticle: MarkdownRelatedArticle {
+	padding: margins(18px, 8px, 18px, 8px);
+	border: 0px;
+	borderFg: boxDividerBg;
+	bg: windowBg;
+	radius: 0px;
+	headerPadding: margins(18px, 8px, 18px, 8px);
+	headerBg: windowBgOver;
+	separator: 1px;
+	separatorFg: boxDividerBg;
+	textSkip: 6px;
+	footerSkip: 8px;
+	thumbnailSize: 87px;
+	thumbnailSkip: 12px;
+	thumbnailRadius: 0px;
+	titleLines: 2;
+	subtitleLines: 3;
+	footerLines: 1;
+	titleStyle: defaultMarkdownRelatedArticleTitleStyle;
+	titleFg: windowFg;
+	subtitleStyle: defaultMarkdownRelatedArticleSubtitleStyle;
+	subtitleFg: windowSubTextFg;
+	footerStyle: defaultMarkdownRelatedArticleFooterStyle;
+	footerFg: windowSubTextFg;
+}
+defaultMarkdownGroupedMedia: MarkdownGroupedMedia {
+	padding: margins(0px, 0px, 0px, 0px);
+	captionSkip: 12px;
+	itemSkip: 3px;
+	radius: 0px;
+	slideshowMinHeight: 200px;
+	overlayOpacity: 0.2;
+	fallbackBg: windowBgOver;
+	fallbackFg: windowSubTextFg;
+	navButtonSize: 36px;
+	navButtonSkip: 12px;
+	navButtonBg: windowBg;
+	navButtonBgOver: windowBgOver;
+	navPreviousIcon: icon {{ "box_button_back", menuIconColor }};
+	navPreviousIconOver: icon {{ "box_button_back", menuIconColor }};
+	navNextIcon: icon {{ "box_button_back-flip_horizontal", menuIconColor }};
+	navNextIconOver: icon {{ "box_button_back-flip_horizontal", menuIconColor }};
+	dotSize: 6px;
+	dotSkip: 14px;
+	dotsBottomSkip: 12px;
+	dotsBgOpacity: 0.34;
+}
+defaultMarkdownFailureLabel: FlatLabel(defaultFlatLabel) {
+	minWidth: 280px;
+	textFg: windowSubTextFg;
+	align: align(center);
+	style: defaultMarkdownBodyStyle;
+}
+defaultMarkdownFailure: MarkdownFailure {
+	label: defaultMarkdownFailureLabel;
+	width: 360px;
+	skip: 12px;
+}
+markdownFootnoteBox: Box(defaultBox) {
+	buttonPadding: margins(0px, 0px, 0px, 0px);
+	buttonHeight: 0px;
+}
+markdownFootnoteLabel: FlatLabel(defaultFlatLabel) {
+	minWidth: 95px;
+	textFg: windowFg;
+	align: align(topleft);
+	style: defaultMarkdownBodyStyle;
+	palette: defaultMarkdownTextPalette;
+}
+markdownFootnotePadding: margins(24px, 12px, 24px, 12px);
+markdownEmbedOverlayError: FlatLabel(defaultFlatLabel) {
+	minWidth: 240px;
+	textFg: windowSubTextFg;
+	align: align(top);
+	style: defaultMarkdownBodyStyle;
+}
+markdownEmbedOverlay: MarkdownEmbedOverlay {
+	scrimBg: layerBg;
+	bg: windowBg;
+	loading: InfiniteRadialAnimation(defaultInfiniteRadialAnimation) {
+		color: windowSubTextFg;
+	}
+	size: size(640px, 480px);
+	margin: margins(12px, 12px, 12px, 12px);
+	padding: margins(8px, 8px, 8px, 8px);
+	errorLabel: markdownEmbedOverlayError;
+	errorPadding: margins(24px, 36px, 24px, 36px);
+}
+markdownEmbedOverlayClose: IconButton(boxTitleClose) {
+	icon: icon {{ "info/info_close", mediaviewPlaybackActive }};
+	iconOver: icon {{ "info/info_close", mediaviewPlaybackActiveOver }};
+	ripple: RippleAnimation(defaultRippleAnimation) {
+		color: shadowFg;
+	}
+}
+defaultMarkdown: Markdown {
+	textPalette: defaultMarkdownTextPalette;
+	markBgOpacity: 1.0;
+	textColor: windowFg;
+	supplementaryTextColor: windowSubTextFg;
+	body: defaultMarkdownBodyStyle;
+	heading1: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(30px semibold);
+		lineHeight: 42px;
+	}
+	heading2: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(26px semibold);
+		lineHeight: 36px;
+	}
+	heading3: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(22px semibold);
+		lineHeight: 31px;
+	}
+	heading4: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(19px semibold);
+		lineHeight: 27px;
+	}
+	heading5: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(17px semibold);
+		lineHeight: 24px;
+	}
+	heading6: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(15px semibold);
+		lineHeight: 22px;
+	}
+	footer: TextStyle(defaultMarkdownBodyStyle) {
+		font: font(11px);
+		lineHeight: 18px;
+	}
+	code: defaultMarkdownCodeStyle;
+	pagePadding: margins(0px, 0px, 0px, 16px);
+	pageMaxWidth: 732px;
+	textPadding: defaultMarkdownSidesMargin;
+	mediaPadding: margins(0px, 0px, 0px, 0px);
+	blockSkips: defaultMarkdownBlockSkips;
+	list: defaultMarkdownList;
+	quoteIndent: 18px;
+	quoteReadableMinWidth: 160px;
+	quotePaintColors: defaultMarkdownQuotePaintColors;
+	pullquote: defaultMarkdownPullquote;
+	quoteAuthorStyle: defaultMarkdownQuoteAuthorStyle;
+	rule: defaultMarkdownRule;
+	displayMath: defaultMarkdownDisplayMath;
+	table: defaultMarkdownTable;
+	details: defaultMarkdownDetails;
+	embedPost: defaultMarkdownEmbedPost;
+	placeholder: defaultMarkdownPlaceholder;
+	photo: defaultMarkdownPhoto;
+	audio: defaultMarkdownAudio;
+	channel: defaultMarkdownChannel;
+	relatedArticle: defaultMarkdownRelatedArticle;
+	groupedMedia: defaultMarkdownGroupedMedia;
+	failure: defaultMarkdownFailure;
+}
+
+// message_bar.cpp's only chat_helpers.style dependency - a single real
+// literal (49px), not worth vendoring that whole file for.
+historyReplyHeight: 49px;
+
+// Ui::MessageBar's style type+instance (chat_helpers.style) - used for the
+// reply-to-message preview bar above the composer. Self-contained (only
+// semiboldTextStyle/defaultTextStyle/defaultTextPalette, already available).
+MessageBar {
+	title: TextStyle;
+	titleFg: color;
+	text: TextStyle;
+	textFg: color;
+	textPalette: TextPalette;
+	duration: int;
+}
+historyComposeAreaPalette: TextPalette(defaultTextPalette) {
+	linkFg: historyComposeAreaFgService;
+}
+defaultMessageBar: MessageBar {
+	title: semiboldTextStyle;
+	titleFg: windowActiveTextFg;
+	text: defaultTextStyle;
+	textFg: historyComposeAreaFg;
+	textPalette: historyComposeAreaPalette;
+	duration: 160;
+}
+
+// ui/text/text_options.cpp's only window.style dependency - real literal
+// (540px), not worth vendoring that file (pulls in chat_helpers/boxes.style).
+columnMaximalWidthLeft: 540px;

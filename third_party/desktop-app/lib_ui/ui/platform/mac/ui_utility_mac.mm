@@ -1,0 +1,167 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+#include "ui/platform/mac/ui_utility_mac.h"
+
+#include "ui/integration.h"
+#include "base/platform/mac/base_utilities_mac.h"
+
+#include <QtGui/QPainter>
+#include <QtGui/QtEvents>
+#include <QtGui/QWindow>
+
+#include <Cocoa/Cocoa.h>
+
+#ifndef OS_MAC_STORE
+extern "C" {
+void _dispatch_main_queue_callback_4CF(mach_msg_header_t *msg);
+} // extern "C"
+#endif // OS_MAC_STORE
+
+namespace Ui {
+namespace Platform {
+
+bool IsApplicationActive() {
+	return [[NSApplication sharedApplication] isActive];
+}
+
+void InitOnTopPanel(not_null<QWidget*> panel) {
+	Expects(!panel->windowHandle());
+
+	// Force creating windowHandle() without creating the platform window yet.
+	panel->setAttribute(Qt::WA_NativeWindow, true);
+	panel->windowHandle()->setProperty("_td_macNonactivatingPanelMask", QVariant(true));
+	panel->setAttribute(Qt::WA_NativeWindow, false);
+
+	panel->createWinId();
+
+	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
+	Assert([platformWindow isKindOfClass:[NSPanel class]]);
+
+	auto platformPanel = static_cast<NSPanel*>(platformWindow);
+	[platformPanel setBackgroundColor:[NSColor clearColor]];
+	[platformPanel setLevel:NSModalPanelWindowLevel];
+	[platformPanel setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorStationary|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorIgnoresCycle];
+	[platformPanel setHidesOnDeactivate:NO];
+	//[platformPanel setFloatingPanel:YES];
+
+	Integration::Instance().activationFromTopPanel();
+}
+
+void DeInitOnTopPanel(not_null<QWidget*> panel) {
+	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
+	Assert([platformWindow isKindOfClass:[NSPanel class]]);
+
+	auto platformPanel = static_cast<NSPanel*>(platformWindow);
+	auto newBehavior = ([platformPanel collectionBehavior] & (~NSWindowCollectionBehaviorCanJoinAllSpaces)) | NSWindowCollectionBehaviorMoveToActiveSpace;
+	[platformPanel setCollectionBehavior:newBehavior];
+}
+
+void ReInitOnTopPanel(not_null<QWidget*> panel) {
+	auto platformWindow = [reinterpret_cast<NSView*>(panel->winId()) window];
+	Assert([platformWindow isKindOfClass:[NSPanel class]]);
+
+	auto platformPanel = static_cast<NSPanel*>(platformWindow);
+	auto newBehavior = ([platformPanel collectionBehavior] & (~NSWindowCollectionBehaviorMoveToActiveSpace)) | NSWindowCollectionBehaviorCanJoinAllSpaces;
+	[platformPanel setCollectionBehavior:newBehavior];
+}
+
+void ShowOverAll(not_null<QWidget*> widget, bool canFocus) {
+	NSWindow *wnd = [reinterpret_cast<NSView*>(widget->winId()) window];
+
+	auto behavior = [wnd collectionBehavior];
+
+	if (widget->windowFlags() & Qt::Popup) {
+		behavior |= NSWindowCollectionBehaviorMoveToActiveSpace;
+	}
+
+	if (!canFocus) {
+		[wnd setStyleMask:NSWindowStyleMaskUtilityWindow
+			| NSWindowStyleMaskNonactivatingPanel];
+		behavior |= NSWindowCollectionBehaviorMoveToActiveSpace
+			| NSWindowCollectionBehaviorStationary
+			| NSWindowCollectionBehaviorFullScreenAuxiliary
+			| NSWindowCollectionBehaviorIgnoresCycle;
+	}
+
+	[wnd setCollectionBehavior:behavior];
+}
+
+void AcceptAllMouseInput(not_null<QWidget*> widget) {
+	// https://github.com/telegramdesktop/tdesktop/issues/27025
+	//
+	// By default system clicks through fully transparent pixels,
+	// and starting with macOS 14.1 it counts the transparency
+	// incorrectly (as if `y` is mirrored), so when clicking
+	// on a reactions strip outside of the menu column the click
+	// is ignored and made on the underlying window, because at the
+	// bottom of the menu in the same place there is nothing, empty.
+	//
+	// We explicitly request all the input to disable this behavior.
+	//
+	// See https://stackoverflow.com/a/29451199 and comments.
+	NSWindow *window = [reinterpret_cast<NSView*>(widget->winId()) window];
+	[window setIgnoresMouseEvents:NO];
+}
+
+void DrainMainQueue() {
+#ifndef OS_MAC_STORE
+	_dispatch_main_queue_callback_4CF(nullptr);
+#endif // OS_MAC_STORE
+}
+
+void IgnoreAllActivation(not_null<QWidget*> widget) {
+}
+
+void DisableSystemWindowResize(not_null<QWidget*> widget, QSize ratio) {
+	const auto winId = widget->winId();
+	if (const auto view = reinterpret_cast<NSView*>(winId)) {
+		if (const auto window = [view window]) {
+			window.styleMask &= ~NSWindowStyleMaskResizable;
+		}
+	}
+}
+
+SystemTextReplaceResult FindSystemTextReplace(const QString &text) {
+	if (text.isEmpty()) {
+		return {};
+	}
+	NSSpellChecker *checker = nil;
+	@try {
+		checker = [NSSpellChecker sharedSpellChecker];
+	} @catch (id exception) {
+		return {};
+	}
+	if (!checker) {
+		return {};
+	}
+	const auto nsText = ::Platform::Q2NSString(text);
+	const auto results = [checker
+		checkString:nsText
+		range:NSMakeRange(0, nsText.length)
+		types:NSTextCheckingTypeReplacement
+		options:nil
+		inSpellDocumentWithTag:0
+		orthography:nil
+		wordCount:nil];
+	for (NSTextCheckingResult *result in results) {
+		if (result.resultType != NSTextCheckingTypeReplacement) {
+			continue;
+		}
+		const auto matchEnd = result.range.location + result.range.length;
+		if (matchEnd == NSUInteger(text.length())) {
+			return {
+				.length = int(result.range.length),
+				.replacement = ::Platform::NS2QString(
+					result.replacementString),
+			};
+		}
+	}
+	return {};
+}
+
+} // namespace Platform
+} // namespace Ui

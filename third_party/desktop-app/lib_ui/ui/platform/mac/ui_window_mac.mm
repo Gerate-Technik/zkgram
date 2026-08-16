@@ -1,0 +1,603 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+#include "ui/platform/mac/ui_window_mac.h"
+
+#include "ui/platform/mac/ui_window_title_mac.h"
+#include "ui/widgets/rp_window.h"
+#include "ui/qt_object_factory.h"
+#include "ui/ui_utility.h"
+#include "base/qt/qt_common_adapters.h"
+#include "base/qt_signal_producer.h"
+#include "base/platform/base_platform_info.h"
+#include "styles/palette.h"
+
+#include <QtCore/QCoreApplication>
+#include <QtCore/QAbstractNativeEventFilter>
+#include <QtGui/QWindow>
+#include <QtGui/QtEvents>
+#include <QOpenGLWidget>
+#include <Cocoa/Cocoa.h>
+
+using FullScreenEvent = Ui::Platform::FullScreenEvent;
+
+@interface WindowObserver : NSObject {
+}
+
+- (id) initWithHandler:(Fn<void(FullScreenEvent)>)handler;
+- (void) windowWillEnterFullScreen:(NSNotification *)aNotification;
+- (void) windowWillExitFullScreen:(NSNotification *)aNotification;
+- (void) windowDidEnterFullScreen:(NSNotification *)aNotification;
+- (void) windowDidExitFullScreen:(NSNotification *)aNotification;
+
+@end // @interface WindowObserver
+
+@implementation WindowObserver {
+	Fn<void(FullScreenEvent)> _handler;
+}
+
+- (id) initWithHandler:(Fn<void(FullScreenEvent)>)handler {
+	if (self = [super init]) {
+		_handler = std::move(handler);
+	}
+	return self;
+}
+
+- (void) windowWillEnterFullScreen:(NSNotification *)aNotification {
+	_handler(FullScreenEvent::WillEnter);
+}
+
+- (void) windowWillExitFullScreen:(NSNotification *)aNotification {
+	_handler(FullScreenEvent::WillExit);
+}
+
+- (void) windowDidEnterFullScreen:(NSNotification *)aNotification {
+	_handler(FullScreenEvent::DidEnter);
+}
+
+- (void) windowDidExitFullScreen:(NSNotification *)aNotification {
+	_handler(FullScreenEvent::DidExit);
+}
+
+@end // @implementation WindowObserver
+
+namespace Ui::Platform {
+namespace {
+
+class LayerCreationChecker : public QObject {
+public:
+	LayerCreationChecker(NSView * __weak view, Fn<void()> callback)
+	: _weakView(view)
+	, _callback(std::move(callback)) {
+		QCoreApplication::instance()->installEventFilter(this);
+	}
+
+protected:
+	bool eventFilter(QObject *object, QEvent *event) override {
+		if (!_weakView || [_weakView layer] != nullptr) {
+			_callback();
+		}
+		return QObject::eventFilter(object, event);
+	}
+
+private:
+	NSView * __weak _weakView = nil;
+	Fn<void()> _callback;
+
+};
+
+class EventFilter : public QObject, public QAbstractNativeEventFilter {
+public:
+	EventFilter(
+		not_null<QObject*> parent,
+		Fn<bool()> checkStartDrag,
+		Fn<bool(void*)> checkPerformDrag)
+	: QObject(parent)
+	, _checkStartDrag(std::move(checkStartDrag))
+	, _checkPerformDrag(std::move(checkPerformDrag)) {
+		Expects(_checkPerformDrag != nullptr);
+		Expects(_checkStartDrag != nullptr);
+	}
+
+	bool nativeEventFilter(
+			const QByteArray &eventType,
+			void *message,
+			native_event_filter_result *result) {
+		if (NSEvent *e = static_cast<NSEvent*>(message)) {
+			if ([e type] == NSEventTypeLeftMouseDown) {
+				_dragStarted = _checkStartDrag();
+			} else if (([e type] == NSEventTypeLeftMouseDragged)
+					&& _dragStarted) {
+				if (_checkPerformDrag([e window])) {
+					return true;
+				}
+				_dragStarted = false;
+			}
+		}
+		return false;
+	}
+
+private:
+	bool _dragStarted = false;
+	Fn<bool()> _checkStartDrag;
+	Fn<bool(void*)> _checkPerformDrag;
+
+};
+
+} // namespace
+
+class WindowHelper::Private final {
+public:
+	explicit Private(not_null<WindowHelper*> owner);
+	~Private();
+
+	[[nodiscard]] int customTitleHeight() const;
+	[[nodiscard]] QRect controlsRect() const;
+	[[nodiscard]] bool checkNativeMove(void *nswindow) const;
+	void activateBeforeNativeMove();
+	void setStaysOnTop(bool enabled);
+	void setNativeTitleVisibility(bool visible);
+	void reapplyCustomTitle();
+	void close();
+
+private:
+	void init();
+	void initOpenGL();
+	void resolveWeakPointers();
+	void revalidateWeakPointers() const;
+	void initCustomTitle();
+
+	[[nodiscard]] Fn<void(FullScreenEvent)> handleFullScreenEventCallback();
+	void enforceStyle();
+
+	const not_null<WindowHelper*> _owner;
+	const WindowObserver *_observer = nullptr;
+
+	NSWindow * __weak _nativeWindow = nil;
+	NSView * __weak _nativeView = nil;
+	bool _hadNativeValues = false;
+
+	std::unique_ptr<LayerCreationChecker> _layerCreationChecker;
+
+	int _customTitleHeight = 0;
+
+};
+
+WindowHelper::Private::Private(not_null<WindowHelper*> owner)
+: _owner(owner) {
+	init();
+}
+
+WindowHelper::Private::~Private() {
+	if (_observer) {
+		[_observer release];
+	}
+}
+
+int WindowHelper::Private::customTitleHeight() const {
+	return _customTitleHeight;
+}
+
+QRect WindowHelper::Private::controlsRect() const {
+	revalidateWeakPointers();
+	const auto button = [&](NSWindowButton type) {
+		auto view = [_nativeWindow standardWindowButton:type];
+		if (!view) {
+			return QRect();
+		}
+		auto result = [view frame];
+		for (auto parent = [view superview]; parent != nil; parent = [parent superview]) {
+			const auto origin = [parent frame].origin;
+			result.origin.x += origin.x;
+			result.origin.y += origin.y;
+		}
+		return QRect(result.origin.x, result.origin.y, result.size.width, result.size.height);
+	};
+	auto result = QRect();
+	const auto buttons = {
+		NSWindowCloseButton,
+		NSWindowMiniaturizeButton,
+		NSWindowZoomButton,
+	};
+	for (const auto type : buttons) {
+		result = result.united(button(type));
+	}
+	return QRect(
+		result.x(),
+		[_nativeWindow frame].size.height - result.y() - result.height(),
+		result.width(),
+		result.height());
+}
+
+bool WindowHelper::Private::checkNativeMove(void *nswindow) const {
+	revalidateWeakPointers();
+	if (_nativeWindow != nswindow
+		|| ([_nativeWindow styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen) {
+		return false;
+	}
+	const auto cgReal = [NSEvent mouseLocation];
+	const auto real = QPointF(cgReal.x, cgReal.y);
+	const auto cgFrame = [_nativeWindow frame];
+	const auto frame = QRectF(cgFrame.origin.x, cgFrame.origin.y, cgFrame.size.width, cgFrame.size.height);
+	const auto border = QMarginsF{ 3., 3., 3., 3. };
+	return frame.marginsRemoved(border).contains(real);
+}
+
+void WindowHelper::Private::activateBeforeNativeMove() {
+	revalidateWeakPointers();
+	[_nativeWindow makeKeyAndOrderFront:_nativeWindow];
+}
+
+void WindowHelper::Private::setStaysOnTop(bool enabled) {
+	_owner->BasicWindowHelper::setStaysOnTop(enabled);
+	resolveWeakPointers();
+	initCustomTitle();
+	_owner->updateCustomTitleVisibility(true);
+}
+
+void WindowHelper::Private::setNativeTitleVisibility(bool visible) {
+	revalidateWeakPointers();
+	if (!_nativeWindow) {
+		return;
+	}
+	const auto value = visible ? NSWindowTitleVisible : NSWindowTitleHidden;
+	[_nativeWindow setTitleVisibility:value];
+}
+
+void WindowHelper::Private::close() {
+	const auto weak = base::make_weak(_owner->window());
+	QCloseEvent e;
+	qApp->sendEvent(_owner->window(), &e);
+	if (!e.isAccepted() || !weak) {
+		return;
+	}
+	revalidateWeakPointers();
+	if (_nativeWindow) {
+		[_nativeWindow close];
+	}
+}
+
+Fn<void(FullScreenEvent)> WindowHelper::Private::handleFullScreenEventCallback() {
+	return crl::guard(_owner->window(), [=](FullScreenEvent event) {
+		switch (event) {
+		case FullScreenEvent::WillEnter:
+			_owner->_titleVisible = false;
+			_owner->updateCustomTitleVisibility(true);
+			break;
+		case FullScreenEvent::WillExit:
+			enforceStyle();
+			_owner->_titleVisible = true;
+			_owner->updateCustomTitleVisibility(true);
+			break;
+		case FullScreenEvent::DidEnter:
+			break;
+		case FullScreenEvent::DidExit:
+			enforceStyle();
+			break;
+		}
+	});
+}
+
+void WindowHelper::Private::enforceStyle() {
+	revalidateWeakPointers();
+	if (_nativeWindow && _customTitleHeight > 0) {
+		[_nativeWindow setStyleMask:[_nativeWindow styleMask] | NSWindowStyleMaskFullSizeContentView];
+	}
+}
+
+void WindowHelper::Private::initOpenGL() {
+	//auto forceOpenGL = std::make_unique<QOpenGLWidget>(_owner->window());
+}
+
+void WindowHelper::Private::resolveWeakPointers() {
+	if (!_owner->window()->winId()) {
+		_owner->window()->createWinId();
+	}
+
+	_nativeView = reinterpret_cast<NSView*>(_owner->window()->winId());
+	_nativeWindow = _nativeView ? [_nativeView window] : nullptr;
+	_hadNativeValues = true;
+
+	Ensures(_nativeWindow != nullptr);
+}
+
+void WindowHelper::Private::revalidateWeakPointers() const {
+	if (_nativeWindow || !_hadNativeValues) {
+		return;
+	}
+	const_cast<Private*>(this)->resolveWeakPointers();
+}
+
+void WindowHelper::Private::initCustomTitle() {
+	if (![_nativeWindow respondsToSelector:@selector(contentLayoutRect)]
+		|| ![_nativeWindow respondsToSelector:@selector(setTitlebarAppearsTransparent:)]) {
+		return;
+	}
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+	_owner->window()->setWindowFlag(Qt::NoTitleBarBackgroundHint);
+#endif
+	[_nativeWindow setTitlebarAppearsTransparent:YES];
+	[_nativeWindow setTitleVisibility:NSWindowTitleHidden];
+	if (_observer) {
+		[_observer release];
+	}
+	_observer = [[WindowObserver alloc] initWithHandler:handleFullScreenEventCallback()];
+	[[NSNotificationCenter defaultCenter] addObserver:_observer selector:@selector(windowWillEnterFullScreen:) name:NSWindowWillEnterFullScreenNotification object:_nativeWindow];
+	[[NSNotificationCenter defaultCenter] addObserver:_observer selector:@selector(windowWillExitFullScreen:) name:NSWindowWillExitFullScreenNotification object:_nativeWindow];
+	[[NSNotificationCenter defaultCenter] addObserver:_observer selector:@selector(windowDidExitFullScreen:) name:NSWindowDidExitFullScreenNotification object:_nativeWindow];
+
+	// Qt has bug with layer-backed widgets containing QOpenGLWidgets.
+	// See https://bugreports.qt.io/browse/QTBUG-64494
+	// Emulate custom title instead (code below).
+	//
+	// Tried to backport a fix, testing.
+	[_nativeWindow setStyleMask:[_nativeWindow styleMask] | NSWindowStyleMaskFullSizeContentView];
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+	// Qt 6.11 may recreate both the NSView and NSWindow after this
+	// point (e.g. in recreateWindowIfNeeded during show). The weak
+	// pointers to the old view/window become nil. Poll from winId()
+	// until the new window appears and reapply customizations.
+	const auto guard = base::make_weak(_owner->window());
+	const auto savedWindow = _nativeWindow;
+	const auto poll = std::make_shared<Fn<void(int)>>();
+	*poll = [this, guard, savedWindow, poll](int attempts) {
+		if (!guard || attempts <= 0) return;
+		const auto wid = _owner->window()->winId();
+		if (!wid) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				(*poll)(attempts - 1);
+			});
+			return;
+		}
+		const auto freshView = reinterpret_cast<NSView*>(wid);
+		const auto freshWindow = freshView ? [freshView window] : nil;
+		if (!freshWindow) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				(*poll)(attempts - 1);
+			});
+			return;
+		}
+		if (freshWindow != savedWindow) {
+			_nativeView = freshView;
+			_nativeWindow = freshWindow;
+			_owner->window()->setWindowFlag(Qt::NoTitleBarBackgroundHint);
+			[freshWindow setTitlebarAppearsTransparent:YES];
+			[freshWindow setTitleVisibility:NSWindowTitleHidden];
+			[freshWindow setStyleMask:[freshWindow styleMask]
+				| NSWindowStyleMaskFullSizeContentView];
+		}
+	};
+	dispatch_async(dispatch_get_main_queue(), ^{ (*poll)(50); });
+#endif
+
+	auto inner = [_nativeWindow contentLayoutRect];
+	auto full = [_nativeView frame];
+	_customTitleHeight = qMax(qRound(full.size.height - inner.size.height), 0);
+
+	// Qt still has some bug with layer-backed widgets containing QOpenGLWidgets.
+	// See https://github.com/telegramdesktop/tdesktop/issues/4150
+	// Tried to workaround it by catching the first moment we have CALayer created
+	// and explicitly setting contentsScale to window->backingScaleFactor there.
+	_layerCreationChecker = std::make_unique<LayerCreationChecker>(_nativeView, [=] {
+		if (_nativeView && _nativeWindow) {
+			if (CALayer *layer = [_nativeView layer]) {
+				[layer setContentsScale: [_nativeWindow backingScaleFactor]];
+				_layerCreationChecker = nullptr;
+			}
+		} else {
+			_layerCreationChecker = nullptr;
+		}
+	});
+}
+
+void WindowHelper::Private::init() {
+	initOpenGL();
+	resolveWeakPointers();
+	initCustomTitle();
+}
+
+WindowHelper::WindowHelper(not_null<RpWidget*> window)
+: BasicWindowHelper(window)
+, _private(std::make_unique<Private>(this))
+, _title(Ui::CreateChild<TitleWidget>(
+	window.get(),
+	_private->customTitleHeight()))
+, _body(Ui::CreateChild<RpWidget>(window.get())) {
+	init();
+	_title->setControlsRect(_private->controlsRect());
+}
+
+WindowHelper::~WindowHelper() {
+}
+
+not_null<RpWidget*> WindowHelper::body() {
+	return _body;
+}
+
+QMargins WindowHelper::frameMargins() {
+	const auto titleHeight = !_title->isHidden() ? _title->height() : 0;
+	return QMargins{ 0, titleHeight, 0, 0 };
+}
+
+void WindowHelper::setTitle(const QString &title) {
+	_title->setText(title);
+	window()->setWindowTitle(title);
+}
+
+void WindowHelper::setTitleStyle(const style::WindowTitle &st) {
+	_title->setStyle(st);
+	updateCustomTitleVisibility();
+}
+
+void WindowHelper::updateCustomTitleVisibility(bool force) {
+	const auto visible = !_title->shouldBeHidden() && _titleVisible;
+	if (!force && _title->isHidden() != visible) {
+		return;
+	}
+	_title->setVisible(visible);
+	_private->setNativeTitleVisibility(!_titleVisible);
+}
+
+void WindowHelper::setMinimumSize(QSize size) {
+	window()->setMinimumSize(size.width(), frameMargins().top() + size.height());
+}
+
+void WindowHelper::setFixedSize(QSize size) {
+	window()->setFixedSize(size.width(), frameMargins().top() + size.height());
+}
+
+void WindowHelper::setStaysOnTop(bool enabled) {
+	_private->setStaysOnTop(enabled);
+}
+
+void WindowHelper::setGeometry(QRect rect) {
+	SetGeometryAndScreen(window(), rect.marginsAdded(frameMargins()));
+}
+
+void WindowHelper::setupBodyTitleAreaEvents() {
+	const auto controls = _private->controlsRect();
+	qApp->installNativeEventFilter(new EventFilter(window(), [=] {
+		const auto point = body()->mapFromGlobal(QCursor::pos());
+		return (bodyTitleAreaHit(point) & WindowTitleHitTestFlag::Move);
+	}, [=](void *nswindow) {
+		const auto point = body()->mapFromGlobal(QCursor::pos());
+		if (_private->checkNativeMove(nswindow)
+			&& !controls.contains(point)
+			&& (bodyTitleAreaHit(point) & WindowTitleHitTestFlag::Move)) {
+			_private->activateBeforeNativeMove();
+			window()->windowHandle()->startSystemMove();
+			return true;
+		}
+		return false;
+	}));
+}
+
+void WindowHelper::close() {
+	_private->close();
+}
+
+const style::TextStyle &WindowHelper::titleTextStyle() const {
+	return _title->textStyle();
+}
+
+void WindowHelper::init() {
+	updateCustomTitleVisibility(true);
+
+	style::PaletteChanged(
+	) | rpl::on_next([=] {
+		Ui::ForceFullRepaint(window());
+	}, window()->lifetime());
+
+	rpl::combine(
+		window()->sizeValue(),
+		_title->heightValue(),
+		_title->shownValue()
+	) | rpl::on_next([=](QSize size, int titleHeight, bool shown) {
+		if (!shown) {
+			titleHeight = 0;
+		}
+		_body->setGeometry(
+			0,
+			titleHeight,
+			size.width(),
+			size.height() - titleHeight);
+	}, _body->lifetime());
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	setBodyTitleArea([](QPoint widgetPoint) {
+		using Flag = Ui::WindowTitleHitTestFlag;
+		return (widgetPoint.y() < 0)
+			? (Flag::Move | Flag::Maximize)
+			: Flag::None;
+	});
+#endif // Qt >= 6.0.0
+}
+
+std::unique_ptr<BasicWindowHelper> CreateSpecialWindowHelper(
+		not_null<RpWidget*> window) {
+	return std::make_unique<WindowHelper>(window);
+}
+
+bool NativeWindowFrameSupported() {
+	return false;
+}
+
+rpl::producer<FullScreenEvent> FullScreenEvents(
+		not_null<RpWidget*> window) {
+	return [=](auto consumer) {
+		auto result = rpl::lifetime();
+
+		struct State {
+			~State() {
+				if (observer) {
+					[observer release];
+				}
+			}
+
+			WindowObserver *observer = nullptr;
+			rpl::lifetime screenChanges;
+		};
+		const auto state = result.make_state<State>();
+
+		const auto attach = [=](WId winId) {
+			if (const auto was = base::take(state->observer)) {
+				[was release];
+			}
+			if (!winId) {
+				return false;
+			}
+			const auto view = reinterpret_cast<NSView*>(winId);
+			const auto win = [view window];
+			if (!win) {
+				return false;
+			}
+			const auto handler = [=](FullScreenEvent event) {
+				consumer.put_next_copy(event);
+			};
+			state->observer = [[WindowObserver alloc] initWithHandler:handler];
+
+			const auto add = [&](NSNotificationName name, SEL selector) {
+				[[NSNotificationCenter defaultCenter]
+					addObserver:state->observer
+					selector:selector
+					name:name
+					object:win];
+			};
+			add(NSWindowWillEnterFullScreenNotification, @selector(windowWillEnterFullScreen:));
+			add(NSWindowWillExitFullScreenNotification, @selector(windowWillExitFullScreen:));
+			add(NSWindowDidEnterFullScreenNotification, @selector(windowDidEnterFullScreen:));
+			add(NSWindowDidExitFullScreenNotification, @selector(windowDidExitFullScreen:));
+			return true;
+		};
+
+		window->winIdValue() | rpl::on_next([=](WId winId) {
+			state->screenChanges.destroy();
+			if (attach(winId)) {
+				return;
+			}
+			// NSView exists but its NSWindow is not attached yet — happens
+			// when the parent window is on a screen with a different device
+			// pixel ratio and Qt is mid-flight rebuilding the native window.
+			// Re-try whenever Qt assigns a screen to the QWindow.
+			const auto handle = window->windowHandle();
+			if (!handle) {
+				return;
+			}
+			base::qt_signal_producer(
+				handle,
+				&QWindow::screenChanged
+			) | rpl::on_next([=](QScreen*) {
+				attach(window->internalWinId());
+			}, state->screenChanges);
+		}, result);
+
+		return result;
+	};
+}
+
+} // namespace Ui::Platform

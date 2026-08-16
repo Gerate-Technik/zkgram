@@ -2,6 +2,37 @@
 
 #include "ui/qt/icons.hpp"
 
+// Phase 5 (UI.md 13c): first real lib_ui widget type in this file.
+#include "ui/widgets/buttons.h"
+// Phase 6b (UI.md 13c): real Ui::PopupMenu for context/attach menus.
+#include "ui/widgets/popup_menu.h"
+// Phase 6b (UI.md 13c): real Ui::InputField for the composer/auth fields.
+#include "ui/widgets/fields/input_field.h"
+#include "ui/widgets/fields/masked_input_field.h"
+#include "ui/widgets/fields/password_input.h"
+#include "ui/widgets/labels.h"
+
+#include "styles/style_zkgram_icons.h"
+
+// Phase 6a (UI.md 13c): st::historyPeer*UserpicBg[2] (avatarPixmap()) come
+// from lib_ui's own already-generated palette, not from
+// style_zkgram_icons.h (which only pulls in ui/style/style_core.h, enough
+// for the st:: symbols it declares itself, not the rest of the palette).
+#include "styles/palette.h"
+
+// Phase 6b (UI.md 13c): the real message bubble geometry/painting engine,
+// copied from telegram_fork/tdesktop's ui/chat/ into src/ui/chat/ (see that
+// folder's own file comments for what was trimmed and why) - not a second,
+// hand-drawn approximation.
+#include "ui/chat/chat_style.h"
+#include "ui/chat/message_bubble.h"
+#include "ui/chat/message_bar.h"
+// Phase 6b (UI.md 13c): the real album-mosaic layout algorithm, not a
+// hand-rolled grid - see src/ui/grouped_layout.h's own header.
+#include "ui/grouped_layout.h"
+
+#include <rpl/rpl.h>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -79,6 +110,24 @@ void logDebug(const QString& message) {
     }
 }
 
+// Ui::IconButton/Ui::RoundButton size themselves via a direct resize() call
+// in their own constructor/resizeToText() (see lib_ui/ui/widgets/buttons.cpp)
+// - neither overrides QWidget::sizeHint(), because real tdesktop never
+// places them inside a Qt QLayout at all (UI.md section 4: this codebase's
+// own manual-positioning convention exists specifically because RpWidget
+// doesn't cooperate with QLayout). zkgram's main_window.cpp does use
+// QHBoxLayout/QVBoxLayout throughout, so any such button competing for
+// space on a layout's main axis (width in an HBox, height in a VBox) gets
+// its size overridden down to whatever QWidget's unset sizeHint()/
+// minimumSizeHint() default to (effectively 0) the first time that layout
+// actually activates - invisible until then, so this was never caught
+// until a row went from hidden to visible at runtime. Locking in the
+// already-correct post-construction size via setFixedSize() makes the
+// layout respect it instead of overriding it.
+void lockButtonSize(QWidget* button) {
+    button->setFixedSize(button->size());
+}
+
 QString loadStylesheet() {
     QFile file(":/style.qss");
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -90,13 +139,10 @@ QString loadStylesheet() {
 // Every button/menu glyph the window draws now comes from icons.cpp (one
 // shared 24x24 grid, one stroke weight, re-rendered as vectors at whatever
 // size and device pixel ratio Qt asks for) instead of a drawXIcon() helper
-// per glyph baking its own 24x24 pixmap right here. These are the colors
-// they are tinted with, taken from tdesktop's day-blue theme rather than
-// repeated as bare hex literals at every call site the way they used to be.
-const QColor kIconFg("#999999");         // menuIconFg: idle composer/menu glyph
-const QColor kIconAccentFg("#40a7e3");   // windowBgActive: the send arrow
-const QColor kIconDestructiveFg("#e41e3f");  // attentionButtonFg: discard a recording
-const QColor kIconEncryptedFg("#4fae4e");    // the same green as statusDot_ for an encrypted session
+// per glyph baking its own 24x24 pixmap right here. Colors used to be a bare
+// QColor passed at each call site (bypassing the palette entirely); they are
+// now baked into the compiled icon itself (see zkgram_icons.style), so
+// glyphIcon()/glyphPixmap()/paintGlyph() no longer take a color argument.
 
 // Colored circle with the chat's first letter, same idea as tdesktop's own
 // userpic placeholder for a peer with no profile photo (Telegram/
@@ -116,14 +162,72 @@ qreal currentDevicePixelRatio() {
     return screen != nullptr ? screen->devicePixelRatio() : 1.0;
 }
 
-QPixmap avatarPixmap(const QString& title, int size) {
-    static const QVector<QColor> kAvatarColors = {
-        QColor("#e17076"), QColor("#eda86c"), QColor("#a695e7"), QColor("#7bc862"),
-        QColor("#6ec9cb"), QColor("#65aadd"), QColor("#ee7aae"),
-    };
+// Phase 6a (UI.md 13c): colors and color-selection algorithm ported
+// directly from the real Ui::EmptyUserpic (Telegram/SourceFiles/ui/
+// empty_userpic.cpp/.h in telegram_fork) - not the class itself, which
+// pulls in ui/chat/chat_style.h, styles/style_chat.style,
+// styles/style_dialogs.style and even info/channel_statistics/earn (a
+// Telegram Stars-specific icon module used by one of its unrelated static
+// paint helpers) just for a gradient circle with an initial. The exact
+// numbers below are not invented: DecideColorIndex/ColorIndexToPaletteIndex
+// (ui/chat/chat_style.cpp) and the historyPeer[1-8]UserpicBg/Bg2 palette
+// pairs used by EmptyUserpic::UserpicColor(), copied verbatim.
+uint8_t avatarColorIndex(qlonglong chatId) {
+    constexpr uint8_t kSimpleColorIndexCount = 7;
+    constexpr int8_t kPaletteIndexMap[] = {0, 7, 4, 1, 6, 3, 5};
+    uint8_t simpleIndex = static_cast<uint8_t>(static_cast<quint64>(chatId) % kSimpleColorIndexCount);
+    return static_cast<uint8_t>(kPaletteIndexMap[simpleIndex]);
+}
+
+// zkgramIconLock and friends already prove a palette color's real QColor is
+// reached through operator->()->c (style::color, not QColor, is what the
+// codegen'd st:: symbol actually is) - same access pattern here.
+const style::color& avatarBgColor1(uint8_t paletteIndex) {
+    switch (paletteIndex) {
+    case 0:
+        return st::historyPeer1UserpicBg;
+    case 1:
+        return st::historyPeer2UserpicBg;
+    case 2:
+        return st::historyPeer3UserpicBg;
+    case 3:
+        return st::historyPeer4UserpicBg;
+    case 4:
+        return st::historyPeer5UserpicBg;
+    case 5:
+        return st::historyPeer6UserpicBg;
+    case 6:
+        return st::historyPeer7UserpicBg;
+    default:
+        return st::historyPeer8UserpicBg;
+    }
+}
+
+const style::color& avatarBgColor2(uint8_t paletteIndex) {
+    switch (paletteIndex) {
+    case 0:
+        return st::historyPeer1UserpicBg2;
+    case 1:
+        return st::historyPeer2UserpicBg2;
+    case 2:
+        return st::historyPeer3UserpicBg2;
+    case 3:
+        return st::historyPeer4UserpicBg2;
+    case 4:
+        return st::historyPeer5UserpicBg2;
+    case 5:
+        return st::historyPeer6UserpicBg2;
+    case 6:
+        return st::historyPeer7UserpicBg2;
+    default:
+        return st::historyPeer8UserpicBg2;
+    }
+}
+
+QPixmap avatarPixmap(const QString& title, qlonglong chatId, int size) {
     QString trimmed = title.trimmed();
     QChar initial = trimmed.isEmpty() ? QChar('?') : trimmed.at(0).toUpper();
-    int colorIndex = trimmed.isEmpty() ? 0 : static_cast<int>(qHash(trimmed) % static_cast<uint>(kAvatarColors.size()));
+    uint8_t paletteIndex = avatarColorIndex(chatId);
 
     qreal ratio = currentDevicePixelRatio();
     int physicalSize = qRound(size * ratio);
@@ -132,23 +236,19 @@ QPixmap avatarPixmap(const QString& title, int size) {
     pixmap.setDevicePixelRatio(ratio);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
-    // Vertical two-stop gradient rather than one flat fill: real Telegram's
-    // placeholder userpics have been gradients for several versions now
-    // (Ui::EmptyUserpic paints a QLinearGradient between a lighter top and a
-    // deeper bottom shade of the peer's color), and against a white chat
-    // list a flat disc of saturated color reads as a sticker pasted on top.
-    // Derived from the one palette entry instead of adding a second table of
-    // hand-picked stops.
-    const QColor base = kAvatarColors[colorIndex];
+    // Same two real palette colors and the same top-to-bottom gradient
+    // EmptyUserpic::paint() uses, not an approximated lighter()/darker() of
+    // one hand-picked color.
     QLinearGradient fill(0, 0, 0, size);
-    fill.setColorAt(0.0, base.lighter(112));
-    fill.setColorAt(1.0, base.darker(108));
+    fill.setColorAt(0.0, avatarBgColor1(paletteIndex)->c);
+    fill.setColorAt(1.0, avatarBgColor2(paletteIndex)->c);
     painter.setPen(Qt::NoPen);
     painter.setBrush(fill);
     painter.drawEllipse(0, 0, size, size);
 
+    // fontsize = (size * 13) / 33, same ratio EmptyUserpic::paint() uses.
     QFont font = painter.font();
-    font.setPixelSize(size / 2);
+    font.setPixelSize((size * 13) / 33);
     font.setBold(true);
     painter.setFont(font);
     painter.setPen(Qt::white);
@@ -170,9 +270,9 @@ QPixmap avatarPixmap(const QString& title, int size) {
 // decode-from-disk-and-composite for every single one of those rows every
 // single time was real, unnecessary repeated work for a photo that had
 // already been decoded moments earlier and has not changed.
-QPixmap chatAvatarPixmap(const QString& title, const QString& photoPath, int size) {
+QPixmap chatAvatarPixmap(const QString& title, qlonglong chatId, const QString& photoPath, int size) {
     if (photoPath.isEmpty()) {
-        return avatarPixmap(title, size);
+        return avatarPixmap(title, chatId, size);
     }
     qreal ratio = currentDevicePixelRatio();
     static QHash<QString, QPixmap> cache;
@@ -188,7 +288,7 @@ QPixmap chatAvatarPixmap(const QString& title, const QString& photoPath, int siz
 
     QPixmap source(photoPath);
     if (source.isNull()) {
-        return avatarPixmap(title, size);
+        return avatarPixmap(title, chatId, size);
     }
     int physicalSize = qRound(size * ratio);
     QPixmap scaled =
@@ -294,29 +394,45 @@ QPainterPath roundedRectPath(const QRectF& rect, double topLeft, double topRight
     return path;
 }
 
-// A small rounded point growing out of the bubble's bottom corner facing
-// the avatar side - the same idea as tdesktop's own composited
-// historyBubbleTailOutLeft/historyBubbleTailOutRight image assets (see
-// ui/chat/message_bubble.cpp in telegram_fork/tdesktop), just drawn as a
-// path instead of a bundled bitmap, since tdesktop's actual tail images
-// are generated at its own build time from theme resources and are not
-// checked into source control to copy (same reason chat_wallpaper.png was
-// used as-is rather than reconstructed - see that investigation earlier
-// in this project's history).
-QPainterPath tailPath(const QRectF& body, bool tailOnLeft) {
-    QPainterPath path;
-    double x = tailOnLeft ? body.left() : body.right();
-    double y = body.bottom();
-    double dir = tailOnLeft ? -1.0 : 1.0;
-    path.moveTo(x, y - 8);
-    path.cubicTo(x, y - 2, x + dir * 2, y, x + dir * 6, y + 1);
-    path.cubicTo(x + dir * 3, y + 1, x, y + 3, x, y);
-    path.closeSubpath();
-    return path;
+// Phase 6b (UI.md 13c): Ui::ChatStyle owns the real in/out message palette
+// (backgrounds, tail icons, shadow, pre-rendered corner pixmaps) - built
+// once from the live global palette (style::main_palette), not per-chat
+// theming/wallpaper (zkgram has one fixed theme, see UI.md 13b), so a
+// single process-lifetime instance is enough. Constructed lazily (first
+// paint), well after InstallUiRuntime()'s style::StartManager() call.
+Ui::ChatStyle& sharedChatStyle() {
+    static Ui::ChatStyle style(style::main_palette::get());
+    return style;
 }
 
+// Maps this codebase's own tailOnLeft/showTail/joinedTop flags (see
+// buildItem()/paintItem() below) onto the real Ui::BubbleRounding the
+// engine expects: Corner::Tail on the near-bottom corner tells
+// Ui::PaintBubble to leave room there for the real tail icon instead of a
+// rounded corner, Corner::Small there instead means "attached to the next
+// bubble of the same kind, no tail this row".
+Ui::BubbleRounding bubbleRounding(bool tailOnLeft, bool showTail, bool joinedTop) {
+    using Corner = Ui::BubbleCornerRounding;
+    const Corner nearTop = joinedTop ? Corner::Small : Corner::Large;
+    const Corner nearBottom = showTail ? Corner::Tail : Corner::Small;
+    Ui::BubbleRounding rounding;
+    rounding.topLeft = tailOnLeft ? nearTop : Corner::Large;
+    rounding.topRight = tailOnLeft ? Corner::Large : nearTop;
+    rounding.bottomLeft = tailOnLeft ? nearBottom : Corner::Large;
+    rounding.bottomRight = tailOnLeft ? Corner::Large : nearBottom;
+    return rounding;
+}
+
+// Phase 6b (UI.md 13c): real values from Telegram/SourceFiles/ui/chat/
+// chat.style in telegram_fork (bubbleRadiusLarge/bubbleRadiusSmall) - that
+// file itself is not vendored (it needs the much larger ui/chat/chat_style.h
+// + styles/style_chat.style + styles/style_chat_style.h dependency chain,
+// the same class of pull-in empty_userpic.cpp had, see avatarPixmap()'s own
+// comment above), but the two literal numbers are ported directly rather
+// than guessed - kBubbleSmallRadius was 8.0 here before, the real value is
+// 6.0 (bubbleRadiusSmall aliases lib_ui's own roundRadiusLarge, 6px).
 constexpr double kBubbleLargeRadius = 16.0;
-constexpr double kBubbleSmallRadius = 8.0;
+constexpr double kBubbleSmallRadius = 6.0;
 constexpr int kBubbleMargin = 10;
 constexpr int kBubbleTailHeight = 6;
 constexpr int kMaxBubbleContentWidth = 420 - kBubbleMargin * 2;
@@ -326,28 +442,25 @@ constexpr int kMinBubbleContentWidth = 40;
 constexpr int kBubbleMetaFontSize = 11;
 constexpr double kTickSize = 13.0;
 
-// Fills+strokes one bubble's body (rounded rect plus an optional tail) at
-// bodyRect - shared between every text/system item HistoryCanvas paints,
-// factored out of the per-corner-radius logic so it is not duplicated
-// per item kind.
-void paintBubbleBody(QPainter& painter, const QRectF& bodyRect, const QColor& background, bool bordered,
-                      bool tailOnLeft, bool showTail, bool joinedTop) {
-    double nearTopRadius = joinedTop ? kBubbleSmallRadius : kBubbleLargeRadius;
-    double nearBottomRadius = showTail ? kBubbleLargeRadius : kBubbleSmallRadius;
-    double topLeft = tailOnLeft ? nearTopRadius : kBubbleLargeRadius;
-    double topRight = tailOnLeft ? kBubbleLargeRadius : nearTopRadius;
-    double bottomLeft = tailOnLeft ? nearBottomRadius : kBubbleLargeRadius;
-    double bottomRight = tailOnLeft ? kBubbleLargeRadius : nearBottomRadius;
-
-    QPainterPath path = roundedRectPath(bodyRect, topLeft, topRight, bottomRight, bottomLeft);
-    if (showTail) {
-        path = path.united(tailPath(bodyRect, tailOnLeft));
-    }
-    painter.fillPath(path, background);
-    if (bordered) {
-        painter.setPen(QPen(QColor("#e4e4e5"), 1));
-        painter.drawPath(path);
-    }
+// Paints one bubble's body (fill, shadow, corners, tail) at bodyRect via
+// the real engine - shared between every text/image item HistoryCanvas
+// paints. background/border are gone: Ui::PaintBubble reads the real
+// in/out colors itself from sharedChatStyle().messageStyle(isOutgoing,
+// selected), and real bubbles are separated by a soft shadow, not a
+// stroke (the old bordered hex "#e4e4e5" outline was never how Telegram
+// actually does this).
+void paintBubbleBody(QPainter& painter, const QRectF& bodyRect, bool isOutgoing, bool tailOnLeft, bool showTail,
+                      bool joinedTop) {
+    Ui::SimpleBubble bubble{
+        .st = &sharedChatStyle(),
+        .geometry = bodyRect.toRect(),
+        .outerWidth = bodyRect.toRect().width(),
+        .selected = false,
+        .shadowed = true,
+        .outbg = isOutgoing,
+        .rounding = bubbleRounding(tailOnLeft, showTail, joinedTop),
+    };
+    Ui::PaintBubble(painter, bubble);
 }
 
 // One row's content and cached layout - the item model HistoryCanvas
@@ -363,6 +476,14 @@ struct HistoryItem {
     QString rawText;  // plain text, for context-menu copy / in-conversation search filtering
     QPixmap pixmap;   // valid only when isImage
     bool isImage = false;
+    // Non-empty only for a merged media-album entry (see
+    // MainWindow::renderCurrentConversation()'s grouping pass) - a mosaic
+    // of these paints inside one bubble instead of pixmap above. Geometry
+    // (relative to the bubble's own content origin) computed once in
+    // buildItem() via the real Ui::LayoutMediaGroup algorithm, not a
+    // hand-rolled grid.
+    QVector<QPixmap> albumPixmaps;
+    QVector<QRect> albumLayout;
     bool attached = false;
     bool showTail = true;
     qlonglong messageId = 0;
@@ -406,6 +527,15 @@ struct HistoryEntry {
     QString senderName;
     bool showTail = true;
     qlonglong messageId = 0;
+    // See StoredMessage::date's own comment (main_window.hpp) - 0 means
+    // "render as happening right now".
+    qint64 date = 0;
+    // Non-empty only for a merged media-album entry (see groupAlbums() in
+    // MainWindow) - every image that was part of the same
+    // td_api::message::media_album_id_, in order. filePath above is
+    // unused when this is set; the single-photo path stays exactly as it
+    // was for a standalone image.
+    QVector<QString> albumFilePaths;
 };
 
 // Eases wheel-scrolled movement into place instead of the default
@@ -688,10 +818,14 @@ protected:
         // on top with a blend mode - see chatWallpaperPattern()'s comment
         // for why these two are not baked into a single repeating tile.
         QRect viewportRect = viewport()->rect();
-        QLinearGradient gradient(0, 0, viewportRect.width(), viewportRect.height());
-        gradient.setColorAt(0.0, QColor("#d5e6f7"));
-        gradient.setColorAt(1.0, QColor("#c3d9ee"));
-        painter.fillRect(viewportRect, gradient);
+        // #74B4E0: the real day-blue background fill - decoded straight
+        // from the 1x1 background.png bundled inside telegram_fork's own
+        // Resources/day-blue.tdesktop-theme (a zip; background.png is its
+        // solid-fill layer, not a gradient - the earlier two-stop
+        // QLinearGradient here was a guess, not a real value). The doodle
+        // pattern below is composited over this exactly the way real
+        // tdesktop layers its pattern over a plain fill.
+        painter.fillRect(viewportRect, QColor("#74B4E0"));
 
         const QPixmap& pattern = chatWallpaperPattern();
         if (!pattern.isNull()) {
@@ -878,6 +1012,42 @@ private:
         item.showTail = entry.showTail;
         item.messageId = entry.messageId;
 
+        if (!entry.albumFilePaths.isEmpty()) {
+            QVector<QPixmap> loaded;
+            std::vector<QSize> sizes;
+            for (const QString& path : entry.albumFilePaths) {
+                QPixmap p;
+                if (p.load(path)) {
+                    sizes.push_back(p.size());
+                    loaded.push_back(std::move(p));
+                }
+            }
+            if (loaded.size() > 1) {
+                // Real algorithm (Ui::LayoutMediaGroup, ui/grouped_layout.cpp -
+                // groups by aspect ratio into balanced rows, not a naive
+                // grid), not a guess at how Telegram's mosaic looks.
+                auto layout = Ui::LayoutMediaGroup(sizes, /*maxWidth=*/280, /*minWidth=*/100, /*spacing=*/2);
+                int maxRight = 0;
+                int maxBottom = 0;
+                item.albumPixmaps.reserve(static_cast<int>(layout.size()));
+                item.albumLayout.reserve(static_cast<int>(layout.size()));
+                for (std::size_t k = 0; k < layout.size(); ++k) {
+                    QRect rect = layout[k].geometry;
+                    item.albumLayout.push_back(rect);
+                    item.albumPixmaps.push_back(
+                        loaded[static_cast<int>(k)].scaled(rect.size(), Qt::KeepAspectRatioByExpanding,
+                                                            Qt::SmoothTransformation));
+                    maxRight = qMax(maxRight, rect.right() + 1);
+                    maxBottom = qMax(maxBottom, rect.bottom() + 1);
+                }
+                item.contentWidth = maxRight;
+                item.contentHeight = maxBottom;
+                int tailExtra = entry.showTail ? kBubbleTailHeight : 0;
+                item.height = item.contentHeight + kBubbleMargin * 2 + tailExtra + kRowVerticalMargin(entry.attached);
+                return item;
+            }
+        }
+
         QPixmap pixmap;
         item.isImage = !entry.filePath.isEmpty() && pixmap.load(entry.filePath);
         if (item.isImage) {
@@ -897,7 +1067,13 @@ private:
         if (entry.kind == MessageKind::System) {
             html = entry.text;
         } else {
-            QString time = QDateTime::currentDateTime().toString("HH:mm");
+            // entry.date == 0 means this message is genuinely happening
+            // right now (a live append, not loaded from history) - see
+            // StoredMessage::date's own comment for where a real value
+            // comes from otherwise.
+            QDateTime when =
+                entry.date > 0 ? QDateTime::fromSecsSinceEpoch(entry.date) : QDateTime::currentDateTime();
+            QString time = when.toString("HH:mm");
             // Space for the tick, not the tick itself - it is painted over
             // this run afterwards (see HistoryItem::showTick/paintSentTick).
             // Non-breaking spaces specifically: ordinary trailing spaces are
@@ -935,8 +1111,15 @@ private:
                 item.textLength = measuring.toPlainText().length();
             }
 
-            html = QString("%1&nbsp;&nbsp;<span style=\"color:#a0acb6; font-size:%2px;\">%3%4</span>")
+            // Phase 6b: real msgInDateFg/msgOutDateFg (the old #a0acb6 was
+            // already the real msgInDateFg value, by luck, but was also
+            // being used for outgoing messages, whose real timestamp color
+            // is msgOutDateFg, a green matching the outgoing bubble).
+            const QColor dateColor =
+                (entry.kind == MessageKind::Outgoing ? st::msgOutDateFg : st::msgInDateFg)->c;
+            html = QString("%1&nbsp;&nbsp;<span style=\"color:%2; font-size:%3px;\">%4%5</span>")
                        .arg(escaped)
+                       .arg(dateColor.name())
                        .arg(kBubbleMetaFontSize)
                        .arg(time, tickSlot);
             if (entry.kind == MessageKind::Incoming && !entry.attached && !entry.senderName.isEmpty()) {
@@ -995,12 +1178,25 @@ private:
             bubbleLeft = (viewportWidth - bubbleOuterWidth) / 2;
         }
 
+        if (!item.albumPixmaps.isEmpty()) {
+            int albumTailExtra = item.showTail ? kBubbleTailHeight : 0;
+            QRectF body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight - albumTailExtra);
+            bool tailOnLeft = item.kind != MessageKind::Outgoing;
+            paintBubbleBody(painter, body, item.kind == MessageKind::Outgoing, tailOnLeft, item.showTail,
+                             item.attached);
+            for (int k = 0; k < item.albumPixmaps.size(); ++k) {
+                const QRect& rect = item.albumLayout[k];
+                painter.drawPixmap(bubbleLeft + kBubbleMargin + rect.x(), bubbleTop + kBubbleMargin + rect.y(),
+                                    item.albumPixmaps[k]);
+            }
+            return;
+        }
+
         if (item.isImage) {
             int imageTailExtra = item.showTail ? kBubbleTailHeight : 0;
             QRectF body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight - imageTailExtra);
             bool tailOnLeft = item.kind != MessageKind::Outgoing;
-            QColor background = item.kind == MessageKind::Outgoing ? QColor("#def1fd") : QColor("#ffffff");
-            paintBubbleBody(painter, body, background, item.kind != MessageKind::Outgoing, tailOnLeft, item.showTail,
+            paintBubbleBody(painter, body, item.kind == MessageKind::Outgoing, tailOnLeft, item.showTail,
                              item.attached);
             painter.drawPixmap(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin, item.pixmap);
             return;
@@ -1010,8 +1206,11 @@ private:
             QRectF body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight);
             QPainterPath path = roundedRectPath(body, kBubbleLargeRadius, kBubbleLargeRadius, kBubbleLargeRadius,
                                                  kBubbleLargeRadius);
-            painter.fillPath(path, QColor("#eef0f2"));
-            painter.setPen(QColor("#8a8a8a"));
+            // Phase 6b: real msgServiceBg/msgServiceFg (semi-transparent
+            // dark green fill + active-blue text in day-blue), not the old
+            // flat light gray guess.
+            painter.fillPath(path, st::msgServiceBg->c);
+            painter.setPen(st::msgServiceFg->c);
             painter.save();
             painter.translate(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin);
             drawDocument(painter, item, isSelected);
@@ -1022,8 +1221,7 @@ private:
         bool isOutgoing = item.kind == MessageKind::Outgoing;
         int tailExtra = item.showTail ? kBubbleTailHeight : 0;
         QRectF body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight - tailExtra);
-        paintBubbleBody(painter, body, isOutgoing ? QColor("#def1fd") : QColor("#ffffff"), !isOutgoing, !isOutgoing,
-                         item.showTail, item.attached);
+        paintBubbleBody(painter, body, isOutgoing, !isOutgoing, item.showTail, item.attached);
         painter.save();
         painter.translate(bubbleLeft + kBubbleMargin, bubbleTop + kBubbleMargin);
         drawDocument(painter, item, isSelected);
@@ -1110,8 +1308,7 @@ private:
         // slack left over from rounding the run up to a whole number of
         // spaces is split between the timestamp side and the bubble's margin.
         double left = right - item.tickSlotWidth + (item.tickSlotWidth - kTickSize) / 2.0;
-        paintGlyph(painter, QRectF(left, centerY - kTickSize / 2.0, kTickSize, kTickSize), Glyph::Check,
-                    kIconAccentFg);
+        paintGlyph(painter, QRectF(left, centerY - kTickSize / 2.0, kTickSize, kTickSize), Glyph::Check);
     }
 
     // Recomputes top_ for every item from index onward, based on each
@@ -1163,76 +1360,19 @@ HistoryCanvas* asCanvas(QWidget* widget) {
     return static_cast<HistoryCanvas*>(widget);
 }
 
-// A QPushButton with a real Telegram Desktop-style ripple: a circle grows
-// from the click point and fades out over the button's own shape, the
-// same effect real tdesktop uses on every one of its buttons (see
-// Ui::RippleButton in telegram_fork/tdesktop's ui/widgets/buttons.h) -
-// QPushButton alone has no such feedback, just its normal
-// pressed/hover palette swap. Does not need its own Q_OBJECT/moc: it only
-// uses QVariantAnimation as a plain QObject connect() context for a
-// lambda, it does not declare any new signal/slot/property of its own.
-class RippleButton : public QPushButton {
-public:
-    explicit RippleButton(QWidget* parent = nullptr) : QPushButton(parent) { setUpRippleAnimation(); }
-    RippleButton(const QIcon& icon, const QString& text, QWidget* parent = nullptr)
-        : QPushButton(icon, text, parent) {
-        setUpRippleAnimation();
-    }
+// RippleButton (a hand-rolled QPushButton + QVariantAnimation ripple) is
+// gone as of Phase 5 (UI.md 13c) - every former call site now uses the real
+// Ui::IconButton/Ui::RoundButton from lib_ui, which paint a real tdesktop
+// ripple (RippleAnimation, see the .style ripple: field on each) natively.
 
-protected:
-    void mousePressEvent(QMouseEvent* event) override {
-        QPushButton::mousePressEvent(event);
-        if (!isEnabled()) {
-            return;
-        }
-        rippleCenter_ = event->pos();
-        rippleAnimation_->stop();
-        rippleAnimation_->setStartValue(0.0);
-        rippleAnimation_->setEndValue(1.0);
-        rippleAnimation_->start();
-    }
-
-    void paintEvent(QPaintEvent* event) override {
-        QPushButton::paintEvent(event);
-        if (rippleProgress_ <= 0.0 || rippleProgress_ >= 1.0) {
-            return;
-        }
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        // Clipped to (an approximation of) the button's own rounded
-        // shape - style.qss rounds every button heavily enough (pill or
-        // circular) that a fully-rounded clip reads correctly for both,
-        // without needing this class to know each button's exact radius.
-        QPainterPath clip;
-        clip.addRoundedRect(rect(), height() / 2.0, height() / 2.0);
-        painter.setClipPath(clip);
-        double maxRadius = std::hypot(static_cast<double>(width()), static_cast<double>(height()));
-        double radius = maxRadius * rippleProgress_;
-        int alpha = static_cast<int>(60 * (1.0 - rippleProgress_));
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, alpha));
-        painter.drawEllipse(QPointF(rippleCenter_), radius, radius);
-    }
-
-private:
-    void setUpRippleAnimation() {
-        rippleAnimation_ = new QVariantAnimation(this);
-        rippleAnimation_->setDuration(400);
-        rippleAnimation_->setEasingCurve(QEasingCurve::OutCubic);
-        connect(rippleAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
-            rippleProgress_ = value.toDouble();
-            update();
-        });
-    }
-
-    QPoint rippleCenter_;
-    double rippleProgress_ = 0.0;
-    QVariantAnimation* rippleAnimation_ = nullptr;
-};
-
-constexpr int kSidebarRowHeight = 64;
+// Real defaultDialogRow values (src/dialogs/dialogs.style): height 62px,
+// photoSize 46px, padding margins(10,8,10,8), nameLeft/textLeft 68px -
+// the old 64/46/10 here were pre-migration guesses, only photoSize/margin
+// happened to already match.
+constexpr int kSidebarRowHeight = 62;
 constexpr int kSidebarAvatarSize = 46;
 constexpr int kSidebarMargin = 10;
+constexpr int kSidebarTextLeft = 68;
 
 // One sidebar row's content, laid out and painted by SidebarCanvas below -
 // not a widget at all, same reasoning as HistoryItem for the message
@@ -1269,14 +1409,18 @@ public:
         viewport()->setMouseTracking(true);
         kineticScroller_ = std::make_unique<KineticScroller>(this);
 
+        // Real values: dialogsTextStyle/nameStyle both key off fsize (13px,
+        // ui/basic.style), name in semiboldFont, preview in normalFont;
+        // dialogsUnreadFont is font(12px bold) - the old 14px/11px here
+        // were pre-migration guesses.
         nameFont_ = font();
         nameFont_.setWeight(QFont::DemiBold);
-        nameFont_.setPixelSize(14);
+        nameFont_.setPixelSize(13);
         previewFont_ = font();
         previewFont_.setPixelSize(13);
         badgeFont_ = font();
-        badgeFont_.setPixelSize(11);
-        badgeFont_.setWeight(QFont::DemiBold);
+        badgeFont_.setPixelSize(12);
+        badgeFont_.setWeight(QFont::Bold);
     }
 
     // Called from MainWindow::onChatListItemClicked() via a row click -
@@ -1296,7 +1440,7 @@ public:
             row.chatId = entry["id"].toLongLong();
             row.unread = entry["unread"].toInt();
             row.active = entry["active"].toBool();
-            row.avatar = chatAvatarPixmap(title, entry["photo"].toString(), kSidebarAvatarSize);
+            row.avatar = chatAvatarPixmap(title, row.chatId, entry["photo"].toString(), kSidebarAvatarSize);
             int textWidth = 260;  // generous; real elision happens against the actual row width at paint time
             row.nameElided = QFontMetrics(nameFont_).elidedText(title, Qt::ElideRight, textWidth);
             QString previewText = preview.isEmpty() ? "No messages yet" : preview;
@@ -1388,51 +1532,62 @@ private:
         verticalScrollBar()->setSingleStep(20);
     }
 
+    // Phase 6a (UI.md 13c): every color here is now a real dialogsXxx
+    // palette role (ui/colors.palette) instead of a literal hex - same
+    // names real tdesktop's own Dialogs::Row painting code
+    // (Telegram/SourceFiles/dialogs/dialogs_row.cpp) uses. Fonts/layout are
+    // still this class's own pre-migration numbers, not yet ported to
+    // st::-declared skips (a further, smaller pass, not blocking this one).
     void paintRow(QPainter& painter, const SidebarRowData& row, int top, bool selected, bool hovered) {
-        QColor background = selected ? QColor("#419fd9") : (hovered ? QColor("#f1f1f1") : QColor("#ffffff"));
+        const QColor background = (selected ? st::dialogsBgActive
+                                             : hovered ? st::dialogsBgOver
+                                                       : st::dialogsBg)
+                                       ->c;
         painter.fillRect(QRect(0, top, viewport()->width(), kSidebarRowHeight), background);
 
         painter.drawPixmap(kSidebarMargin, top + (kSidebarRowHeight - kSidebarAvatarSize) / 2, row.avatar);
 
-        int textLeft = kSidebarMargin + kSidebarAvatarSize + 10;
+        int textLeft = kSidebarTextLeft;
         int badgeReserve = row.unread > 0 ? 40 : 0;
         int textWidth = viewport()->width() - textLeft - kSidebarMargin - badgeReserve;
 
-        painter.setPen(selected ? QColor("#ffffff") : QColor("#222222"));
+        painter.setPen((selected ? st::dialogsNameFgActive : st::dialogsNameFg)->c);
         painter.setFont(nameFont_);
         painter.drawText(QRect(textLeft, top + 10, textWidth, 20), Qt::AlignLeft | Qt::AlignVCenter, row.nameElided);
 
         int previewLeft = textLeft;
         if (row.active) {
-            // A padlock = an encrypted session exists for this chat. Keeps
-            // the green of the plain dot this used to be (and of statusDot_,
-            // the overall connection light) while actually naming what is
-            // active - on a selected row, where the background is the blue
-            // accent, the green would not read at all, so it goes white with
-            // the rest of the row's text.
+            // A padlock = an encrypted session exists for this chat - see
+            // zkgram_icons.style's zkgramIconLock/zkgramIconLockOnActive
+            // comment for why the "active" (white) variant is needed on a
+            // selected row.
             // top + 37 rather than the preview row's own top + 34: the
             // padlock's ink sits in the middle of its 13x13 box, so aligning
             // the boxes would leave it riding above the text's centre line.
-            paintGlyph(painter, QRectF(previewLeft, top + 37, 13, 13), Glyph::Lock,
-                        selected ? QColor("#ffffff") : kIconEncryptedFg);
+            paintGlyph(painter, QRectF(previewLeft, top + 37, 13, 13),
+                        selected ? Glyph::LockOnActive : Glyph::Lock);
             previewLeft += 17;
         }
-        painter.setPen(selected ? QColor("#ffffff") : QColor("#707579"));
+        painter.setPen((selected ? st::dialogsTextFgActive : st::dialogsTextFg)->c);
         painter.setFont(previewFont_);
         painter.drawText(QRect(previewLeft, top + 34, textWidth - (previewLeft - textLeft), 20),
                           Qt::AlignLeft | Qt::AlignVCenter, row.previewElided);
 
         if (row.unread > 0) {
+            // Real dialogsUnreadHeight/dialogsUnreadPadding (dialogs.style):
+            // 19px tall, 5px padding each side - a circle for single-digit
+            // counts since width floors at the height.
             QString badgeText = row.unread > 99 ? "99+" : QString::number(row.unread);
             QFontMetrics badgeMetrics(badgeFont_);
-            int badgeWidth = qMax(20, badgeMetrics.horizontalAdvance(badgeText) + 12);
-            constexpr int kBadgeHeight = 20;
+            constexpr int kBadgeHeight = 19;
+            constexpr int kBadgePadding = 5;
+            int badgeWidth = qMax(kBadgeHeight, badgeMetrics.horizontalAdvance(badgeText) + kBadgePadding * 2);
             QRectF badgeRect(viewport()->width() - kSidebarMargin - badgeWidth,
                               top + (kSidebarRowHeight - kBadgeHeight) / 2.0, badgeWidth, kBadgeHeight);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(selected ? QColor("#ffffff") : QColor("#40a7e3"));
+            painter.setBrush((selected ? st::dialogsUnreadBgActive : st::dialogsUnreadBg)->c);
             painter.drawRoundedRect(badgeRect, kBadgeHeight / 2.0, kBadgeHeight / 2.0);
-            painter.setPen(selected ? QColor("#419fd9") : QColor("#ffffff"));
+            painter.setPen((selected ? st::dialogsUnreadFgActive : st::dialogsUnreadFg)->c);
             painter.setFont(badgeFont_);
             painter.drawText(badgeRect, Qt::AlignCenter, badgeText);
         }
@@ -1474,20 +1629,44 @@ QPixmap loadAuthLogo(int size) {
 
 }  // namespace
 
-ChatInput::ChatInput(QWidget* parent) : QPlainTextEdit(parent) {
-    setPlaceholderText("Message");
-    setTabChangesFocus(true);
-    setFixedHeight(36);
+ChatInput::ChatInput(QWidget* parent) : QWidget(parent) {
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    // zkgramComposeField (zkgram_icons.style): real historyComposeField
+    // values (chat_helpers.style) - NOT defaultInputField, which is a
+    // floating-label FORM field (semibold placeholder that shrinks/turns
+    // blue on focus, heightMin 55px) wrong for a chat composer; its 55px
+    // minimum overflowing this row's 36px is what clipped the placeholder
+    // text in the screenshot that found this bug. No setFixedHeight()
+    // here either, for the same reason - zkgramComposeField's own
+    // heightMin (36px) is the real constraint now, not a second one
+    // layered on top of it.
+    field_ = new Ui::InputField(this, st::zkgramComposeField, Ui::InputField::Mode::MultiLine,
+                                 rpl::single(QString("Message")));
+    field_->setSubmitSettings(Ui::InputField::SubmitSettings::Enter);
+    // Ui::RpWidget starts hidden by default, unlike plain QWidget - same
+    // gap as startEncryptionButton_'s own earlier fix (see its comment in
+    // this file), just hit again on a different widget.
+    field_->show();
+    layout->addWidget(field_);
+    setFocusProxy(field_);
+
+    field_->submits(
+    ) | rpl::on_next([this](Qt::KeyboardModifiers) { Q_EMIT submitted(); }, field_->lifetime());
+    field_->changes(
+    ) | rpl::on_next([this] { Q_EMIT textChanged(); }, field_->lifetime());
 }
 
-void ChatInput::keyPressEvent(QKeyEvent* event) {
-    bool isEnter = event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
-    if (isEnter && !(event->modifiers() & Qt::ShiftModifier)) {
-        event->accept();
-        Q_EMIT submitted();
-        return;
-    }
-    QPlainTextEdit::keyPressEvent(event);
+QString ChatInput::toPlainText() const {
+    return field_->getLastText();
+}
+
+void ChatInput::setPlainText(const QString& text) {
+    field_->setText(text);
+}
+
+void ChatInput::clear() {
+    field_->setText(QString());
 }
 
 AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
@@ -1509,40 +1688,69 @@ AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
     logo_->setAlignment(Qt::AlignCenter);
     cardLayout->addWidget(logo_);
 
-    title_ = new QLabel(card);
+    // Phase 6b (UI.md 13c): Ui::FlatLabel for title/subtitle/error (real
+    // text rendering/wrap, not QLabel's) - defaultFlatLabel is the only
+    // FlatLabel-typed instance already vendored (see widgets.style), so all
+    // three share it; alignment/color are set per-label below since the
+    // style itself does not distinguish them.
+    title_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
     title_->setObjectName("authTitle");
-    title_->setAlignment(Qt::AlignCenter);
-    title_->setWordWrap(true);
+    // Ui::RpWidget starts hidden by default, unlike plain QWidget - same
+    // gap as startEncryptionButton_'s own earlier fix; title_/subtitle_
+    // are always visible whenever the slide itself is (unlike error_,
+    // which stays conditionally hidden), so shown once here rather than
+    // in runSlide()/showStatus().
+    title_->show();
     cardLayout->addWidget(title_);
 
-    subtitle_ = new QLabel(card);
+    subtitle_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
     subtitle_->setObjectName("authSubtitle");
-    subtitle_->setAlignment(Qt::AlignCenter);
-    subtitle_->setWordWrap(true);
+    subtitle_->show();
     cardLayout->addWidget(subtitle_);
 
-    input_ = new QLineEdit(card);
-    input_->setObjectName("authInput");
-    input_->setAlignment(Qt::AlignCenter);
-    cardLayout->addWidget(input_);
+    // Two real field types, not one QLineEdit toggled by echo mode: real
+    // tdesktop has no single widget that is both - Ui::PasswordInput
+    // (always-masked) and Ui::MaskedInputField (plain) are different C++
+    // types (fields/password_input.h, fields/masked_input_field.h). Both
+    // occupy the same layout slot; runSlide() shows exactly one via
+    // activeInput().
+    plainInput_ = new Ui::MaskedInputField(card, st::defaultInputField);
+    plainInput_->setObjectName("authInput");
+    cardLayout->addWidget(plainInput_);
+    passwordInput_ = new Ui::PasswordInput(card, st::defaultInputField);
+    passwordInput_->setObjectName("authInputPassword");
+    cardLayout->addWidget(passwordInput_);
 
-    error_ = new QLabel(card);
+    error_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
     error_->setObjectName("authError");
-    error_->setAlignment(Qt::AlignCenter);
-    error_->setWordWrap(true);
+    error_->setTextColorOverride(st::attentionButtonFg->c);
     error_->hide();
     cardLayout->addWidget(error_);
 
-    next_ = new RippleButton(QIcon(), "Next", card);
+    // Phase 5 (UI.md 13c): defaultActiveButton is the real tdesktop
+    // text-only accent RoundButton (Telegram/lib_ui/ui/widgets/widgets.style)
+    // reused as-is, not a new .style type - a call-to-action button like
+    // this is exactly what it already exists for.
+    next_ = new Ui::RoundButton(card, rpl::single(QString("Next")), st::defaultActiveButton);
     next_->setObjectName("authNext");
+    // See lockButtonSize()'s own comment (main_window.cpp's anonymous
+    // namespace) - cardLayout is a QVBoxLayout, so this button's width is
+    // the cross axis (usually stretched to fill regardless), but its
+    // height is still the layout's main axis and at the same risk.
+    lockButtonSize(next_);
     cardLayout->addWidget(next_);
 
     cardLayout->addStretch();
     outer->addWidget(card);
     outer->addStretch();
 
-    connect(next_, &QPushButton::clicked, this, &AuthSlide::onNextClicked);
-    connect(input_, &QLineEdit::returnPressed, this, &AuthSlide::onNextClicked);
+    next_->setClickedCallback([this] { onNextClicked(); });
+    connect(plainInput_, &Ui::MaskedInputField::submitted, this, &AuthSlide::onNextClicked);
+    connect(passwordInput_, &Ui::MaskedInputField::submitted, this, &AuthSlide::onNextClicked);
+}
+
+QWidget* AuthSlide::activeInput() const {
+    return passwordInput_->isVisible() ? static_cast<QWidget*>(passwordInput_) : static_cast<QWidget*>(plainInput_);
 }
 
 QString AuthSlide::runSlide(const QString& title, const QString& subtitle, const QString& placeholder, bool masked,
@@ -1550,12 +1758,14 @@ QString AuthSlide::runSlide(const QString& title, const QString& subtitle, const
     logDebug("runSlide: entered, title=" + title);
     title_->setText(title);
     subtitle_->setText(subtitle);
-    input_->setPlaceholderText(placeholder);
-    input_->setEchoMode(masked ? QLineEdit::Password : QLineEdit::Normal);
-    input_->clear();
-    input_->show();
+    plainInput_->setPlaceholder(rpl::single(placeholder));
+    passwordInput_->setPlaceholder(rpl::single(placeholder));
+    plainInput_->setText(QString());
+    passwordInput_->setText(QString());
+    plainInput_->setVisible(!masked);
+    passwordInput_->setVisible(masked);
     next_->show();
-    input_->setFocus();
+    activeInput()->setFocus();
     if (initialError.isEmpty()) {
         error_->hide();
     } else {
@@ -1577,7 +1787,8 @@ void AuthSlide::showStatus(const QString& title, const QString& subtitle) {
     title_->setText(title);
     subtitle_->setText(subtitle);
     error_->hide();
-    input_->hide();
+    plainInput_->hide();
+    passwordInput_->hide();
     next_->hide();
 }
 
@@ -1590,12 +1801,12 @@ void AuthSlide::cancelPending() {
 
 void AuthSlide::onNextClicked() {
     logDebug("onNextClicked: entered");
-    QString value = input_->text();
+    QString value = passwordInput_->isVisible() ? passwordInput_->getLastText() : plainInput_->getLastText();
     // Empty input just refocuses instead of submitting - the fields here
     // (password/phone/code) are always required, there is no valid empty
     // submission to accept.
     if (value.isEmpty()) {
-        input_->setFocus();
+        activeInput()->setFocus();
         return;
     }
     if (validator_) {
@@ -1603,7 +1814,7 @@ void AuthSlide::onNextClicked() {
         if (!message.isEmpty()) {
             error_->setText(message);
             error_->show();
-            input_->setFocus();
+            activeInput()->setFocus();
             return;
         }
     }
@@ -1650,7 +1861,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // dialogs search field. QLineEdit::addAction() reserves the space and
     // keeps the text clear of it on its own, so nothing here has to nudge
     // the field's padding.
-    chatSearchInput_->addAction(glyphIcon(Glyph::Search, kIconFg), QLineEdit::LeadingPosition);
+    chatSearchInput_->addAction(glyphIcon(Glyph::Search), QLineEdit::LeadingPosition);
     searchRowLayout->addWidget(chatSearchInput_);
     sidebarLayout->addWidget(searchRow);
 
@@ -1690,16 +1901,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // actually has some secret content to reveal, see
     // hasSecretContent_), so a chat that never had any encrypted session
     // shows no toggle at all rather than a permanently useless one.
-    secretModeToggle_ = new RippleButton(glyphIcon(Glyph::Lock, kIconDestructiveFg), QString(), header);
+    secretModeToggle_ = new Ui::RoundButton(header, rpl::single(QString()), st::zkgramSecretModeToggle);
     secretModeToggle_->setObjectName("secretModeToggle");
-    secretModeToggle_->setFixedHeight(28);
     secretModeToggle_->hide();
     // Filters the message list below by substring - the currently open
     // conversation only, not a search across every chat.
     searchInput_ = new QLineEdit(header);
     searchInput_->setPlaceholderText("Search in conversation");
     searchInput_->setMaximumWidth(180);
-    searchInput_->addAction(glyphIcon(Glyph::Search, kIconFg), QLineEdit::LeadingPosition);
+    searchInput_->addAction(glyphIcon(Glyph::Search), QLineEdit::LeadingPosition);
     // statusDot_/statusLabel_ are not added to the header - a persistent
     // "Connected" pill is not something real Telegram Desktop shows once
     // logged in (it only ever surfaces a transient "Connecting..."/
@@ -1770,11 +1980,47 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     plainSendWarning_->setObjectName("plainSendWarning");
     startEncryptionRowLayout->addWidget(plainSendWarning_);
     startEncryptionRowLayout->addStretch();
-    startEncryptionButton_ = new RippleButton(QIcon(), "Start encrypted session", startEncryptionRow);
+    // Phase 5 (UI.md 13c): same defaultActiveButton as next_ above - the old
+    // setFixedHeight(30) is gone, defaultActiveButton's own height (34px) is
+    // used instead of a hand-picked override.
+    startEncryptionButton_ =
+        new Ui::RoundButton(startEncryptionRow, rpl::single(QString("Start encrypted session")), st::defaultActiveButton);
     startEncryptionButton_->setObjectName("startEncryptionButton");
-    startEncryptionButton_->setFixedHeight(30);
+    startEncryptionButton_->show();
+    // See lockButtonSize()'s own comment: without this, the real bug found
+    // via runtime diagnostics - this HBox row's addStretch() squeezing the
+    // button to 0 width the first time writeRestrictionBar_ actually goes
+    // visible->layout-active, not a hidden-by-default issue.
+    lockButtonSize(startEncryptionButton_);
     startEncryptionRowLayout->addWidget(startEncryptionButton_);
     layout->addWidget(startEncryptionRow);
+
+    // Reply-to-message preview (Ui::MessageBar, real widget - see UI.md
+    // 13c Phase 6b, zkgram_chat_style_stub.style's defaultMessageBar
+    // comment) - hidden until startReply() is called from the message
+    // context menu.
+    replyBarRow_ = new QWidget(conversationColumn);
+    replyBarRow_->setObjectName("replyBarRow");
+    replyBarRow_->hide();
+    auto* replyBarLayout = new QHBoxLayout(replyBarRow_);
+    replyBarLayout->setContentsMargins(0, 0, 0, 0);
+    // Ui::MessageBar is a plain class, not itself a QWidget/QObject - its
+    // widget() is what actually lives in the layout/widget tree and gets
+    // destroyed with replyBarRow_; replyBar_ itself is process-lifetime,
+    // same as UiIntegration/the animations Manager in ui_integration.cpp.
+    replyBar_ = new Ui::MessageBar(replyBarRow_, st::defaultMessageBar, [] { return false; });
+    replyBar_->widget()->show();
+    // Stretch factor 1: the message-bar content should take the row's
+    // remaining width, not compete evenly with the fixed-size cancel
+    // button next to it (see lockButtonSize()'s comment on that button).
+    replyBarLayout->addWidget(replyBar_->widget().get(), 1);
+    auto* cancelReplyButton = new Ui::IconButton(replyBarRow_, st::zkgramCancelRecordButton);
+    cancelReplyButton->setToolTip("Cancel reply");
+    cancelReplyButton->setClickedCallback([this] { cancelReply(); });
+    cancelReplyButton->show();
+    lockButtonSize(cancelReplyButton);
+    replyBarLayout->addWidget(cancelReplyButton);
+    layout->addWidget(replyBarRow_);
 
     // The composer bar itself - historyComposeAreaBg background (the
     // same white as the restriction bar above and the field inside it,
@@ -1795,15 +2041,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* inputLayout = new QHBoxLayout(inputRow);
     inputLayout->setContentsMargins(2, 0, 2, 0);
     inputLayout->setSpacing(0);
-    sendFileButton_ = new RippleButton(glyphIcon(Glyph::Attach, kIconFg), QString(), inputRow);
+    // Phase 5 (UI.md 13c): first RippleButton converted to the real
+    // Ui::IconButton, style declared in zkgram_icons.style
+    // (zkgramAttachButton) instead of setFixedSize()/setIconSize() calls
+    // here - size, icon and hover state all come from the .style now.
+    sendFileButton_ = new Ui::IconButton(inputRow, st::zkgramAttachButton);
     sendFileButton_->setObjectName("composeIconButton");
-    sendFileButton_->setFixedSize(44, 46);
-    // Qt's QPushButton default icon size (~16px from the style's
-    // PM_ButtonIconSize) reads as tiny inside a 44x46 button - matches
-    // roughly what the real 44x46 historyAttach/historySend icons in
-    // chat_helpers.style actually fill.
-    sendFileButton_->setIconSize(QSize(24, 24));
     sendFileButton_->setToolTip("Send a file");
+    lockButtonSize(sendFileButton_);
     input_ = new ChatInput(inputRow);
     input_->setObjectName("composeField");
     // One button, not a separate always-visible mic button next to a
@@ -1811,11 +2056,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // comment for the citation. Starts in its mic state (field starts
     // empty); updateSendButtonIcon() swaps it as the field's text
     // changes.
-    sendButton_ = new RippleButton(glyphIcon(Glyph::Mic, kIconFg), QString(), inputRow);
+    sendButton_ = new Ui::IconButton(inputRow, st::zkgramSendButton);
     sendButton_->setObjectName("composeIconButton");
-    sendButton_->setFixedSize(44, 46);
-    sendButton_->setIconSize(QSize(24, 24));
     sendButton_->setToolTip("Record a voice message");
+    lockButtonSize(sendButton_);
     inputLayout->addWidget(sendFileButton_, 0, Qt::AlignBottom);
     inputLayout->addWidget(input_, 1, Qt::AlignVCenter);
     inputLayout->addWidget(sendButton_, 0, Qt::AlignBottom);
@@ -1834,11 +2078,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     recordLayout->setContentsMargins(2, 0, 2, 0);
     recordLayout->setSpacing(0);
 
-    cancelRecordButton_ = new RippleButton(glyphIcon(Glyph::Trash, kIconDestructiveFg), QString(), recordBar_);
+    cancelRecordButton_ = new Ui::IconButton(recordBar_, st::zkgramCancelRecordButton);
     cancelRecordButton_->setObjectName("composeIconButton");
-    cancelRecordButton_->setFixedSize(44, 46);
-    cancelRecordButton_->setIconSize(QSize(24, 24));
     cancelRecordButton_->setToolTip("Discard recording");
+    lockButtonSize(cancelRecordButton_);
 
     recordDot_ = new QLabel(recordBar_);
     recordDot_->setObjectName("recordDot");
@@ -1848,17 +2091,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     recordTime_ = new QLabel("0:00,00", recordBar_);
     recordTime_->setObjectName("recordTime");
 
-    pauseRecordButton_ = new RippleButton(glyphIcon(Glyph::Pause, kIconFg), QString(), recordBar_);
+    pauseRecordButton_ = new Ui::IconButton(recordBar_, st::zkgramPauseRecordButton);
     pauseRecordButton_->setObjectName("composeIconButton");
-    pauseRecordButton_->setFixedSize(44, 46);
-    pauseRecordButton_->setIconSize(QSize(24, 24));
     pauseRecordButton_->setToolTip("Pause recording");
+    lockButtonSize(pauseRecordButton_);
 
-    sendRecordButton_ = new RippleButton(glyphIcon(Glyph::Send, kIconAccentFg), QString(), recordBar_);
+    sendRecordButton_ = new Ui::IconButton(recordBar_, st::zkgramSendRecordButton);
     sendRecordButton_->setObjectName("composeIconButton");
-    sendRecordButton_->setFixedSize(44, 46);
-    sendRecordButton_->setIconSize(QSize(24, 24));
     sendRecordButton_->setToolTip("Stop and send");
+    lockButtonSize(sendRecordButton_);
 
     recordLayout->addWidget(cancelRecordButton_, 0, Qt::AlignVCenter);
     recordLayout->addSpacing(8);
@@ -1913,19 +2154,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // to restyle the window, no rebuild needed.
     setStyleSheet(loadStylesheet());
 
-    connect(sendButton_, &QPushButton::clicked, this, &MainWindow::onSendOrMicClicked);
-    connect(sendFileButton_, &QPushButton::clicked, this, &MainWindow::onSendFileClicked);
-    connect(cancelRecordButton_, &QPushButton::clicked, this, &MainWindow::onCancelRecordingClicked);
-    connect(pauseRecordButton_, &QPushButton::clicked, this, &MainWindow::onPauseRecordingClicked);
-    connect(sendRecordButton_, &QPushButton::clicked, this, &MainWindow::onSendRecordingClicked);
+    sendButton_->setClickedCallback([this] { onSendOrMicClicked(); });
+    sendFileButton_->setClickedCallback([this] { onSendFileClicked(); });
+    cancelRecordButton_->setClickedCallback([this] { onCancelRecordingClicked(); });
+    pauseRecordButton_->setClickedCallback([this] { onPauseRecordingClicked(); });
+    sendRecordButton_->setClickedCallback([this] { onSendRecordingClicked(); });
     connect(recordTimer_, &QTimer::timeout, this, &MainWindow::onRecordingTick);
     connect(input_, &ChatInput::submitted, this, &MainWindow::onSendClicked);
-    connect(input_, &QPlainTextEdit::textChanged, this, &MainWindow::updateSendButtonIcon);
+    connect(input_, &ChatInput::textChanged, this, &MainWindow::updateSendButtonIcon);
     connect(historyCanvas->viewport(), &QWidget::customContextMenuRequested, this, &MainWindow::showMessageContextMenu);
     connect(recorder_, &QMediaRecorder::recorderStateChanged, this, &MainWindow::onRecorderStateChanged);
     connect(searchInput_, &QLineEdit::textChanged, this, &MainWindow::onSearchTextChanged);
-    connect(startEncryptionButton_, &QPushButton::clicked, this, &MainWindow::onStartEncryptionClicked);
-    connect(secretModeToggle_, &QPushButton::clicked, this, &MainWindow::onSecretModeToggleClicked);
+    startEncryptionButton_->setClickedCallback([this] { onStartEncryptionClicked(); });
+    secretModeToggle_->setClickedCallback([this] { onSecretModeToggleClicked(); });
     connect(chatSearchInput_, &QLineEdit::textChanged, this, &MainWindow::onChatSearchTextChanged);
     connect(searchDebounceTimer_, &QTimer::timeout, this, &MainWindow::onChatSearchDebounceTimeout);
 }
@@ -2024,6 +2265,21 @@ void MainWindow::onSecretModeToggleClicked() {
     updateSecretModeIndicator();
 }
 
+void MainWindow::startReply(const QString& senderTitle, const QString& text) {
+    replyToText_ = text;
+    Ui::MessageBarContent content;
+    content.title = senderTitle;
+    content.text = TextWithEntities{.text = text};
+    replyBar_->set(std::move(content));
+    replyBarRow_->show();
+    input_->setFocus();
+}
+
+void MainWindow::cancelReply() {
+    replyToText_.clear();
+    replyBarRow_->hide();
+}
+
 void MainWindow::updateSecretModeIndicator() {
     if (currentChatId_ == 0 || !hasSecretContent_.contains(currentChatId_)) {
         // Nothing secret ever happened in this chat - no toggle to show,
@@ -2033,14 +2289,16 @@ void MainWindow::updateSecretModeIndicator() {
         return;
     }
     bool on = secretModeOn_.value(currentChatId_, false);
-    secretModeToggle_->setText(on ? "Secret" : "Normal");
-    // Direct per-instance background, not a QSS class rule - same
-    // pattern setConnectionStatus() already uses for statusDot_'s color,
-    // for the same reason: the color itself is the only thing that
-    // changes, everything else about the button stays the default
-    // RippleButton/QPushButton chrome.
-    secretModeToggle_->setStyleSheet(on ? "background-color: #40a7e3;" : "background-color: #e41e3f;");
-    secretModeToggle_->setIcon(glyphIcon(Glyph::Lock, Qt::white));
+    secretModeToggle_->setText(rpl::single(QString(on ? "Secret" : "Normal")));
+    // See lockButtonSize()'s own comment - this button's text (and so its
+    // resizeToText()-computed width) changes at runtime, so the fixed size
+    // has to be re-locked here too, not just once after construction.
+    lockButtonSize(secretModeToggle_);
+    // Direct per-instance background override (RoundButton::setBrushOverride),
+    // not setStyleSheet() - see zkgram_icons.style's zkgramSecretModeToggle
+    // comment for why the "Normal" red is a runtime QColor and not a second
+    // palette-backed .style instance.
+    secretModeToggle_->setBrushOverride(on ? QColor("#40a7e3") : QColor("#e41e3f"));
     secretModeToggle_->setToolTip(on ? "Secret mode: showing encrypted and plain messages. Click to hide encrypted "
                                         "messages again."
                                       : "Normal mode: encrypted messages are hidden. Click to reveal them.");
@@ -2220,6 +2478,7 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
                  .arg(asSidebar(chatListWidget_)->rowCount())
                  .arg(chatSearchInput_->text()));
     currentChatId_ = chatId;
+    cancelReply();  // a pending reply belongs to the chat it was started in
 
     // Opening a chat (whether from the normal list or a search result)
     // closes the search, same as tdesktop: back to the regular dialog list
@@ -2233,7 +2492,8 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
 
     QString title = conversationTitles_.value(currentChatId_, "zkgram");
     companionLabel_->setText(title);
-    companionAvatar_->setPixmap(chatAvatarPixmap(title, conversationPhotoPaths_.value(currentChatId_), 38));
+    companionAvatar_->setPixmap(
+        chatAvatarPixmap(title, currentChatId_, conversationPhotoPaths_.value(currentChatId_), 38));
     companionAvatar_->show();
     maybeLoadCachedHistory(currentChatId_);
     updateSecretModeIndicator();
@@ -2279,7 +2539,7 @@ void MainWindow::maybeLoadCachedHistory(qlonglong chatId) {
                                                 QString::fromStdString(message.photoPath),
                                                 static_cast<qlonglong>(message.id),
                                                 QString::fromStdString(message.senderName),
-                                                /*isSecret=*/true});
+                                                /*isSecret=*/true, message.date});
     }
     hasSecretContent_.insert(chatId);
     // Prepended, not appended: conversationMessages_[chatId] can already
@@ -2335,7 +2595,8 @@ void MainWindow::maybeLoadPlainHistory(qlonglong chatId) {
                 history.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
                                                  QString::fromStdString(message.text),
                                                  QString::fromStdString(message.photoPath), messageId,
-                                                 QString::fromStdString(message.senderName), /*isSecret=*/false});
+                                                 QString::fromStdString(message.senderName), /*isSecret=*/false,
+                                                 message.date, message.mediaAlbumId});
             }
             if (!history.isEmpty()) {
                 conversationMessages_[chatId] = history + conversationMessages_[chatId];
@@ -2428,7 +2689,8 @@ void MainWindow::maybeLoadMoreHistory() {
                 older.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
                                                QString::fromStdString(message.text),
                                                QString::fromStdString(message.photoPath), messageId,
-                                               QString::fromStdString(message.senderName), /*isSecret=*/false});
+                                               QString::fromStdString(message.senderName), /*isSecret=*/false,
+                                               message.date, message.mediaAlbumId});
             }
             if (older.isEmpty()) {
                 // Every message on this page was already on screen. Move
@@ -2466,7 +2728,7 @@ void MainWindow::maybeLoadMoreHistory() {
                     showTail = !attached[i + 1];
                 }
                 entries.push_back(HistoryEntry{older[i].kind, older[i].text, older[i].filePath, attached[i],
-                                                older[i].senderName, showTail, older[i].messageId});
+                                                older[i].senderName, showTail, older[i].messageId, older[i].date});
             }
 
             // messages is chronological oldest-first, same as the initial
@@ -2498,7 +2760,22 @@ void MainWindow::onStartEncryptionClicked() {
     // time" even on the very same machine - the file genuinely never
     // existed yet. Starting for real regardless of the probe result keeps
     // that working; a failed probe now only adds a warning message.
-    session_->startConversation(chatId);
+    //
+    // crypto::CryptoLayer's constructor deliberately throws
+    // std::runtime_error on a Python-side init failure (see
+    // crypto_layer.cpp) - Session's own constructor already catches this
+    // for the very first conversation, but startConversation() (used here,
+    // for starting encryption on an already-open chat) never did, so a
+    // real init failure crashed the whole process uncaught instead of
+    // showing an error - the same class of gap TODO.md already documents
+    // being fixed for Session's constructor, just missed here.
+    try {
+        session_->startConversation(chatId);
+    } catch (const std::exception& e) {
+        appendMessage(chatId, MessageKind::System, QString("Failed to start encrypted session: %1").arg(e.what()),
+                      /*isSecret=*/true);
+        return;
+    }
     conversationActive_[chatId] = true;
     // Clicking this button is itself the deliberate reveal action for
     // this chat - see setConversationReady()'s identical reasoning for
@@ -2540,7 +2817,14 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
     const QVector<StoredMessage>& stored = conversationMessages_[chatId];
     bool attached = !stored.isEmpty() && stored.back().kind == kind && kind != MessageKind::System &&
                      stored.back().senderName == senderName && stored.back().isSecret == isSecret;
-    conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName, isSecret});
+    // Stamped with the real time now, not left at the default 0: this is
+    // a live append, genuinely happening now, and isSecret messages get
+    // cached (see cacheConversationHistory() below) - without a real
+    // value here, a cached-and-reloaded message would come back on the
+    // next launch still reading as "now" instead of when it actually was
+    // sent (see StoredMessage::date's own comment).
+    qint64 date = QDateTime::currentDateTime().toSecsSinceEpoch();
+    conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName, isSecret, date});
     if (isSecret) {
         hasSecretContent_.insert(chatId);
         if (chatId == currentChatId_) {
@@ -2557,7 +2841,8 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         // in place if this one attaches to it, and lays out and paints
         // this new one - O(1) amortized, not a full conversation rebuild,
         // which matters for a long-running session with many messages.
-        asCanvas(messages_)->appendItem(HistoryEntry{kind, text, filePath, attached, senderName, true, messageId});
+        asCanvas(messages_)->appendItem(
+            HistoryEntry{kind, text, filePath, attached, senderName, true, messageId, date});
         asCanvas(messages_)->scrollToBottom();
     }
     if (kind != MessageKind::System && isSecret) {
@@ -2656,10 +2941,50 @@ void MainWindow::renderCurrentConversation() {
 
     QVector<HistoryEntry> entries;
     entries.reserve(conversation.size());
-    for (int i = 0; i < conversation.size(); ++i) {
+    // Telegram delivers every photo of an album as its own separate
+    // message, sharing one non-zero media_album_id - grouping consecutive
+    // messages that share one into a single bubble (a mosaic, see
+    // paintItem()'s Ui::LayoutMediaGroup use) is entirely the client's own
+    // job, not something TDLib does for you. A run of length 1 (album id
+    // set but somehow only one member ever arrived/loaded) falls back to
+    // the ordinary single-image path below instead of a one-photo
+    // "mosaic".
+    for (int i = 0; i < conversation.size();) {
+        qint64 albumId = conversation[i].mediaAlbumId;
+        if (albumId != 0) {
+            int j = i;
+            QVector<QString> albumPaths;
+            while (j < conversation.size() && conversation[j].mediaAlbumId == albumId) {
+                if (!conversation[j].filePath.isEmpty()) {
+                    albumPaths.push_back(conversation[j].filePath);
+                }
+                ++j;
+            }
+            if (albumPaths.size() > 1) {
+                bool showTail = (j == conversation.size()) || !attached[j];
+                // The caption (if any) lives on exactly one message of the
+                // group in real Telegram - render it once, whichever
+                // member actually has it, not once per photo.
+                QString caption;
+                for (int k = i; k < j; ++k) {
+                    if (!conversation[k].text.isEmpty()) {
+                        caption = conversation[k].text;
+                        break;
+                    }
+                }
+                HistoryEntry entry{conversation[i].kind, caption,   QString(), attached[i], conversation[i].senderName,
+                                    showTail,             conversation[i].messageId, conversation[i].date};
+                entry.albumFilePaths = albumPaths;
+                entries.push_back(entry);
+                i = j;
+                continue;
+            }
+        }
         bool showTail = (i == conversation.size() - 1) || !attached[i + 1];
         entries.push_back(HistoryEntry{conversation[i].kind, conversation[i].text, conversation[i].filePath,
-                                        attached[i], conversation[i].senderName, showTail, conversation[i].messageId});
+                                        attached[i], conversation[i].senderName, showTail, conversation[i].messageId,
+                                        conversation[i].date});
+        ++i;
     }
     asCanvas(messages_)->setItems(entries);
     asCanvas(messages_)->scrollToBottom();
@@ -2742,37 +3067,48 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
     QString selected = asCanvas(messages_)->selectedText();
     QString text = selected.isEmpty() ? hit.text : selected;
 
-    QMenu menu(this);
-    QAction* copyAction = menu.addAction("Copy text");
+    // Phase 6b (UI.md 13c): Ui::PopupMenu (real rounded dark/light card),
+    // not QMenu's plain OS menu. deleteOnHide defaults true, so the raw
+    // new/no-delete here matches real tdesktop's own usage pattern - the
+    // menu deletes itself once dismissed.
+    auto* menu = new Ui::PopupMenu(this);
+    menu->addAction("Copy text", [text] { QGuiApplication::clipboard()->setText(text); });
     // Real Telegram-style editing (TDLib editMessageText, keyed by message
     // id) is not something crypto::CryptoLayer supports: it is a stream
     // session per companion with no message-id concept. "Edit" here is a
     // local convenience only: it does not change what the companion
     // already received, it just refills the input field so the corrected
     // text can be sent as a new message.
-    QAction* editAction = (kind == MessageKind::Outgoing) ? menu.addAction("Edit") : nullptr;
+    if (kind == MessageKind::Outgoing) {
+        menu->addAction("Edit", [this, text] {
+            input_->setPlainText(text);
+            input_->setFocus();
+        });
+    }
+    // "Reply" shows the quoted-preview bar (real Ui::MessageBar) and
+    // prepends the quote to the next message sent - see replyToText_'s own
+    // comment for why this is a local quoting convenience, not a true
+    // TDLib/protocol reply link (crypto::CryptoLayer messages have no
+    // message-id concept to link against).
+    menu->addAction("Reply", [this, text, kind] {
+        QString title = (kind == MessageKind::Outgoing) ? QString("You") : companionLabel_->text();
+        startReply(title, text);
+    });
     // "Forward" resends the text to the currently open conversation as a
     // new message, marked as forwarded - picking a different destination
     // chat is not implemented (would need its own picker UI).
-    QAction* forwardAction = menu.addAction("Forward");
-
-    QAction* chosen = menu.exec(asCanvas(messages_)->viewport()->mapToGlobal(pos));
-    if (chosen == nullptr) {
-        return;
-    }
-    if (chosen == copyAction) {
-        QGuiApplication::clipboard()->setText(text);
-    } else if (chosen == editAction) {
-        input_->setPlainText(text);
-        input_->setFocus();
-    } else if (chosen == forwardAction && session_ != nullptr && currentChatId_ != 0) {
+    menu->addAction("Forward", [this, text] {
+        if (session_ == nullptr || currentChatId_ == 0) {
+            return;
+        }
         QString forwarded = "Forwarded: " + text;
         // Always via sendText (encrypted) - Forward has never offered a
         // plain-send fallback the way onSendClicked()/sendFilePath() do,
         // so it is always isSecret=true to match.
         session_->sendText(currentChatId_, forwarded.toStdString());
         appendMessage(currentChatId_, MessageKind::Outgoing, forwarded, /*isSecret=*/true);
-    }
+    });
+    menu->popup(asCanvas(messages_)->viewport()->mapToGlobal(pos));
 }
 
 bool MainWindow::showConfirmSignaturesDialog(qlonglong chatId, const QString& mySign, const QString& companionSign) {
@@ -2860,6 +3196,12 @@ void MainWindow::onSendClicked() {
     if (text.isEmpty()) {
         return;
     }
+    // See replyToText_'s own comment: quoting is the only "reply" zkgram
+    // can do, there is no message-id to link against.
+    if (!replyToText_.isEmpty()) {
+        text = "> " + replyToText_.replace("\n", "\n> ") + "\n" + text;
+        cancelReply();
+    }
     // No active encrypted session for this chat -> send as a real,
     // unencrypted Telegram message instead (see
     // updateConversationControlsVisibility()/Session::sendPlainText()) -
@@ -2916,31 +3258,36 @@ void MainWindow::onSendFileClicked() {
     // выбирает inputMessagePhoto или inputMessageDocument по расширению
     // (см. looksLikeImagePath), поэтому выбранная через «Photo or Video»
     // картинка уйдёт именно фотографией, с превью на обеих сторонах.
-    QMenu menu(this);
-    QAction* photoAction = menu.addAction(glyphIcon(Glyph::Photo, kIconFg), "Photo or Video");
-    QAction* documentAction = menu.addAction(glyphIcon(Glyph::Document, kIconFg), "Document");
+    // Phase 6b (UI.md 13c): Ui::PopupMenu, real icons (zkgramIconPhoto/
+    // Document, the same st::-declared icons the buttons use) instead of
+    // QMenu's QIcon-from-pixmap conversion.
+    auto* menu = new Ui::PopupMenu(this);
+    menu->addAction(
+        "Photo or Video",
+        [this] {
+            QString filePath = QFileDialog::getOpenFileName(
+                this, "Send photo or video", QString(),
+                "Photos and videos (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm);;"
+                "All files (*)");
+            if (!filePath.isEmpty()) {
+                sendFilePath(filePath, "File: ");
+            }
+        },
+        &st::zkgramIconPhoto);
+    menu->addAction(
+        "Document",
+        [this] {
+            QString filePath = QFileDialog::getOpenFileName(this, "Send document");
+            if (!filePath.isEmpty()) {
+                sendFilePath(filePath, "File: ");
+            }
+        },
+        &st::zkgramIconDocument);
 
     // Меню раскрывается вверх от кнопки, а не вниз: скрепка стоит в самом
     // низу окна, и вниз ему просто некуда развернуться.
     QPoint anchor = sendFileButton_->mapToGlobal(QPoint(0, 0));
-    QAction* chosen = menu.exec(QPoint(anchor.x(), anchor.y() - menu.sizeHint().height()));
-    if (chosen == nullptr) {
-        return;
-    }
-
-    QString filePath;
-    if (chosen == photoAction) {
-        filePath = QFileDialog::getOpenFileName(
-            this, "Send photo or video", QString(),
-            "Photos and videos (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm);;"
-            "All files (*)");
-    } else if (chosen == documentAction) {
-        filePath = QFileDialog::getOpenFileName(this, "Send document");
-    }
-    if (filePath.isEmpty()) {
-        return;
-    }
-    sendFilePath(filePath, "File: ");
+    menu->popup(QPoint(anchor.x(), anchor.y() - menu->sizeHint().height()));
 }
 
 void MainWindow::onMicClicked() {
@@ -3022,11 +3369,11 @@ void MainWindow::onRecorderStateChanged() {
         if (!recordTimer_->isActive()) {
             recordTimer_->start();
         }
-        pauseRecordButton_->setIcon(glyphIcon(Glyph::Pause, kIconFg));
+        pauseRecordButton_->setIconOverride(nullptr);  // back to the style's default (pause) icon
         pauseRecordButton_->setToolTip("Pause recording");
     } else if (paused) {
         recordAccumulatedMs_ += recordElapsed_.elapsed();
-        pauseRecordButton_->setIcon(glyphIcon(Glyph::Play, kIconFg));
+        pauseRecordButton_->setIconOverride(&st::zkgramPlayButtonIcon, &st::zkgramPlayButtonIconOver);
         pauseRecordButton_->setToolTip("Resume recording");
     } else {
         recordTimer_->stop();
@@ -3067,7 +3414,8 @@ void MainWindow::updateSendButtonIcon() {
         return;  // onRecorderStateChanged() owns the icon while actively recording
     }
     bool hasText = !input_->toPlainText().trimmed().isEmpty();
-    sendButton_->setIcon(hasText ? glyphIcon(Glyph::Send, kIconAccentFg) : glyphIcon(Glyph::Mic, kIconFg));
+    sendButton_->setIconOverride(hasText ? &st::zkgramSendButtonIcon : nullptr,
+                                  hasText ? &st::zkgramSendButtonIconOver : nullptr);
     sendButton_->setToolTip(hasText ? "Send" : "Record a voice message");
 }
 

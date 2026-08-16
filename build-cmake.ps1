@@ -6,7 +6,14 @@ param(
     [string]$TdPrefix = "",
     [string]$QtPrefix = "",
     [string]$VcpkgBinDir = "",
-    [switch]$Clean
+    # Builds and links the vendored real Telegram Desktop UI toolkit
+    # (third_party/desktop-app/lib_ui and friends) into zkgram.exe - see
+    # zkgram/.claude/UI.md section 13c and zkgram/docs/README.md for what
+    # this actually is. Only meaningful with -Ui qt. Off by default: src/ui/qt/
+    # is mid-migration (some widgets use it, most do not yet), and this adds
+    # real build cost (lib_ui alone is 446 files) for something not every
+    # -Ui qt build needs.
+    [switch]$VendorLibUi
 )
 
 if ($env:OS -ne "Windows_NT") {
@@ -46,6 +53,22 @@ if (-not $preferredCmake) {
 
 $cmakeArgs = @("-S", ".", "-B", "build", "-DPYBIND11_FINDPYTHON=ON", "-DZKGRAM_UI=$Ui")
 if ($PythonExe -ne "") { $cmakeArgs += "-DPython3_EXECUTABLE=$PythonExe" }
+if ($VendorLibUi) {
+    if ($Ui -ne "qt") {
+        Write-Error "-VendorLibUi requires -Ui qt."
+        exit 1
+    }
+    $cmakeArgs += "-DZKGRAM_VENDOR_LIB_UI=ON"
+    # third_party/desktop-app's own external_jpeg/external_lz4/external_zlib
+    # come from vcpkg's x64-windows (dynamic) triplet specifically, not the
+    # x64-windows-static-md-release one TDLib/OpenSSL use above - see the
+    # comment above zkgram_allow_nonsystem32_deps in
+    # third_party/desktop-app/CMakeLists.txt.
+    $cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_xxHash=ON"
+    $cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_range-v3=ON"
+    $cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_tl-expected=ON"
+    $cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON"
+}
 
 $prefixPaths = @()
 if ($TdPrefix -ne "") { $prefixPaths += $TdPrefix }
@@ -55,7 +78,11 @@ if ($prefixPaths.Count -gt 0) { $cmakeArgs += "-DCMAKE_PREFIX_PATH=$($prefixPath
 & $cmakeExe @cmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& $cmakeExe --build build --config $Config
+# /m:1 (single-threaded MSBuild): this machine has 5.9GB RAM total, and
+# parallel MSBuild (the default) has repeatedly failed here with
+# "C1060: compiler is out of heap space" once lib_ui's ~446 files are in
+# the build - see zkgram/.claude/UI.md section 13c.
+& $cmakeExe --build build --config $Config -- /m:1
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # TDLib is now built against OpenSSL/zlib from vcpkg's x64-windows-static-md

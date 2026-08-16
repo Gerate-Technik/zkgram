@@ -3,7 +3,6 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QMap>
-#include <QPlainTextEdit>
 #include <QPoint>
 #include <QSet>
 #include <QString>
@@ -38,24 +37,40 @@ namespace zkgram::core {
 class Session;
 }
 
+namespace Ui {
+class IconButton;
+class RoundButton;
+class InputField;
+class MaskedInputField;
+class PasswordInput;
+class FlatLabel;
+class MessageBar;
+}
+
 namespace zkgram::ui::qt {
 
-// Fixed-height multi-line input (Telegram-style): Enter sends (emits
-// submitted(), does not insert a newline), Shift+Enter inserts a newline.
-// A plain QLineEdit cannot do this (no multi-line, no way to distinguish
-// Enter from Shift+Enter), hence the small subclass instead of a signal
-// connected to QLineEdit::returnPressed.
-class ChatInput : public QPlainTextEdit {
+// Phase 6b (UI.md 13c): thin Q_OBJECT wrapper around the real Ui::InputField
+// (Enter sends via its own SubmitSettings::Enter, Shift+Enter inserts a
+// newline - the exact real composer field behavior, not an imitation) -
+// exposes the same toPlainText()/setPlainText()/clear()/submitted() surface
+// the rest of this file already used with the old QPlainTextEdit-based
+// ChatInput, so call sites did not need to change.
+class ChatInput : public QWidget {
     Q_OBJECT
 
 public:
     explicit ChatInput(QWidget* parent = nullptr);
 
+    QString toPlainText() const;
+    void setPlainText(const QString& text);
+    void clear();
+
 Q_SIGNALS:
     void submitted();
+    void textChanged();
 
-protected:
-    void keyPressEvent(QKeyEvent* event) override;
+private:
+    Ui::InputField* field_ = nullptr;
 };
 
 // One full-window onboarding step, styled after the tdesktop intro screen
@@ -104,12 +119,17 @@ private Q_SLOTS:
     void onNextClicked();
 
 private:
-    QLabel* logo_;
-    QLabel* title_;
-    QLabel* subtitle_;
-    QLineEdit* input_;
-    QLabel* error_;
-    QPushButton* next_;
+    // Which of plainInput_/passwordInput_ is showing for the current slide
+    // - see runSlide()'s masked param.
+    QWidget* activeInput() const;
+
+    QLabel* logo_;  // just a static pixmap, no text styling to port
+    Ui::FlatLabel* title_;
+    Ui::FlatLabel* subtitle_;
+    Ui::MaskedInputField* plainInput_;
+    Ui::PasswordInput* passwordInput_;
+    Ui::FlatLabel* error_;
+    Ui::RoundButton* next_;
     QString result_;
     Validator validator_;
     QEventLoop* loop_ = nullptr;
@@ -242,6 +262,12 @@ private Q_SLOTS:
     // brand new session this run).
     void onSecretModeToggleClicked();
 
+    // Shows replyBar_ with a quoted preview of text (see replyToText_'s own
+    // comment for why this is a local quoting convenience, not a true
+    // protocol-level reply link) and focuses the composer.
+    void startReply(const QString& senderTitle, const QString& text);
+    void cancelReply();
+
 protected:
     void closeEvent(class QCloseEvent* event) override;
 
@@ -270,6 +296,17 @@ private:
         // elsewhere cannot accidentally show secret content as if it
         // were plain.
         bool isSecret = false;
+        // Real unix-seconds send/receive time, when known (plain TDLib
+        // history/live messages via PlainMessage::date, or cached
+        // CryptoLayer history via core::LocalCache) - 0 means "unknown,
+        // treat as happening right now" (a message genuinely being
+        // appended live, not loaded from history, real time). See
+        // buildItem() in main_window.cpp for where this actually gets
+        // rendered instead of QDateTime::currentDateTime().
+        qint64 date = 0;
+        // TDLib's media_album_id - see telegram::PlainMessage::mediaAlbumId's
+        // own comment. 0 for a standalone (non-grouped) message.
+        qint64 mediaAlbumId = 0;
     };
 
     // Appends to conversationMessages_[chatId] always; only actually drawn
@@ -420,13 +457,23 @@ private:
     QWidget* writeRestrictionBar_;
     // Shown alongside the input row (not instead of it) when the selected
     // chat has no encrypted session - see updateConversationControlsVisibility().
-    QPushButton* startEncryptionButton_;
+    Ui::RoundButton* startEncryptionButton_;
     // Shown above the input row whenever it is in "plain send" mode (see
     // onSendClicked()) - messages typed there go straight to Telegram
     // unencrypted, this is the one and only place that is made obvious,
     // since silently sending unencrypted from an app whose whole point is
     // encryption would be a real trust problem, not just a missing label.
     QLabel* plainSendWarning_;
+    // Reply-to-message preview (Ui::MessageBar, real widget - see
+    // zkgram_chat_style_stub.style's defaultMessageBar comment). No true
+    // TDLib/protocol-level reply link exists for crypto::CryptoLayer
+    // messages (a stream session has no message-id concept, same
+    // constraint already noted for "Edit"/"Forward") - replying quotes the
+    // original text into the sent message instead, this bar is only the
+    // picker/preview UI for that.
+    QWidget* replyBarRow_ = nullptr;
+    Ui::MessageBar* replyBar_ = nullptr;
+    QString replyToText_;
     ChatInput* input_;
     // One button, not two - real Telegram Desktop's composer has a single
     // button that shows a mic icon when the field is empty and a send
@@ -434,15 +481,15 @@ private:
     // telegram_fork/tdesktop's ui/controls/send_button.h/.cpp), not a
     // separate always-visible mic button next to an always-visible send
     // button.
-    QPushButton* sendButton_;
-    QPushButton* sendFileButton_;
+    Ui::IconButton* sendButton_;
+    Ui::IconButton* sendFileButton_;
     QLineEdit* searchInput_;
     QLabel* companionAvatar_;
     QLabel* companionLabel_;
     // Per-chat secret-mode toggle/indicator, next to companionLabel_ in
     // the conversation header - see updateSecretModeIndicator() and
     // secretModeOn_'s own comment for what this actually controls.
-    QPushButton* secretModeToggle_;
+    Ui::RoundButton* secretModeToggle_;
     QLabel* statusDot_;
     QLabel* statusLabel_;
 
@@ -534,9 +581,9 @@ private:
     QWidget* recordBar_;
     QLabel* recordDot_;
     QLabel* recordTime_;
-    QPushButton* cancelRecordButton_;
-    QPushButton* pauseRecordButton_;
-    QPushButton* sendRecordButton_;
+    Ui::IconButton* cancelRecordButton_;
+    Ui::IconButton* pauseRecordButton_;
+    Ui::IconButton* sendRecordButton_;
     QTimer* recordTimer_;
     QElapsedTimer recordElapsed_;
     qint64 recordAccumulatedMs_ = 0;

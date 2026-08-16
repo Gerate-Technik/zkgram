@@ -1,0 +1,106 @@
+name: Compiler Integration Tests
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# These jobs are correlated with the officially supported compilers
+# and toolsets. If you change any versions, please update README.md.
+
+jobs:
+  gcc:
+    strategy:
+      matrix:
+        gcc_version: [ 12, 13, 14 ]
+        build_type: [ Debug, Release ]
+        cxx_version: [ 14, 17, 20, 23 ]
+        exclude:
+          # https://github.com/google/googletest/issues/4232
+          # Looks like GoogleTest is not interested in making version 1.14
+          # work with gcc-12.
+          - gcc_version: 12
+            cxx_version: 20
+          - gcc_version: 12
+            cxx_version: 23
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run CMake (configure, build, test)
+        uses: ./.github/workflows/cmake
+        with:
+          cmake_preset: gcc-${{ matrix.cxx_version }}-${{ matrix.build_type == 'Debug' && 'debug' || 'release' }}
+          
+  clang:
+    strategy:
+      matrix:
+        clang_version: [ 16, 17, 18 ]
+        build_type: [ Debug, Release ]
+        cxx_version: [ 14, 17, 20, 23 ]
+        exclude:
+          # https://github.com/llvm/llvm-project/issues/93734
+          # Looks like clang fixed this issue in clang-18, but won't backport
+          # the fix.
+          - clang_version: 17
+            cxx_version: 23
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+     
+      - name: Run CMake (configure, build, test)
+        uses: ./.github/workflows/cmake
+        with:
+          cmake_preset: clang-${{ matrix.cxx_version }}-${{ matrix.build_type == 'Debug' && 'debug' || 'release' }}
+
+  xcode:
+    strategy:
+      matrix:
+        xcode_version: [ '16.4' ]
+        build_type: [ Debug, Release ]
+        cxx_version: [ 14, 17, 20, 23 ]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: select xcode version
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode_version }}.app
+
+      - name: Run CMake (configure, build, test)
+        uses: ./.github/workflows/cmake
+        with:
+          cmake_preset: clang-${{ matrix.cxx_version }}-${{ matrix.build_type == 'Debug' && 'debug' || 'release' }}
+          extra_cmake_configure_args: '-DCMAKE_CXX_FLAGS="-isysroot \"$(xcode-select --print-path)/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk\""'
+
+  msvc:
+    strategy:
+      matrix:
+        image: [ windows-2022, windows-2025 ]
+        build_type: [ Debug, Release ]
+        toolset: [ 'msvc', 'ClangCL' ]
+        cxx_version: [ 14, 17, 20, 23 ]
+        include:
+          # Regular MSVC builds use Ninja (from preset)
+          - toolset: 'msvc'
+            generator_override: ''
+          # ClangCL builds require Visual Studio generator
+          - toolset: 'ClangCL'
+            generator_override: '-G "Visual Studio 17 2022" -T ClangCL'
+    runs-on: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: microsoft/setup-msbuild@v3
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run CMake (configure, build, test)
+        uses: ./.github/workflows/cmake
+        with:
+          cmake_preset: msvc-${{ matrix.cxx_version }}-${{ matrix.build_type == 'Debug' && 'debug' || 'release' }}
+          extra_cmake_configure_args: ${{ matrix.generator_override }}
+          extra_cmake_build_args: ${{ matrix.toolset == 'ClangCL' && format('--config {0}', matrix.build_type) || '' }}
+          extra_ctest_args: ${{ matrix.toolset == 'ClangCL' && format('-C {0}', matrix.build_type) || '' }}

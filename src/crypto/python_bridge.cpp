@@ -28,6 +28,12 @@
 #ifndef ZKGRAM_ROOT
 #define ZKGRAM_ROOT "."
 #endif
+// See this define's own comment in CMakeLists.txt - the embedded
+// interpreter cannot find third-party pip packages (site-packages)
+// without this, even though it finds its own bundled stdlib fine.
+#ifndef ZKGRAM_PYTHON_SITE_PACKAGES
+#define ZKGRAM_PYTHON_SITE_PACKAGES ""
+#endif
 
 namespace zkgram::crypto {
 
@@ -78,6 +84,15 @@ private:
         path.append(cryptolayerRoot + "/cryptolayer/src");
         path.append(cryptolayerRoot + "/cryptolayer-module-interface");
         path.append(zkgramRoot + "/python");
+
+        // See ZKGRAM_PYTHON_SITE_PACKAGES's own comment above/in
+        // CMakeLists.txt - without this, pip-installed packages like
+        // cryptography/brotli are invisible to the embedded interpreter
+        // even though they are genuinely installed.
+        std::string sitePackages = ZKGRAM_PYTHON_SITE_PACKAGES;
+        if (!sitePackages.empty()) {
+            path.append(sitePackages);
+        }
     }
 
     // cryptolayer/src/crypto_layer.py and levels/base.py both do

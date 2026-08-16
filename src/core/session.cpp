@@ -183,7 +183,7 @@ std::vector<PlainMessage> convertHistory(const std::vector<telegram::PlainMessag
     converted.reserve(messages.size());
     for (const auto& message : messages) {
         converted.push_back(PlainMessage{message.id, message.isOutgoing, message.text, message.date, message.photoPath,
-                                          message.senderName});
+                                          message.senderName, message.mediaAlbumId});
     }
     return converted;
 }

@@ -77,12 +77,6 @@ QWidget#writeRestrictionBar {
     border: none;
 }
 
-QPushButton#startEncryptionButton {
-    border-radius: 15px;
-    padding: 0 16px;
-    font-size: 13px;
-}
-
 QLabel#plainSendWarning {
     color: #999999;
     font-size: 13px;
@@ -111,23 +105,6 @@ QLineEdit:focus {
     border: 1px solid #37a1de;
 }
 
-QPushButton {
-    border: none;
-    border-radius: 16px;
-    padding: 6px 14px;
-    background-color: #40a7e3;
-    color: white;
-    font-weight: 600;
-}
-
-QPushButton:hover {
-    background-color: #39a5db;
-}
-
-QPushButton:pressed {
-    background-color: #2095d0;
-}
-
 /* The composer bar itself (see #composeBar in main_window.cpp) -
    historyComposeAreaBg background (white, #ffffff), no rounding
    (radius: 0px in chat_helpers.style's ComposeControls struct) - the
@@ -151,41 +128,10 @@ QLabel#recordTime {
     font-size: 14px;
 }
 
-/* historyComposeField: border: 0px, borderActive: 0px in
-   chat_helpers.style - genuinely no border/outline at all, on focus or
-   otherwise, and no radius property either (it is not a separate rounded
-   box, just plain text flowing directly on the composer's own
-   background). */
-QPlainTextEdit#composeField {
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 0;
-    color: #222222;
-}
-
-/* Attach/send-or-mic buttons - flat, circular hover highlight, no fill
-   otherwise, matching tdesktop's own IconButton-based composer chrome
-   (historyAttach/historySend in chat_helpers.style, both 44x46) instead
-   of a colored text pill. Icons themselves are drawn in code, see
-   Glyph/glyphIcon in icons.cpp - they are vector paths re-rendered at the
-   requested size and device pixel ratio, so there is nothing here (and no
-   image asset anywhere) to swap when the button size or the screen's
-   scaling changes. */
-QPushButton#composeIconButton {
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 0;
-}
-
-QPushButton#composeIconButton:hover {
-    background-color: #f1f1f1;
-}
-
-QPushButton#composeIconButton:pressed {
-    background-color: #e5e5e5;
-}
+/* ChatInput (composeField) is a real Ui::InputField now (see main_window.hpp),
+   and the attach/send-or-mic buttons are real Ui::IconButton (zkgramAttachButton/
+   zkgramSendButton in zkgram_icons.style) - both paint themselves, ignoring
+   this stylesheet entirely, same reasoning as the bubble comment below. */
 
 /* Outgoing/incoming/photo message bubbles are custom-painted, not
    QLabels (see HistoryCanvas in main_window.cpp) - color, corner radius,
@@ -209,46 +155,8 @@ QWidget#authSlide {
     background-color: #ffffff;
 }
 
-QLabel#authTitle {
-    font-size: 22px;
-    font-weight: 600;
-    color: #222222;
-}
-
-QLabel#authSubtitle {
-    font-size: 13px;
-    color: #707579;
-}
-
-QLineEdit#authInput {
-    border: none;
-    border-bottom: 2px solid #dcdfe3;
-    border-radius: 0;
-    padding: 10px 4px;
-    font-size: 15px;
-    background: transparent;
-}
-
-QLineEdit#authInput:focus {
-    border-bottom: 2px solid #37a1de;
-}
-
-QLabel#authError {
-    color: #e41e3f;
-    font-size: 12px;
-}
-
-QPushButton#authNext {
-    border-radius: 20px;
-    padding: 10px 0;
-    font-size: 14px;
-    background-color: #40a7e3;
-}
-
-QPushButton#authNext:hover {
-    background-color: #39a5db;
-}
-
-QPushButton#authNext:pressed {
-    background-color: #2095d0;
-}
+/* title_/subtitle_/error_ are real Ui::FlatLabel (zkgramAuthLabel style),
+   plainInput_/passwordInput_ are real Ui::MaskedInputField/Ui::PasswordInput,
+   next_ is a real Ui::RoundButton (defaultActiveButton) - all paint
+   themselves from their own .style declarations, ignoring this stylesheet
+   entirely (see zkgram_icons.style, zkgram_chat_style_stub.style). */

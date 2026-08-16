@@ -1,0 +1,185 @@
+// This file is part of zkgram.
+//
+// Icon declarations for the glyphs used by zkgram's own UI (composer,
+// attach menu, record bar, search fields, chat list). Every asset here is a
+// real Telegram Desktop icon (Telegram/Resources/icons/... in
+// telegram_fork, vendored under third_party/desktop-app/Resources/icons/),
+// not a hand-drawn approximation - see zkgram/.claude/UI.md, section 6.
+//
+// Color roles match what the pre-migration code in main_window.cpp already
+// documented as the intended palette entries for each glyph (kIconFg,
+// kIconAccentFg, kIconDestructiveFg comments) - this file makes that
+// intent literal instead of a hardcoded hex copy that can drift, see
+// zkgram/docs/README.md for one such drift already found (dialogsBg).
+
+using "ui/colors.palette";
+using "ui/widgets/widgets.style";
+
+// Phase 6b (UI.md 13c): AuthSlide's title/subtitle/error - defaultFlatLabel
+// itself aligns left, but the auth card centers everything (was
+// QLabel::setAlignment(Qt::AlignCenter) before the Ui::FlatLabel swap).
+zkgramAuthLabel: FlatLabel(defaultFlatLabel) {
+	align: align(center);
+}
+
+// The composer's own message field - real historyComposeField values
+// (chat_helpers.style, not vendored - see zkgram_chat_style_stub.style's
+// own comments for why chat_helpers.style itself is not pulled in) ported
+// directly rather than left on defaultInputField, which is a floating-
+// label FORM field style (semibold placeholder that shrinks/turns blue on
+// focus, heightMin 55px) - wrong for a single-line chat composer, and the
+// 55px minimum overflowing the 36px composer row is exactly what clipped
+// the placeholder text in the screenshot that found this bug.
+zkgramComposeField: InputField(defaultInputField) {
+	textMargins: margins(0px, 0px, 0px, 0px);
+	textAlign: align(left);
+	heightMin: 36px;
+	heightMax: 72px;
+	placeholderFg: placeholderFg;
+	placeholderFgActive: placeholderFgActive;
+	placeholderFgError: placeholderFgActive;
+	placeholderMargins: margins(2px, 0px, 2px, 0px);
+	placeholderAlign: align(topleft);
+	placeholderScale: 0.;
+	placeholderFont: normalFont;
+	placeholderShift: -50px;
+	border: 0px;
+	borderActive: 0px;
+	duration: 100;
+}
+
+zkgramIconSend: icon {{ "chat/input_send", windowBgActive }};
+zkgramIconMic: icon {{ "chat/input_record", menuIconFg }};
+zkgramIconAttach: icon {{ "chat/input_attach", menuIconFg }};
+zkgramIconPhoto: icon {{ "menu/image", menuIconFg }};
+zkgramIconDocument: icon {{ "menu/file", menuIconFg }};
+zkgramIconTrash: icon {{ "menu/delete", attentionButtonFg }};
+zkgramIconPause: icon {{ "media_pause", menuIconFg }};
+zkgramIconPlay: icon {{ "media_play", menuIconFg }};
+zkgramIconSearch: icon {{ "top_bar_search", menuIconFg }};
+zkgramIconCheck: icon {{ "history_sent", windowBgActive }};
+// Default "encrypted session" indicator (sidebar row preview, secret-mode
+// toggle before its real state is known) - boxTextFgGood is the closest
+// existing role to the old hand-picked #4fae4e, not a literal color pick.
+zkgramIconLock: icon {{ "chat/mini_lock", boxTextFgGood }};
+// White variant for: a selected sidebar row (blue background, green would
+// not read - see the old kIconEncryptedFg comment this replaces) and the
+// secret-mode toggle button, which is always on a solid-colored background.
+zkgramIconLockOnActive: icon {{ "chat/mini_lock", windowFgActive }};
+
+// Phase 6b (UI.md 13c): the real message bubble tail asset, ported directly
+// from Telegram/SourceFiles/ui/chat/chat_style.style in telegram_fork
+// (historyBubbleTailInLeft/OutLeft/InRight/OutRight there) - not the whole
+// ChatStyle system (that needs ui/chat/chat_style.h + styles/style_chat.style
+// + styles/style_chat_style.h, a much bigger vendoring task, see
+// avatarPixmap()'s comment in main_window.cpp for the same tradeoff already
+// made for EmptyUserpic). The old hand-drawn cubicTo() teardrop shape
+// (main_window.cpp's tailPath()) was a guess at this asset's silhouette,
+// not the real one - this icon replaces it exactly.
+zkgramBubbleTailInLeft: icon {{ "bubble_tail", msgInBg }};
+zkgramBubbleTailOutLeft: icon {{ "bubble_tail", msgOutBg }};
+zkgramBubbleTailInRight: icon {{ "bubble_tail-flip_horizontal", msgInBg }};
+zkgramBubbleTailOutRight: icon {{ "bubble_tail-flip_horizontal", msgOutBg }};
+
+// Phase 5 (UI.md section 13c): Ui::IconButton instances for the composer's
+// icon-only buttons, replacing the hand-rolled RippleButton. Sizes match the
+// pre-migration setFixedSize() calls they replace, not invented values.
+
+zkgramAttachButtonIcon: icon {{ "chat/input_attach", menuIconFg }};
+zkgramAttachButtonIconOver: icon {{ "chat/input_attach", menuIconFgOver }};
+zkgramAttachButton: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: zkgramAttachButtonIcon;
+	iconOver: zkgramAttachButtonIconOver;
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+// sendButton_ toggles between a mic icon (empty composer) and a send icon
+// (composer has text) at runtime via Ui::IconButton::setIconOverride() - the
+// style default is the mic state, zkgramSendButtonIcon/IconOver (below) is
+// what main_window.cpp overrides to for the send state.
+zkgramMicButtonIcon: icon {{ "chat/input_record", menuIconFg }};
+zkgramMicButtonIconOver: icon {{ "chat/input_record", menuIconFgOver }};
+zkgramSendButtonIcon: icon {{ "chat/input_send", windowBgActive }};
+zkgramSendButtonIconOver: icon {{ "chat/input_send", windowBgActive }};
+zkgramSendButton: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: zkgramMicButtonIcon;
+	iconOver: zkgramMicButtonIconOver;
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+zkgramCancelRecordButtonIcon: icon {{ "menu/delete", attentionButtonFg }};
+zkgramCancelRecordButtonIconOver: icon {{ "menu/delete", attentionButtonFg }};
+zkgramCancelRecordButton: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: zkgramCancelRecordButtonIcon;
+	iconOver: zkgramCancelRecordButtonIconOver;
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+// pauseRecordButton_ toggles Pause/Play the same way sendButton_ toggles
+// Mic/Send - default style is the pause state.
+zkgramPauseButtonIcon: icon {{ "media_pause", menuIconFg }};
+zkgramPauseButtonIconOver: icon {{ "media_pause", menuIconFgOver }};
+zkgramPlayButtonIcon: icon {{ "media_play", menuIconFg }};
+zkgramPlayButtonIconOver: icon {{ "media_play", menuIconFgOver }};
+zkgramPauseRecordButton: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: zkgramPauseButtonIcon;
+	iconOver: zkgramPauseButtonIconOver;
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+zkgramSendRecordButtonIcon: icon {{ "chat/input_send", windowBgActive }};
+zkgramSendRecordButtonIconOver: icon {{ "chat/input_send", windowBgActive }};
+zkgramSendRecordButton: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: zkgramSendRecordButtonIcon;
+	iconOver: zkgramSendRecordButtonIconOver;
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+// secretModeToggle_'s icon+text pill. Base style reuses defaultActiveButton
+// (blue "Secret" state, an existing tdesktop instance, not invented); the
+// red "Normal" state is set at runtime via RoundButton::setBrushOverride()
+// in main_window.cpp, not a second .style instance - there is no existing
+// palette role for a solid destructive-red button background (only
+// attentionButtonBgOver, a much lighter hover tint), so this one runtime
+// QColor override is a deliberate, flagged exception to UI.md section 3's
+// "no literal colors" rule rather than a silent one. iconPosition/padding
+// are a first pass, not copied from an existing icon+text RoundButton
+// instance (none of lib_ui's own RoundButton derivatives actually combine
+// both) - worth a visual check against the old QSS layout.
+zkgramSecretModeToggle: RoundButton(defaultActiveButton) {
+	icon: zkgramIconLockOnActive;
+	iconOver: zkgramIconLockOnActive;
+	iconPosition: point(10px, 7px);
+	padding: margins(28px, 0px, 10px, 0px);
+	height: 28px;
+}

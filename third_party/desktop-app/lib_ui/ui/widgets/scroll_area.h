@@ -1,0 +1,339 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+#pragma once
+
+#include "ui/rp_widget.h"
+#include "ui/ui_utility.h"
+#include "ui/effects/animations.h"
+#include "base/object_ptr.h"
+#include "base/qt_connection.h"
+#include "base/timer.h"
+#include "styles/style_widgets.h"
+
+#include <QtWidgets/QScrollArea>
+#include <QtGui/QtEvents>
+
+class QScroller;
+
+namespace Ui {
+
+// Touch flick ignore 3px.
+inline constexpr auto kFingerAccuracyThreshold = 3;
+
+// 4000px per second.
+inline constexpr auto kMaxScrollAccelerated = 4000;
+
+// 2500px per second.
+inline constexpr auto kMaxScrollFlick = 2500;
+
+enum class TouchScrollState {
+	Manual, // Scrolling manually with the finger on the screen
+	Auto, // Scrolling automatically
+	Acceleration // Scrolling automatically but a finger is on the screen
+};
+
+class ScrollArea;
+
+struct ScrollToRequest {
+	ScrollToRequest(int ymin, int ymax)
+	: ymin(ymin)
+	, ymax(ymax) {
+	}
+
+	int ymin = 0;
+	int ymax = 0;
+
+};
+
+extern const char kOptionQScroller[];
+
+// Tune a QScroller to approximate macOS native momentum. QScroller only
+// provides in-range kinetics: its overshoot is always disabled - ScrollArea
+// has no overscroll at all, and ElasticScroll implements its own rubber-band
+// overscroll physics fed from the raw events.
+void SetupScrollerPhysics(not_null<QScroller*> scroller);
+
+// Resends the scroll-prepare event and, while a fling is in progress, forces
+// the momentum segment to be rebuilt from the current velocity. QScroller bakes
+// the whole trajectory (including edge clamps) at gesture end and
+// resendPrepareEvent() only shifts it, so without the rebuild a fling stops at
+// the old (shifted) edge; with it, the fling flows into content inserted
+// mid-fling. Null- and state-safe.
+void ResendScrollerPrepare(QScroller *scroller);
+
+class ScrollerStopper final : public QObject {
+public:
+	static ScrollerStopper &Instance();
+
+	void activate(not_null<QScroller*> scroller);
+
+private:
+	ScrollerStopper();
+
+	bool eventFilter(QObject *obj, QEvent *e) override;
+
+	struct {
+		QPointer<QScroller> scroller;
+		base::qt_connection connection;
+	} _active;
+
+	QPoint _mousePos;
+
+};
+
+class ScrollShadow final : public QWidget {
+public:
+	enum class Type {
+		Top,
+		Bottom,
+	};
+	ScrollShadow(ScrollArea *parent, const style::ScrollArea *st);
+
+	void paintEvent(QPaintEvent *e);
+	void changeVisibility(bool shown);
+
+private:
+	const style::ScrollArea *_st;
+
+};
+
+class ScrollBar : public RpWidget {
+public:
+	struct ShadowVisibility {
+		ScrollShadow::Type type;
+		bool visible = false;
+	};
+	ScrollBar(ScrollArea *parent, bool vertical, const style::ScrollArea *st);
+
+	void recountSize();
+	void updateBar(bool force = false);
+	void setTopSkip(int skip);
+	void setBottomSkip(int skip);
+
+	void hideTimeout(crl::time dt);
+
+	[[nodiscard]] auto shadowVisibilityChanged() const
+		-> rpl::producer<ShadowVisibility>;
+
+protected:
+	void paintEvent(QPaintEvent *e) override;
+	void enterEventHook(QEnterEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
+	void mouseMoveEvent(QMouseEvent *e) override;
+	void mousePressEvent(QMouseEvent *e) override;
+	void mouseReleaseEvent(QMouseEvent *e) override;
+	void resizeEvent(QResizeEvent *e) override;
+	void wheelEvent(QWheelEvent *e) override;
+
+private:
+	ScrollArea *area();
+
+	void setOver(bool over);
+	void setOverBar(bool overbar);
+	void setMoving(bool moving);
+
+	void hideTimer();
+
+	const style::ScrollArea *_st;
+
+	bool _vertical = true;
+	bool _hiding = false;
+	bool _over = false;
+	bool _overbar = false;
+	bool _moving = false;
+	bool _topSh = false;
+	bool _bottomSh = false;
+	int _topSkip = 0;
+	int _bottomSkip = 0;
+
+	QPoint _dragStart;
+	QScrollBar *_connected;
+
+	int32 _startFrom, _scrollMax;
+
+	crl::time _hideIn = 0;
+	base::Timer _hideTimer;
+
+	Animations::Simple _a_over;
+	Animations::Simple _a_barOver;
+	Animations::Simple _a_opacity;
+
+	QRect _bar;
+
+	rpl::event_stream<ShadowVisibility> _shadowVisibilityChanged;
+};
+
+class ScrollArea : public RpWidgetBase<QScrollArea> {
+public:
+	using Parent = RpWidgetBase<QScrollArea>;
+	ScrollArea(QWidget *parent, const style::ScrollArea &st = st::defaultScrollArea, bool handleTouch = true);
+
+	int scrollWidth() const;
+	int scrollHeight() const;
+	int scrollLeftMax() const;
+	int scrollTopMax() const;
+	int scrollLeft() const;
+	int scrollTop() const;
+
+	template <typename Widget>
+	QPointer<Widget> setOwnedWidget(object_ptr<Widget> widget) {
+		auto result = QPointer<Widget>(widget);
+		doSetOwnedWidget(std::move(widget));
+		return result;
+	}
+	template <typename Widget>
+	object_ptr<Widget> takeWidget() {
+		return object_ptr<Widget>::fromRaw(
+			static_cast<Widget*>(doTakeWidget().release()));
+	}
+
+	void rangeChanged(int oldMax, int newMax, bool vertical);
+
+	void updateBars();
+	void setVerticalBarTopSkip(int skip);
+	void setVerticalBarBottomSkip(int skip);
+
+	bool focusNextPrevChild(bool next) override;
+	void setMovingByScrollBar(bool movingByScrollBar);
+
+	bool viewportEvent(QEvent *e) override;
+	void keyPressEvent(QKeyEvent *e) override;
+
+	auto scrollTopValue() const {
+		return _scrollTopUpdated.events_starting_with(scrollTop());
+	}
+	auto scrollTopChanges() const {
+		return _scrollTopUpdated.events();
+	}
+
+	void scrollTo(ScrollToRequest request);
+	void scrollToWidget(not_null<QWidget*> widget);
+	[[nodiscard]] int computeScrollToX(int toLeft, int toRight);
+	[[nodiscard]] int computeScrollToY(int toTop, int toBottom);
+
+	void scrollToX(int toLeft, int toRight = -1);
+	void scrollToY(int toTop, int toBottom = -1);
+	void disableScroll(bool dis);
+	void scrolled();
+	void innerResized();
+
+	void setCustomWheelProcess(Fn<bool(not_null<QWheelEvent*>)> process) {
+		_customWheelProcess = std::move(process);
+	}
+	void setCustomTouchProcess(Fn<bool(not_null<QTouchEvent*>)> process) {
+		_customTouchProcess = std::move(process);
+	}
+
+	// Receives wheel input on the axis this scroll doesn't handle
+	// (horizontal): without lockWheelDirection() every event where that
+	// axis dominates, with it whole gestures locked to that axis.
+	void setCrossAxisWheelProcess(
+			Fn<bool(QPoint, Qt::ScrollPhase)> process) {
+		_crossAxisWheelProcess = std::move(process);
+	}
+
+	// Locks each phased wheel gesture to the axis chosen at its start:
+	// cross-axis gestures go whole to the cross-axis process (or are
+	// discarded) and never scroll this area; NoScrollPhase (classic
+	// wheel) events keep per-event routing.
+	void lockWheelDirection() {
+		_wheelDirectionLocked = true;
+	}
+
+	[[nodiscard]] rpl::producer<> scrolls() const;
+	[[nodiscard]] rpl::producer<> innerResizes() const;
+	[[nodiscard]] rpl::producer<> geometryChanged() const;
+
+	[[nodiscard]] rpl::producer<bool> touchMaybePressing() const;
+
+protected:
+	bool eventHook(QEvent *e) override;
+	bool eventFilter(QObject *obj, QEvent *e) override;
+
+	void resizeEvent(QResizeEvent *e) override;
+	void moveEvent(QMoveEvent *e) override;
+	void touchEvent(QTouchEvent *e);
+
+	void enterEventHook(QEnterEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
+
+protected:
+	void scrollContentsBy(int dx, int dy) override;
+
+private:
+	void doSetOwnedWidget(object_ptr<QWidget> widget);
+	object_ptr<QWidget> doTakeWidget();
+
+	bool filterOutTouchEvent(QEvent *e);
+	void touchScrollTimer();
+	bool touchScroll(const QPoint &delta);
+	void touchScrollUpdated(const QPoint &screenPos);
+
+	void touchResetSpeed();
+	void touchUpdateSpeed();
+	void touchDeaccelerate(int32 elapsed);
+
+	bool _disabled = false;
+	bool _movingByScrollBar = false;
+
+	const style::ScrollArea &_st;
+	object_ptr<ScrollBar> _horizontalBar, _verticalBar;
+	object_ptr<ScrollShadow> _topShadow, _bottomShadow;
+	int _horizontalValue, _verticalValue;
+
+	QPointer<QScroller> _scroller;
+	QPoint _wheelPos;
+
+	bool _touchEnabled = false;
+	base::Timer _touchTimer;
+	bool _touchScroll = false;
+	bool _touchPress = false;
+	bool _touchRightButton = false;
+	QPoint _touchStart, _touchPrevPos, _touchPos;
+
+	TouchScrollState _touchScrollState = TouchScrollState::Manual;
+	bool _touchPrevPosValid = false;
+	bool _touchWaitingAcceleration = false;
+	rpl::variable<bool> _touchMaybePressing;
+	QPoint _touchSpeed;
+	crl::time _touchSpeedTime = 0;
+	crl::time _touchAccelerationTime = 0;
+	crl::time _touchTime = 0;
+	base::Timer _touchScrollTimer;
+
+	Fn<bool(not_null<QWheelEvent*>)> _customWheelProcess;
+	Fn<bool(not_null<QTouchEvent*>)> _customTouchProcess;
+	Fn<bool(QPoint, Qt::ScrollPhase)> _crossAxisWheelProcess;
+	ScrollDirectionLock _wheelDirectionLock;
+	bool _wheelDirectionLocked = false;
+	bool _widgetAcceptsTouch = false;
+
+	object_ptr<QWidget> _widget = { nullptr };
+
+	rpl::event_stream<int> _scrollTopUpdated;
+	rpl::event_stream<> _scrolls;
+	rpl::event_stream<> _innerResizes;
+	rpl::event_stream<> _geometryChanged;
+
+};
+
+template <typename Scroll>
+void SetStickyBottomScroll(
+		Scroll *scroll,
+		not_null<RpWidget*> inner) {
+	Expects(scroll != nullptr);
+	inner->heightValue(
+	) | rpl::combine_previous(
+	) | rpl::on_next([=](int previous, int height) {
+		if (scroll->scrollTop() + scroll->scrollHeight() >= previous) {
+			const auto visible = scroll->scrollHeight();
+			scroll->scrollToY(height - visible, height);
+		}
+	}, inner->lifetime());
+}
+
+} // namespace Ui

@@ -1,0 +1,142 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+#pragma once
+
+#include <rpl/event_stream.h>
+#include "ui/rp_widget.h"
+#include "base/flags.h"
+
+namespace Ui {
+
+class AbstractButton : public RpWidget {
+public:
+	AbstractButton(QWidget *parent);
+
+	[[nodiscard]] Qt::KeyboardModifiers clickModifiers() const {
+		return _modifiers;
+	}
+
+	void setDisabled(bool disabled = true);
+	virtual void clearState();
+	[[nodiscard]] bool isOver() const {
+		return _state & StateFlag::Over;
+	}
+	[[nodiscard]] bool isDown() const {
+		return _state & StateFlag::Down;
+	}
+	[[nodiscard]] bool isDisabled() const {
+		return _state & StateFlag::Disabled;
+	}
+
+	void setSynteticOver(bool over) {
+		setOver(over, StateChangeSource::ByPress);
+	}
+	void setSynteticDown(bool down, Qt::MouseButton button = Qt::LeftButton) {
+		setDown(down, StateChangeSource::ByPress, {}, button);
+	}
+
+	void setPointerCursor(bool enablePointerCursor);
+
+	void setAcceptBoth(bool acceptBoth = true, bool triggerOnPress = false);
+
+	void setClickedCallback(Fn<void()> callback) {
+		_clickedCallback = std::move(callback);
+	}
+
+	rpl::producer<Qt::MouseButton> clicks() const {
+		return _clicks.events();
+	}
+	template <typename Handler>
+	void addClickHandler(Handler &&handler) {
+		clicks(
+		) | rpl::on_next(
+			std::forward<Handler>(handler),
+			lifetime());
+	}
+
+	void clicked(Qt::KeyboardModifiers modifiers, Qt::MouseButton button);
+
+	void setIsMenuButton(bool value) {
+		_menuButton = value;
+	}
+	void setIsListItem(bool value) {
+		_listItem = value;
+	}
+	[[nodiscard]] bool isListItem() const {
+		return _listItem;
+	}
+
+	QAccessible::Role accessibilityRole() override {
+		return _listItem
+			? QAccessible::ListItem
+			: _menuButton
+			? QAccessible::ButtonMenu
+			: QAccessible::Button;
+	}
+	AccessibilityState accessibilityState() const override;
+	void accessibilityDoAction(const QString &name) override;
+
+protected:
+	void enterEventHook(QEnterEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
+	void mousePressEvent(QMouseEvent *e) override;
+	void mouseMoveEvent(QMouseEvent *e) override;
+	void mouseReleaseEvent(QMouseEvent *e) override;
+	void keyPressEvent(QKeyEvent *e) override;
+	void keyReleaseEvent(QKeyEvent *e) override;
+
+protected:
+	enum class StateFlag {
+		None     = 0,
+		Over     = (1 << 0),
+		Down     = (1 << 1),
+		Disabled = (1 << 2),
+	};
+	friend constexpr bool is_flag_type(StateFlag) { return true; };
+	using State = base::flags<StateFlag>;
+
+	State state() const {
+		return _state;
+	}
+
+	enum class StateChangeSource {
+		ByUser = 0x00,
+		ByPress = 0x01,
+		ByHover = 0x02,
+	};
+	void setOver(bool over, StateChangeSource source = StateChangeSource::ByUser);
+	bool setDown(
+		bool down,
+		StateChangeSource source,
+		Qt::KeyboardModifiers modifiers,
+		Qt::MouseButton button);
+
+	virtual void onStateChanged(State was, StateChangeSource source) {
+	}
+
+private:
+	void updateCursor();
+	void checkIfOver(QPoint localPos);
+	[[nodiscard]] bool isSubmitEvent(not_null<QKeyEvent*> e) const;
+
+	State _state = StateFlag::None;
+
+	Qt::KeyboardModifiers _modifiers;
+	bool _enablePointerCursor : 1 = true;
+	bool _pointerCursor : 1 = false;
+	bool _acceptBoth : 1 = false;
+	bool _triggerOnPress : 1 = false;
+	bool _menuButton : 1 = false;
+	bool _listItem : 1 = false;
+
+	Fn<void()> _clickedCallback;
+
+	rpl::event_stream<Qt::MouseButton> _clicks;
+
+};
+
+} // namespace Ui

@@ -54,6 +54,8 @@ struct PlainMessage {
     // UiProvider::onHistorySenderNameReady() for a name not yet known when
     // this struct was returned.
     std::string senderName;
+    // See telegram::PlainMessage::mediaAlbumId's own comment.
+    std::int64_t mediaAlbumId = 0;
 };
 
 class UiProvider {

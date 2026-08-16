@@ -1,0 +1,235 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+using "ui/basic.style";
+
+using "ui/widgets/widgets.style";
+
+ServiceCheck {
+	margin: margins;
+	diameter: pixels;
+	shift: pixels;
+	thickness: pixels;
+	tip: point;
+	small: pixels;
+	large: pixels;
+	stroke: pixels;
+	color: color;
+	duration: int;
+}
+
+Box {
+	buttonPadding: margins;
+	buttonHeight: pixels;
+	buttonWide: bool;
+	button: RoundButton;
+	margin: margins;
+	title: FlatLabel;
+	bg: color;
+	titleAdditionalFg: color;
+	shadowIgnoreTopSkip: bool;
+	shadowIgnoreBottomSkip: bool;
+}
+
+boxDuration: 200;
+boxRadius: 8px;
+
+boxButtonFont: font(boxFontSize semibold);
+defaultBoxButtonTextStyle: TextStyle(semiboldTextStyle) {
+	font: font(14px semibold);
+}
+defaultBoxButton: RoundButton(defaultLightButton) {
+	width: -30px;
+	height: 34px;
+	textTop: 7px;
+	style: defaultBoxButtonTextStyle;
+}
+
+boxLabelStyle: TextStyle(boxTextStyle) {
+	lineHeight: 22px;
+}
+
+attentionBoxButton: RoundButton(defaultBoxButton) {
+	textFg: attentionButtonFg;
+	textFgOver: attentionButtonFgOver;
+	textBgOver: attentionButtonBgOver;
+
+	ripple: RippleAnimation(defaultRippleAnimation) {
+		color: attentionButtonBgRipple;
+	}
+}
+
+defaultBoxCheckbox: Checkbox(defaultCheckbox) {
+	width: -46px;
+	textPosition: point(12px, 1px);
+	style: boxTextStyle;
+}
+
+boxRoundShadow: roundShadowRadius8px;
+
+boxTitleFont: font(16px semibold);
+boxTitle: FlatLabel(defaultFlatLabel) {
+	textFg: boxTitleFg;
+	maxHeight: 24px;
+	style: TextStyle(defaultTextStyle) {
+		font: boxTitleFont;
+	}
+}
+boxTitlePosition: point(24px, 13px);
+boxTitleHeight: 48px;
+boxTitleAdditionalSkip: 9px;
+boxTitleAdditionalFont: normalFont;
+boxScroll: defaultSolidScroll;
+
+boxRowPadding: margins(24px, 0px, 24px, 0px);
+
+boxTopMargin: 8px;
+
+boxTitleCloseIcon: icon {{ "box_button_close", boxTitleCloseFg }};
+boxTitleCloseIconOver: icon {{ "box_button_close", boxTitleCloseFgOver }};
+boxTitleClose: IconButton(defaultIconButton) {
+	width: boxTitleHeight;
+	height: boxTitleHeight;
+
+	icon: boxTitleCloseIcon;
+	iconOver: boxTitleCloseIconOver;
+
+	rippleAreaPosition: point(4px, 4px);
+	rippleAreaSize: 40px;
+	ripple: defaultRippleAnimationBgOver;
+}
+boxTitleMenu: IconButton(boxTitleClose) {
+	icon: icon {{ "title_menu_dots", boxTitleCloseFg }};
+	iconOver: icon {{ "title_menu_dots", boxTitleCloseFgOver }};
+}
+
+boxLinkButton: LinkButton(defaultLinkButton) {
+	font: boxTextFont;
+	overFont: font(boxFontSize underline);
+}
+
+boxOptionListPadding: margins(0px, 0px, 0px, 0px);
+boxOptionListSkip: 20px;
+
+boxWidth: 320px;
+boxWideWidth: 364px;
+boxPadding: margins(24px, 14px, 24px, 8px);
+boxMaxListHeight: 492px;
+boxLittleSkip: 10px;
+boxMediumSkip: 20px;
+
+defaultBox: Box {
+	buttonPadding: margins(6px, 10px, 10px, 10px);
+	buttonHeight: 34px;
+	button: defaultBoxButton;
+	margin: margins(0px, 10px, 0px, 10px);
+	bg: boxBg;
+	title: boxTitle;
+	titleAdditionalFg: boxTitleAdditionalFg;
+}
+layerBox: Box(defaultBox) {
+}
+boxLabel: FlatLabel(defaultFlatLabel) {
+	// Keep minWidth <= boxWidth - boxPadding.left - boxPadding.right.
+	minWidth: 256px;
+	align: align(topleft);
+	style: boxLabelStyle;
+}
+
+boxLoadingAnimation: InfiniteRadialAnimation(defaultInfiniteRadialAnimation) {
+	color: windowSubTextFg;
+	thickness: 2px;
+}
+boxLoadingSize: 20px;
+
+defaultSubsectionTitle: FlatLabel(defaultFlatLabel) {
+	style: TextStyle(semiboldTextStyle) {
+		font: font(boxFontSize semibold);
+	}
+	textFg: windowActiveTextFg;
+	minWidth: 240px;
+}
+defaultSubsectionTitlePadding: margins(22px, 7px, 10px, 9px);
+
+separatePanelBorderCacheSize: 60px;
+separatePanelTitleHeight: 62px;
+separatePanelNoTitleHeight: 32px;
+separatePanelTitleBadgeSkip: 6px;
+separatePanelClose: IconButton(boxTitleClose) {
+	width: 60px;
+	height: 60px;
+
+	rippleAreaPosition: point(8px, 8px);
+	rippleAreaSize: 44px;
+	ripple: defaultRippleAnimationBgOver;
+}
+separatePanelMenu: IconButton(separatePanelClose) {
+	width: 44px;
+
+	icon: icon {{ "title_menu_dots", boxTitleCloseFg }};
+	iconOver: icon {{ "title_menu_dots", boxTitleCloseFgOver }};
+
+	rippleAreaPosition: point(0px, 8px);
+}
+separatePanelMenuPosition: point(0px, 52px);
+separatePanelTitleFont: font(18px semibold);
+separatePanelTitle: FlatLabel(defaultFlatLabel) {
+	textFg: boxTitleFg;
+	maxHeight: 26px;
+	style: TextStyle(defaultTextStyle) {
+		font: separatePanelTitleFont;
+	}
+}
+separatePanelTitleTop: 18px;
+separatePanelTitleLeft: 22px;
+separatePanelTitleSkip: 0px;
+separatePanelTitleBadgeTop: 4px;
+separatePanelSearch: IconButton(separatePanelClose) {
+	width: 44px;
+
+	icon: icon {{ "box_search", boxTitleCloseFg }};
+	iconOver: icon {{ "box_search", boxTitleCloseFgOver }};
+
+	rippleAreaPosition: point(0px, 8px);
+}
+separatePanelBack: IconButton(separatePanelClose) {
+	icon: icon {{ "box_button_back", boxTitleCloseFg }};
+	iconOver: icon {{ "box_button_back", boxTitleCloseFgOver }};
+}
+separatePanelDuration: 150;
+
+fullScreenPanelClose: IconButton {
+	width: 44px;
+	height: 44px;
+
+	icon: icon {{ "box_button_close", radialFg }};
+	iconOver: icon {{ "box_button_close", radialFg }};
+	iconPosition: point(-1px, -1px);
+
+	rippleAreaPosition: point(0px, 0px);
+	rippleAreaSize: 44px;
+	ripple: RippleAnimation(defaultRippleAnimation) {
+		color: shadowFg;
+	}
+}
+fullScreenPanelBack: IconButton(fullScreenPanelClose) {
+	icon: icon {{ "box_button_back", radialFg }};
+	iconOver: icon {{ "box_button_back", radialFg }};
+}
+fullScreenPanelMenu: IconButton(fullScreenPanelClose) {
+	icon: icon {{ "title_menu_dots", radialFg }};
+	iconOver: icon {{ "title_menu_dots", radialFg }};
+}
+
+webviewDialogButton: defaultBoxButton;
+webviewDialogDestructiveButton: attentionBoxButton;
+webviewDialogSubmit: RoundButton(defaultActiveButton) {
+	width: -48px;
+	height: 34px;
+	textTop: 7px;
+	style: defaultBoxButtonTextStyle;
+}
+webviewDialogPadding: margins(8px, 12px, 15px, 12px);

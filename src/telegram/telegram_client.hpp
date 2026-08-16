@@ -63,6 +63,13 @@ struct PlainMessage {
     // stream of messages, which looked indistinguishable from "messages
     // from other users are not loading at all".
     std::string senderName;
+    // TDLib's td_api::message::media_album_id_ - 0 for a standalone
+    // message, a shared non-zero id for every message that was part of
+    // the same "send N photos together" album (Telegram delivers each as
+    // its own separate td_api::message; grouping them into one bubble is
+    // entirely the client's job - see MainWindow's grouping logic in
+    // main_window.cpp, which is what this field feeds).
+    std::int64_t mediaAlbumId = 0;
 };
 
 class TelegramClient {

@@ -13,6 +13,7 @@
 #include "platform/paths.hpp"
 #include "ui/qt/main_window.hpp"
 #include "ui/qt/qt_ui_provider.hpp"
+#include "ui/qt/ui_integration.hpp"
 
 namespace {
 
@@ -61,6 +62,11 @@ int main(int argc, char** argv) {
     std::set_terminate(logUncaughtExceptionAndAbort);
 
     QApplication app(argc, argv);
+
+    // Must run before constructing MainWindow (or anything else that builds
+    // a lib_ui widget) - see ui_integration.hpp's own comment for what this
+    // fixes.
+    zkgram::ui::qt::InstallUiRuntime(argc, argv);
 
     // Next to the exe, not a bare "data" resolved against the current
     // working directory: launching zkgram.exe by double-click, a desktop
@@ -133,5 +139,6 @@ int main(int argc, char** argv) {
     // nothing would ever satisfy.
     session->stop();
     starter.join();
+    zkgram::ui::qt::StopUiRuntime();
     return exitCode;
 }

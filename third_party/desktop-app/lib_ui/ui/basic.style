@@ -1,0 +1,139 @@
+// This file is part of Desktop App Toolkit,
+// a set of libraries for developing nice desktop applications.
+//
+// For license and copyright information please follow this link:
+// https://github.com/desktop-app/legal/blob/master/LEGAL
+//
+using "ui/colors.palette";
+
+TextPalette {
+	linkFg: color;
+	monoFg: color;
+	markBg: color;
+	spoilerFg: color;
+	selectBg: color;
+	selectFg: color;
+	selectLinkFg: color;
+	selectMonoFg: color;
+	selectSpoilerFg: color;
+	selectOverlay: color;
+	linkAlwaysActive: bool;
+}
+
+QuoteStyle {
+	padding: margins;
+	verticalSkip: pixels;
+	header: pixels;
+	headerPosition: point;
+	icon: icon;
+	iconPosition: point;
+	expand: icon;
+	expandPosition: point;
+	collapse: icon;
+	collapsePosition: point;
+	outline: pixels;
+	outlineShift: pixels;
+	radius: pixels;
+	scrollable: bool;
+}
+
+TextStyle {
+	font: font;
+	linkUnderline: int;
+	lineHeight: pixels;
+	qtextEditLineMetrics: bool;
+	blockquote: QuoteStyle;
+	pre: QuoteStyle;
+}
+
+kLinkUnderlineNever: 0;
+kLinkUnderlineActive: 1;
+kLinkUnderlineAlways: 2;
+
+fsize: 13px;
+normalFont: font(fsize);
+semiboldFont: font(fsize semibold);
+boxFontSize: 14px;
+boxTextFont: font(boxFontSize);
+
+emojiSize: 18px;
+emojiPadding: 1px;
+
+lineWidth: 1px;
+
+IconEmoji {
+	icon: icon;
+	padding: margins;
+	useIconColor: bool;
+}
+
+defaultTextPalette: TextPalette {
+	linkFg: windowActiveTextFg;
+	monoFg: msgInMonoFg;
+	markBg: windowBgOver;
+	spoilerFg: msgInDateFg;
+	selectBg: msgInBgSelected;
+	selectFg: transparent; // use painter current pen instead
+	selectLinkFg: historyLinkInFgSelected;
+	selectMonoFg: msgInMonoFgSelected;
+	selectSpoilerFg: msgInDateFgSelected;
+	selectOverlay: msgSelectOverlay;
+}
+defaultQuoteStyle: QuoteStyle {
+}
+defaultTextStyle: TextStyle {
+	font: normalFont;
+	linkUnderline: kLinkUnderlineActive;
+	lineHeight: 0px;
+	qtextEditLineMetrics: false;
+	blockquote: defaultQuoteStyle;
+	pre: defaultQuoteStyle;
+}
+semiboldTextStyle: TextStyle(defaultTextStyle) {
+	font: semiboldFont;
+}
+
+slideDuration: 240;
+slideShift: 100px;
+slideShadow: icon {{ "slide_shadow", slideFadeOutShadowFg }};
+
+slideWrapDuration: 150;
+fadeWrapDuration: 200;
+
+linkCropLimit: 360px;
+linkFont: normalFont;
+linkFontOver: font(fsize underline);
+
+roundRadiusLarge: 6px;
+roundRadiusSmall: 3px;
+
+dateRadius: roundRadiusLarge;
+
+noContactsHeight: 100px;
+noContactsFont: font(fsize);
+noContactsColor: windowSubTextFg;
+
+activeFadeInDuration: 500;
+activeFadeOutDuration: 3000;
+
+smallCloseIcon: icon {{ "simple_close", smallCloseIconFg }};
+smallCloseIconOver: icon {{ "simple_close", smallCloseIconFgOver }};
+
+radialSize: size(50px, 50px);
+radialLine: 3px;
+radialDuration: 350;
+radialPeriod: 3000;
+locationSize: size(320px, 240px);
+
+transparentPlaceholderSize: 4px;
+
+defaultVerticalListSkip: 6px;
+
+shakeShift: 4px;
+shakeDuration: 300;
+
+universalDuration: 120;
+
+// floating badge colors
+roundedFg: radialFg;
+roundedBg: radialBg; // closest to #00000066

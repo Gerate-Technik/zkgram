@@ -54,7 +54,9 @@ param(
     [string]$OutDir = "$PSScriptRoot\dist",
     [switch]$SkipTdlib,
     [switch]$SkipQt,
-    [switch]$Clean
+    [switch]$Clean,
+    # See build-cmake.ps1's own -VendorLibUi comment.
+    [switch]$VendorLibUi
 )
 
 # NOT "Stop": with $ErrorActionPreference = "Stop", PowerShell 5.1 treats
@@ -162,7 +164,13 @@ if (-not (Test-Path "$qtInstallPath\bin\windeployqt.exe")) {
 Write-Host ""
 Write-Host "=== 4. Building zkgram (Qt UI) ===" -ForegroundColor Cyan
 
-& "$PSScriptRoot\build-cmake.ps1" -Ui qt -TdPrefix "$TdInstallDir;$vcpkgInstalled" -QtPrefix $qtInstallPath
+$buildCmakeArgs = @{
+    Ui = "qt"
+    TdPrefix = "$TdInstallDir;$vcpkgInstalled"
+    QtPrefix = $qtInstallPath
+}
+if ($VendorLibUi) { $buildCmakeArgs["VendorLibUi"] = $true }
+& "$PSScriptRoot\build-cmake.ps1" @buildCmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $exePath = Join-Path $PSScriptRoot "build\Release\zkgram.exe"
