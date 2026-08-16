@@ -65,6 +65,18 @@ struct PeerData {
     bool hasActiveConversation = false;
     bool isChannel = false;
     std::string photoPath;
+
+    // So a caller holding a fresh snapshot can tell whether it is worth
+    // upserting at all - see core::Session's chat-list callback, which gets
+    // handed every known chat on every push and would otherwise fire
+    // peerUpdated_ for hundreds of peers that did not change.
+    bool operator==(const PeerData& other) const {
+        return id == other.id && unreadCount == other.unreadCount &&
+               hasActiveConversation == other.hasActiveConversation && isChannel == other.isChannel &&
+               title == other.title && lastMessagePreview == other.lastMessagePreview &&
+               photoPath == other.photoPath;
+    }
+    bool operator!=(const PeerData& other) const { return !(*this == other); }
 };
 
 // Minimal in-process pub/sub. A Subscription unsubscribes on destruction

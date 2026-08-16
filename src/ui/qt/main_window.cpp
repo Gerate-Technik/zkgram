@@ -79,6 +79,8 @@
 #include <QMediaRecorder>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -107,12 +109,21 @@ namespace zkgram::ui::qt {
 
 namespace {
 
+// Opened once and kept open rather than reopened per line - same change,
+// and for the same reason, as telegram_client.cpp's logDebug(): several of
+// these sit on paths that run per chat-list push on the GUI thread, and a
+// synchronous open+write+close there is a stall the user can feel.
 void logDebug(const QString& message) {
-    QFile file(QCoreApplication::applicationDirPath() + "/zkgram_debug.log");
-    if (file.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream(&file) << QDateTime::currentDateTime().toString("HH:mm:ss.zzz") << " ["
-                            << QThread::currentThread() << "] " << message << "\n";
+    static QMutex mutex;
+    static QFile file(QCoreApplication::applicationDirPath() + "/zkgram_debug.log");
+    QMutexLocker locker(&mutex);
+    if (!file.isOpen() && !file.open(QIODevice::Append | QIODevice::Text)) {
+        return;
     }
+    QTextStream stream(&file);
+    stream << QDateTime::currentDateTime().toString("HH:mm:ss.zzz") << " [" << QThread::currentThread() << "] "
+            << message << "\n";
+    stream.flush();
 }
 
 // Ui::IconButton/Ui::RoundButton size themselves via a direct resize() call
@@ -229,12 +240,32 @@ const style::color& avatarBgColor2(uint8_t paletteIndex) {
     }
 }
 
+// Cached the same way chatAvatarPixmap() caches real photos below, and for
+// a stronger reason: right after login *no* avatar has downloaded yet, so
+// every single sidebar row falls back to this placeholder, and each one
+// meant allocating a pixmap and running a full antialiased
+// gradient-ellipse-plus-glyph paint - hundreds of them, repeated from
+// scratch on every sidebar rebuild, on the GUI thread. The result depends
+// only on the initial letter, the palette index and the pixel geometry
+// (never on the chat id itself beyond picking that index), so identical
+// rows share one pixmap and a redraw of an unchanged list costs nothing.
+// Safe to cache across the process lifetime because the style palette is
+// loaded once at startup and never swapped at runtime.
 QPixmap avatarPixmap(const QString& title, qlonglong chatId, int size) {
     QString trimmed = title.trimmed();
     QChar initial = trimmed.isEmpty() ? QChar('?') : trimmed.at(0).toUpper();
     uint8_t paletteIndex = avatarColorIndex(chatId);
 
     qreal ratio = currentDevicePixelRatio();
+
+    static QHash<QString, QPixmap> cache;
+    QString cacheKey = QString(initial) + QLatin1Char(':') + QString::number(paletteIndex) + QLatin1Char(':') +
+                        QString::number(size) + QLatin1Char('@') + QString::number(ratio);
+    auto cached = cache.constFind(cacheKey);
+    if (cached != cache.constEnd()) {
+        return cached.value();
+    }
+
     int physicalSize = qRound(size * ratio);
     QPixmap pixmap(physicalSize, physicalSize);
     pixmap.fill(Qt::transparent);
@@ -259,6 +290,9 @@ QPixmap avatarPixmap(const QString& title, qlonglong chatId, int size) {
     painter.setFont(font);
     painter.setPen(Qt::white);
     painter.drawText(QRect(0, 0, size, size), Qt::AlignCenter, QString(initial));
+    // QPainter must be done with the pixmap before it is handed out/stored.
+    painter.end();
+    cache.insert(cacheKey, pixmap);
     return pixmap;
 }
 
@@ -2261,6 +2295,11 @@ public:
     void setRows(const QVariantList& chats, qlonglong selectedChatId) {
         rows_.clear();
         rows_.reserve(chats.size());
+        // Built once, not once per row: constructing a QFontMetrics loads
+        // and locks the font engine, which is not free when the list is
+        // hundreds of rows long and gets rebuilt on every chat-list push.
+        const QFontMetrics nameMetrics(nameFont_);
+        const QFontMetrics previewMetrics(previewFont_);
         for (const QVariant& entryVariant : chats) {
             QVariantMap entry = entryVariant.toMap();
             QString title = entry["title"].toString();
@@ -2271,13 +2310,20 @@ public:
             row.active = entry["active"].toBool();
             row.avatar = chatAvatarPixmap(title, row.chatId, entry["photo"].toString(), sidebarAvatarSize());
             int textWidth = 260;  // generous; real elision happens against the actual row width at paint time
-            row.nameElided = QFontMetrics(nameFont_).elidedText(title, Qt::ElideRight, textWidth);
+            row.nameElided = nameMetrics.elidedText(title, Qt::ElideRight, textWidth);
             QString previewText = preview.isEmpty() ? "No messages yet" : preview;
-            row.previewElided = QFontMetrics(previewFont_).elidedText(previewText, Qt::ElideRight, textWidth);
+            row.previewElided = previewMetrics.elidedText(previewText, Qt::ElideRight, textWidth);
             rows_.push_back(std::move(row));
         }
         selectedChatId_ = selectedChatId;
         hoveredIndex_ = -1;
+        // Keeps the current scroll offset across a rebuild instead of
+        // jumping back to the top - setRange() below already clamps it into
+        // the new list's bounds, so it cannot end up stranded past the end
+        // of a list that momentarily got shorter (which is what
+        // renderSidebarRows() used to reset to the top to avoid). Without
+        // this, scrolling the sidebar during the post-login load was
+        // impossible: every push yanked the view back to the first row.
         updateScrollRange();
         viewport()->update();
     }
@@ -2290,6 +2336,9 @@ public:
         viewport()->update();
     }
 
+    // Not called from setRows()/renderSidebarRows() any more (see the
+    // comment there), kept for callers that genuinely want to jump to the
+    // newest chat rather than preserve the reader's position.
     void scrollToTop() { verticalScrollBar()->setValue(0); }
 
     int rowCount() const { return rows_.size(); }
@@ -2702,6 +2751,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     sidebarRenderThrottleTimer_ = new QTimer(this);
     sidebarRenderThrottleTimer_->setSingleShot(true);
     connect(sidebarRenderThrottleTimer_, &QTimer::timeout, this, &MainWindow::flushSidebarRender);
+
+    conversationRenderThrottleTimer_ = new QTimer(this);
+    conversationRenderThrottleTimer_->setSingleShot(true);
+    connect(conversationRenderThrottleTimer_, &QTimer::timeout, this, [this] {
+        // The chat may have been switched while this was pending; the new
+        // one was rendered in full by the switch itself, so there is
+        // nothing to redraw for the one this was queued for.
+        if (pendingConversationRenderChatId_ != currentChatId_) {
+            return;
+        }
+        renderCurrentConversation();
+    });
 
     auto* sidebarCanvas = new SidebarCanvas(sidebar);
     sidebarCanvas->setObjectName("chatListWidget");
@@ -3372,15 +3433,15 @@ void MainWindow::renderSidebarRows(const QVariantList& chats) {
     logDebug(QString("renderSidebarRows: rendering %1 chats, chatListWidget_ rowCount before=%2")
                  .arg(chats.size())
                  .arg(asSidebar(chatListWidget_)->rowCount()));
+    // The scroll position is deliberately not reset here any more. It used
+    // to be, because a rebuild could leave the offset past the end of a
+    // momentarily shorter list and the sidebar would look empty - but
+    // SidebarCanvas::setRows() calls updateScrollRange(), and
+    // QScrollBar::setRange() already clamps the current value into the new
+    // range, so that state is not reachable. Resetting on top of that just
+    // meant the list snapped back to the first row on every push, which
+    // made the sidebar feel unusable for as long as updates kept arriving.
     asSidebar(chatListWidget_)->setRows(chats, currentChatId_);
-    // A rebuild (this runs on every chat-list push from TDLib, including
-    // the burst of updates while avatars are downloading right after
-    // login) can leave the scroll position sitting past the end of the
-    // newly rebuilt (possibly shorter, momentarily) list - the sidebar
-    // then looks completely empty even though every row is really there,
-    // just scrolled out of view. Reset to the top every time so this can
-    // never happen.
-    asSidebar(chatListWidget_)->scrollToTop();
     logDebug(QString("renderSidebarRows: done, chatListWidget_ rowCount after=%1")
                  .arg(asSidebar(chatListWidget_)->rowCount()));
 }
@@ -3402,6 +3463,16 @@ void MainWindow::updateChatList(QVariantList chats) {
         logDebug("updateChatList: ignoring transient empty chat list push, keeping last known non-empty list");
         return;
     }
+    // Nothing visible changed - skip the metadata rescan and, more
+    // importantly, do not schedule a sidebar rebuild. TDLib pushes plenty
+    // of updates that do not alter anything this list actually shows (a
+    // chat's position reshuffled to the same effective order, a photo id
+    // changing for a file that resolves to the same path, ...), and
+    // rebuilding every row to redraw an identical list is the most
+    // expensive possible way to do nothing.
+    if (chats == lastChatListSnapshot_) {
+        return;
+    }
     lastChatListSnapshot_ = chats;
     updateConversationMetadata(chats);
     // A background chat-list push (new message, reordering, ...) must not
@@ -3410,19 +3481,25 @@ void MainWindow::updateChatList(QVariantList chats) {
     // re-render until the search box is cleared.
     if (chatSearchInput_->text().trimmed().isEmpty()) {
         // Throttled, not called directly: TelegramClient::requestMoreChats()
-        // can push updateChatList dozens to hundreds of times in a tight
-        // burst while paging through a large account's full chat list (see
-        // its own comment in telegram_client.cpp), each carrying every
-        // chat known so far - rendering all of that synchronously, every
-        // single time, meant tearing down and rebuilding potentially
-        // hundreds of sidebar rows (each with its own avatar pixmap decode)
-        // over and over, fast enough to stop the GUI thread from
-        // processing paint/input events at all and make the window read as
-        // "Not Responding". If nothing is already scheduled, render soon
-        // (150ms - imperceptible for a one-off update); if a render is
-        // already pending, this update's data is already captured in
-        // lastChatListSnapshot_ above and will be picked up when that
-        // pending render actually runs, so nothing more to do here.
+        // can push updateChatList many times in a tight burst while paging
+        // through a large account's full chat list (see its own comment in
+        // telegram_client.cpp), each carrying every chat known so far -
+        // rendering all of that synchronously, every single time, meant
+        // tearing down and rebuilding potentially hundreds of sidebar rows
+        // (each with its own avatar pixmap decode) over and over, fast
+        // enough to stop the GUI thread from processing paint/input events
+        // at all and make the window read as "Not Responding". If nothing
+        // is already scheduled, render soon (150ms - imperceptible for a
+        // one-off update); if a render is already pending, this update's
+        // data is already captured in lastChatListSnapshot_ above and will
+        // be picked up when that pending render actually runs, so nothing
+        // more to do here.
+        //
+        // TelegramClient::publishChatList() now coalesces on its own side
+        // too, so far fewer pushes ever reach this function - this throttle
+        // stays as the second half of the same defence, since it is what
+        // bounds the cost of the render itself (the GUI thread's work),
+        // independently of how often the transport decides to publish.
         if (!sidebarRenderThrottleTimer_->isActive()) {
             sidebarRenderThrottleTimer_->start(150);
         }
@@ -3925,7 +4002,7 @@ void MainWindow::updateHistoryPhoto(qlonglong chatId, qlonglong messageId, const
         }
     }
     if (chatId == currentChatId_) {
-        renderCurrentConversation();
+        scheduleConversationRender();
     }
 }
 
@@ -3938,7 +4015,19 @@ void MainWindow::updateHistorySenderName(qlonglong chatId, qlonglong messageId, 
         }
     }
     if (chatId == currentChatId_) {
-        renderCurrentConversation();
+        scheduleConversationRender();
+    }
+}
+
+void MainWindow::scheduleConversationRender() {
+    pendingConversationRenderChatId_ = currentChatId_;
+    // Same shape as updateChatList()'s sidebar throttle: if a render is
+    // already pending it will pick up this change too (the render always
+    // reads the current conversationMessages_), so there is nothing to
+    // restart or extend - which also means a long burst still renders
+    // every ~120ms rather than being starved until it ends.
+    if (!conversationRenderThrottleTimer_->isActive()) {
+        conversationRenderThrottleTimer_->start(120);
     }
 }
 
