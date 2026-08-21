@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(zkgram CXX)
-
+# C alongside CXX: nothing in src/ is C, but the vendored lib_base generates
+# D-Bus glue as .c files on Linux (gdbus-codegen, see
+# third_party/desktop-app/cmake/external/glib/generate_dbus.cmake), and CMake
+# refuses to generate a build for them unless C is an enabled language.
+project(zkgram C CXX)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 # Windows и Linux (macOS должен собираться тем же путём, что и Linux, но на
 # нём не проверялся). Всё платформозависимое собрано в src/platform/paths.cpp
 # и в WIN32-ветках ниже (resources/app.rc, WIN32-подсистема, флаги MSVC).
@@ -114,7 +118,7 @@ if(ZKGRAM_UI STREQUAL "qt")
     option(ZKGRAM_VENDOR_LIB_UI "Build and link the vendored Telegram Desktop lib_ui (Phase 1 migration infrastructure, not yet used by src/ui/qt/)" OFF)
 
     if(ZKGRAM_VENDOR_LIB_UI)
-        find_package(Qt6 COMPONENTS Widgets Multimedia Network Svg OpenGL OpenGLWidgets REQUIRED)
+        find_package(Qt6 COMPONENTS Widgets Multimedia Network Svg OpenGL OpenGLWidgets DBus REQUIRED)
     else()
         find_package(Qt6 COMPONENTS Widgets Multimedia REQUIRED)
     endif()
@@ -142,6 +146,23 @@ if(ZKGRAM_UI STREQUAL "qt")
         # (see main_qt.cpp's std::set_terminate handler), so this is not
         # needed rather than a gap to fill in later.
         set(DESKTOP_APP_DISABLE_CRASH_REPORTS ON CACHE BOOL "" FORCE)
+
+        # Fails here, with one readable line, instead of a few hundred
+        # template errors deep inside lib_ui: ui/accessible/ui_accessible_widget
+        # implements QAccessibleSelectionInterface (Qt 6.5) and
+        # QAccessibleAttributesInterface (Qt 6.8), so anything older cannot
+        # build lib_ui at all. Notably older than what LTS distributions ship -
+        # Ubuntu 24.04 is on 6.4.2 - hence the pointer to a side-by-side Qt.
+        if(Qt6_VERSION VERSION_LESS 6.8)
+            message(FATAL_ERROR
+                "ZKGRAM_UI=qt needs Qt 6.8 or newer (found ${Qt6_VERSION}): the vendored "
+                "lib_ui implements QAccessibleAttributesInterface, added in Qt 6.8. "
+                "Install a newer Qt alongside the system one and point at it, e.g.\n"
+                "  pip install aqtinstall\n"
+                "  python3 -m aqt install-qt linux desktop 6.8.2 linux_gcc_64 -m qtmultimedia qtsvg -O /opt/Qt\n"
+                "  ./build.sh --ui qt --qt-prefix /opt/Qt/6.8.2/gcc_64 ...")
+        endif()
+
         add_subdirectory(third_party/desktop-app)
     endif()
 

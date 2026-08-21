@@ -240,6 +240,38 @@ const style::color& avatarBgColor2(uint8_t paletteIndex) {
     }
 }
 
+// Both avatar caches (the placeholder one in avatarPixmap() and the real-photo
+// one in chatAvatarPixmap()) live behind this, rather than being plain
+// function-local statics, because of when a function-local static is
+// destroyed: at static destruction, which runs after main() has returned and
+// therefore after QApplication is already gone. Destroying a QPixmap then is
+// undefined - its platform backend died with the application - and it showed
+// up as the process aborting with "free(): invalid pointer" *after* a clean
+// shutdown, TDLib having already logged "Stop Td"/"Release closed client".
+//
+// qAddPostRoutine runs the cleanup from ~QCoreApplication instead, while the
+// application is still alive, which is the supported moment to be releasing
+// pixmaps. Heap-allocated and deleted only from there, so there is no second,
+// later destruction to go wrong. GUI thread only (row layout and painting),
+// so the lazy init needs no locking.
+struct AvatarCaches {
+    QHash<QString, QPixmap> placeholders;  // avatarPixmap()
+    QHash<QString, QPixmap> photos;        // chatAvatarPixmap()
+};
+
+AvatarCaches* g_avatarCaches = nullptr;
+
+AvatarCaches& avatarCaches() {
+    if (g_avatarCaches == nullptr) {
+        g_avatarCaches = new AvatarCaches();
+        qAddPostRoutine([] {
+            delete g_avatarCaches;
+            g_avatarCaches = nullptr;
+        });
+    }
+    return *g_avatarCaches;
+}
+
 // Cached the same way chatAvatarPixmap() caches real photos below, and for
 // a stronger reason: right after login *no* avatar has downloaded yet, so
 // every single sidebar row falls back to this placeholder, and each one
@@ -258,7 +290,7 @@ QPixmap avatarPixmap(const QString& title, qlonglong chatId, int size) {
 
     qreal ratio = currentDevicePixelRatio();
 
-    static QHash<QString, QPixmap> cache;
+    QHash<QString, QPixmap>& cache = avatarCaches().placeholders;
     QString cacheKey = QString(initial) + QLatin1Char(':') + QString::number(paletteIndex) + QLatin1Char(':') +
                         QString::number(size) + QLatin1Char('@') + QString::number(ratio);
     auto cached = cache.constFind(cacheKey);
@@ -315,7 +347,7 @@ QPixmap chatAvatarPixmap(const QString& title, qlonglong chatId, const QString& 
         return avatarPixmap(title, chatId, size);
     }
     qreal ratio = currentDevicePixelRatio();
-    static QHash<QString, QPixmap> cache;
+    QHash<QString, QPixmap>& cache = avatarCaches().photos;
     // Ratio in the key too, not just size: a plausible (if rare) multi-monitor
     // setup with different scale factors would otherwise hand back a pixmap
     // cached for the wrong screen's density.

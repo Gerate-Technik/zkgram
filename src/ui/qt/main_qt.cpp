@@ -99,6 +99,21 @@ int main(int argc, char** argv) {
     // identity in a new place each run instead of reusing the old one.
     QString dataDir = QCoreApplication::applicationDirPath() + "/data";
 
+    // Everything below runs inside a lambda so the window, and every widget
+    // in it, is destroyed when the lambda returns - before StopUiRuntime()
+    // afterwards, and while QApplication is still alive. Both halves matter,
+    // and neither used to hold: StopUiRuntime() calls style::StopManager(),
+    // which tears down the palette, fonts and cached corner/ripple images
+    // that lib_ui widgets reach into from their own destructors, and it ran
+    // while the window was still standing. Getting that order wrong is not a
+    // clean failure - it frees memory whose owner is already gone, and it
+    // aborted the process on exit.
+    //
+    // A lambda rather than a bare scope because the early returns below
+    // (wizard cancelled, session construction failed) would otherwise leave
+    // the block without ever reaching StopUiRuntime(); this way every exit
+    // path tears the two down in the same order.
+    int exitCode = [&]() -> int {
     zkgram::ui::qt::MainWindow window;
     window.showMaximized();
 
@@ -147,18 +162,57 @@ int main(int argc, char** argv) {
             QMetaObject::invokeMethod(&window, "showConnectingProgress", Qt::QueuedConnection,
                                        Q_ARG(QString, QString("Connection failed")),
                                        Q_ARG(QString, QString::fromStdString(e.what())));
+        } catch (...) {
+            // A thread function must not let anything escape: an exception
+            // leaving here goes straight to std::terminate() with no handler
+            // of any kind, which on this path would look exactly like the
+            // window-close abort this file's shutdown ordering fixes.
+            // Python-side failures do arrive as std::exception (see
+            // CryptoLayer's rethrowAsRuntimeError), so this is the
+            // belt-and-braces case, not the expected one.
+            QMetaObject::invokeMethod(&window, "setConnectionStatus", Qt::QueuedConnection,
+                                       Q_ARG(QString, QString("Connection failed")), Q_ARG(QString, QString("#e41e3f")));
+            QMetaObject::invokeMethod(&window, "showConnectingProgress", Qt::QueuedConnection,
+                                       Q_ARG(QString, QString("Connection failed")),
+                                       Q_ARG(QString, QString("unknown error")));
         }
     });
 
-    int exitCode = app.exec();
+    int code = app.exec();
 
     // If the window was closed while session.start() was still waiting on
     // TDLib authorization, unblock it (Session::stop() -> TelegramClient::
     // disconnect() fails the pending wait, see telegram_client.cpp) before
     // joining, otherwise starter.join() would wait forever for a wait that
     // nothing would ever satisfy.
+    //
+    // Before stop(), not after: stop() joins TDLib's receive thread, and
+    // that thread may be parked in a blocking call back to the GUI thread
+    // that can no longer be served now that exec() has returned. See
+    // QtUiProvider::beginShutdown().
+    ui->beginShutdown();
+
+    // Session::stop() is noexcept, so the join below is always reached.
+    // That ordering is not cosmetic: destroying a joinable std::thread calls
+    // std::terminate(), so anything that could skip this join turns a clean
+    // exit into an abort - which is what closing the window used to do,
+    // back when stop() could still propagate a Python-side exception out of
+    // CryptoLayer::stop().
     session->stop();
     starter.join();
+
+    // MainWindow outlives `session` (it is declared earlier, so it is
+    // destroyed later) and has been holding a raw pointer to it since
+    // setSession() above. Cleared here, while the Session is still alive, so
+    // the window cannot reach freed memory through a stale pointer during
+    // its own teardown.
+    window.setSession(nullptr);
+
+    return code;
+    }();
+
+    // The window is gone by now (see the lambda's own comment), so the style
+    // system has no live widget still depending on it.
     zkgram::ui::qt::StopUiRuntime();
     return exitCode;
 }

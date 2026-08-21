@@ -115,8 +115,17 @@ void QtUiProvider::onDisconnect(zkgram::core::ConversationId conversation) {
                                Q_ARG(QString, QString("Session")), Q_ARG(QString, QString("disconnected")));
 }
 
+void QtUiProvider::beginShutdown() {
+    shuttingDown_ = true;
+}
+
 bool QtUiProvider::confirmSignatures(zkgram::core::ConversationId conversation, const std::string& mySign,
                                       const std::string& companionSign) {
+    // Nobody left to ask - see beginShutdown(). Rejecting is the safe answer
+    // for a signature confirmation the user never actually saw.
+    if (shuttingDown_) {
+        return false;
+    }
     // Must return a value, so it cannot use a fire-and-forget queued call.
     // A queued connection back to our own thread would deadlock the GUI
     // event loop, so fall back to a direct call when already on that thread.
@@ -131,6 +140,11 @@ bool QtUiProvider::confirmSignatures(zkgram::core::ConversationId conversation, 
 }
 
 std::string QtUiProvider::requestCredential(const std::string& prompt, const std::string& dataType) {
+    // Empty reads as "cancelled" to every caller - see beginShutdown().
+    if (shuttingDown_) {
+        logDebug("requestCredential: shutting down, answering empty without touching the GUI thread");
+        return {};
+    }
     Qt::ConnectionType connectionType =
         QThread::currentThread() == window_->thread() ? Qt::DirectConnection : Qt::BlockingQueuedConnection;
     logDebug(QString("requestCredential: entered, prompt=%1, connectionType=%2")
