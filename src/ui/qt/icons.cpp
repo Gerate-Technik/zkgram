@@ -38,6 +38,8 @@ const style::icon& iconFor(Glyph glyph) {
         return st::zkgramIconSearch;
     case Glyph::Check:
         return st::zkgramIconCheck;
+    case Glyph::CheckDouble:
+        return st::zkgramIconCheckDouble;
     case Glyph::Lock:
         return st::zkgramIconLock;
     case Glyph::LockOnActive:

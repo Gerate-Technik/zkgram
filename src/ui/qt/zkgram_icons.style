@@ -58,6 +58,10 @@ zkgramIconPause: icon {{ "media_pause", menuIconFg }};
 zkgramIconPlay: icon {{ "media_play", menuIconFg }};
 zkgramIconSearch: icon {{ "top_bar_search", menuIconFg }};
 zkgramIconCheck: icon {{ "history_sent", windowBgActive }};
+// Double tick = the other side has read it, single = only delivered. Real
+// Telegram Desktop uses these two assets for exactly this distinction (see
+// MainWindow::updateOutgoingReadUpTo and paintSentTick).
+zkgramIconCheckDouble: icon {{ "history_received", windowBgActive }};
 // Default "encrypted session" indicator (sidebar row preview, secret-mode
 // toggle before its real state is known) - boxTextFgGood is the closest
 // existing role to the old hand-picked #4fae4e, not a literal color pick.
