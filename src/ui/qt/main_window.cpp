@@ -1,5 +1,6 @@
 #include "ui/qt/main_window.hpp"
 
+#include "monero/monero.h"
 #include "ui/qt/chat_background.hpp"
 #include "ui/qt/icons.hpp"
 
@@ -7,10 +8,14 @@
 #include "ui/widgets/buttons.h"
 // Phase 6b (UI.md 13c): real Ui::PopupMenu for context/attach menus.
 #include "ui/widgets/popup_menu.h"
+// AuthSlide's card - real composition primitive (see UI.md §4/§7: no Qt
+// layout manager), replacing the QVBoxLayout it used to hold its fields in.
+#include "ui/wrap/vertical_layout.h"
 // Phase 6b (UI.md 13c): real Ui::InputField for the composer/auth fields.
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/fields/masked_input_field.h"
 #include "ui/widgets/fields/password_input.h"
+#include "ui/widgets/sent_code_field.h"
 #include "ui/widgets/labels.h"
 
 #include "styles/style_zkgram_icons.h"
@@ -20,6 +25,20 @@
 // style_zkgram_icons.h (which only pulls in ui/style/style_core.h, enough
 // for the st:: symbols it declares itself, not the rest of the palette).
 #include "styles/palette.h"
+// st::msgWaveformBar/Skip/Min/Max (paintVoiceWaveform(), ported from real
+// Telegram Desktop's HistoryView::PaintWaveform) - declared in
+// ui/chat/chat.style, already part of the qt build's generate_styles() list
+// (see CMakeLists.txt) but never included from here until now; every other
+// st:: symbol this file uses so far came from colors.palette (via
+// palette.h above), which covers colors but not plain pixel-size values
+// like these.
+#include "styles/style_chat.h"
+// st::dialogsFilter (chatSearchInput_/searchInput_'s real InputField style,
+// see MainWindow's construction site) - declared in dialogs/dialogs.style,
+// already part of the qt build's generate_styles() list, not included from
+// here until now for the same reason style_chat.h wasn't (see its own
+// comment just above).
+#include "styles/style_dialogs.h"
 
 // Phase 6b (UI.md 13c): the real message bubble geometry/painting engine,
 // copied from telegram_fork/tdesktop's ui/chat/ into src/ui/chat/ (see that
@@ -38,18 +57,25 @@
 
 #include <rpl/rpl.h>
 
+// SidebarCanvas's real scroll container (see its own class comment) - must
+// come AFTER <rpl/rpl.h> above: scroll_area.h itself does not include the
+// rpl operator headers it uses (rpl::combine_previous specifically), it
+// relies on whatever the includer already pulled in. Included before
+// rpl.h, this fails to compile with "combine_previous is not a member of
+// rpl" - not a real gap in the vendored lib_rpl (rpl/combine_previous.h
+// has a complete, correct implementation, and rpl.h already includes it),
+// purely an include-order bug on this file's side.
+#include "ui/widgets/scroll_area.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <memory>
 
-#include <QAbstractScrollArea>
 #include <QEasingCurve>
 #include <QMouseEvent>
-#include <QScroller>
-#include <QScrollerProperties>
 #include <QVariantAnimation>
-#include <QWheelEvent>
 #include <QAction>
 #include <QAudioInput>
 #include <QClipboard>
@@ -70,12 +96,16 @@
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
-#include <QLineEdit>
 #include <QBrush>
 #include <QLinearGradient>
 #include <QPalette>
+#include <QAudioOutput>
+#include <QCheckBox>
+#include <QEasingCurve>
+#include <QEnterEvent>
 #include <QMediaCaptureSession>
 #include <QMediaFormat>
+#include <QMediaPlayer>
 #include <QMediaRecorder>
 #include <QMenu>
 #include <QMessageBox>
@@ -84,8 +114,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPropertyAnimation>
 #include <QPushButton>
-#include <QScrollBar>
 #include <QRegularExpression>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -398,6 +428,25 @@ QPixmap chatAvatarPixmap(const QString& title, qlonglong chatId, const QString& 
     return result;
 }
 
+// Real Telegram Desktop's own dialogs row time label (see
+// Dialogs::Ui::DialogsLayout - not vendored, this is a same-shape port):
+// today shows the clock time, the last 6 days show a weekday name, and
+// anything older shows a short date - never a bare "days ago" count.
+// SidebarCanvas::setRows() calls this once per chat-list push, not per
+// paint (see SidebarRowData::timeText's own comment).
+QString sidebarTimeText(qint64 unixSeconds) {
+    QDateTime when = QDateTime::fromSecsSinceEpoch(unixSeconds);
+    QDate today = QDate::currentDate();
+    QDate whenDate = when.date();
+    if (whenDate == today) {
+        return when.toString("HH:mm");
+    }
+    if (whenDate.daysTo(today) < 7) {
+        return when.toString("ddd");
+    }
+    return when.toString("dd.MM.yy");
+}
+
 // A small filled dot - the blinking "recording" light on the record bar,
 // and the connection-state light next to the companion's name. The chat
 // list's own encrypted-session indicator used to be one of these too; it is
@@ -533,9 +582,9 @@ private:
 // loaded; it does not fetch anything over the network itself, and there
 // is no zoom/pan (real Telegram has both) - a real, working first version
 // of the feature, not the complete thing.
-class MediaViewer : public QWidget {
+class MediaViewer : public Ui::RpWidget {
 public:
-    explicit MediaViewer(QWidget* parent) : QWidget(parent) {
+    explicit MediaViewer(QWidget* parent) : Ui::RpWidget(parent) {
         setAttribute(Qt::WA_StyledBackground, true);
         setFocusPolicy(Qt::StrongFocus);
         hide();
@@ -612,7 +661,7 @@ protected:
             default:
                 break;
         }
-        QWidget::keyPressEvent(event);
+        Ui::RpWidget::keyPressEvent(event);
     }
 
     void resizeEvent(QResizeEvent*) override {
@@ -625,6 +674,192 @@ private:
     QVector<QPixmap> images_;
     int index_ = 0;
     QRect imageRect_;
+};
+
+// Hamburger button, leftmost in headerRow_ - opens mainMenuPanel_ below.
+// Hand-painted (three lines) rather than a real .style icon{{}} asset: no
+// existing Resources/icons/ source was verified for this glyph the way
+// icons.cpp's existing set was (see icons.hpp's own comment on that
+// convention), and a plain three-bar glyph does not need one to look right.
+class HamburgerButton : public Ui::RpWidget {
+public:
+    explicit HamburgerButton(QWidget* parent) : Ui::RpWidget(parent) {
+        setFixedSize(style::ConvertScale(32), style::ConvertScale(32));
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    std::function<void()> onClicked;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (hovered_) {
+            painter.setBrush(QColor(0, 0, 0, 20));
+            painter.setPen(Qt::NoPen);
+            painter.drawEllipse(rect());
+        }
+        painter.setPen(QPen(QColor(90, 90, 90), style::ConvertScale(2), Qt::SolidLine, Qt::RoundCap));
+        int lineWidth = style::ConvertScale(16);
+        int left = (width() - lineWidth) / 2;
+        int spacing = style::ConvertScale(6);
+        int centerY = height() / 2;
+        for (int i = -1; i <= 1; ++i) {
+            int y = centerY + i * spacing;
+            painter.drawLine(left, y, left + lineWidth, y);
+        }
+    }
+    // Ui::RpWidgetBase::enterEvent()/leaveEvent() are both `final`
+    // (rp_widget.h) - enterEventHook()/leaveEventHook() are the real
+    // extension points, same fix already applied to SidebarCanvas's own
+    // leaveEvent override earlier this session (that one didn't override
+    // enterEvent at all, so only leaveEvent needed it there).
+    void enterEventHook(QEnterEvent*) override {
+        hovered_ = true;
+        update();
+    }
+    void leaveEventHook(QEvent*) override {
+        hovered_ = false;
+        update();
+    }
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && onClicked) {
+            onClicked();
+        }
+    }
+
+private:
+    bool hovered_ = false;
+};
+
+// Dimmed backdrop behind mainMenuPanel_ below - click anywhere on it closes
+// the menu, same "click away to dismiss" idiom as MediaViewer above.
+class MainMenuDimmer : public Ui::RpWidget {
+public:
+    explicit MainMenuDimmer(QWidget* parent) : Ui::RpWidget(parent) { hide(); }
+
+    std::function<void()> onClicked;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0, 0, 0, 120));
+    }
+    void mousePressEvent(QMouseEvent*) override {
+        if (onClicked) {
+            onClicked();
+        }
+    }
+    void resizeEvent(QResizeEvent*) override {
+        if (parentWidget() != nullptr) {
+            setGeometry(parentWidget()->rect());
+        }
+    }
+};
+
+// The slide-out panel itself - a plain white sheet hosting a QVBoxLayout
+// of ordinary child widgets (labels, MenuRow below), not hand-painted
+// content of its own; only the flat background fill needs a paintEvent,
+// since this codebase does not rely on QPalette::Base/autoFillBackground
+// for backgrounds (see HistoryCanvas's own comment on why that path is
+// avoided - it silently stops painting once a stylesheet is involved).
+class MainMenuPanel : public Ui::RpWidget {
+public:
+    explicit MainMenuPanel(QWidget* parent) : Ui::RpWidget(parent) {}
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(255, 255, 255));
+    }
+};
+
+// One clickable row in mainMenuPanel_ ("My Profile", "Wallet", "New Group",
+// ...) - hand-painted rather than a QPushButton: this codebase avoids
+// setStyleSheet for anything beyond the handful of stock input widgets
+// still on style.qss (see UI.md section 8), and a flat QPushButton with a
+// left-aligned icon+label needs exactly that to look right. Mirrors
+// RippleButton-era widgets elsewhere in spirit (hover highlight, a
+// std::function click callback) without the ripple animation itself -
+// not worth the extra complexity for a simple menu row.
+class MenuRow : public Ui::RpWidget {
+public:
+    MenuRow(QWidget* parent, QString label, QString subtitle = QString())
+        : Ui::RpWidget(parent), label_(std::move(label)), subtitle_(std::move(subtitle)) {
+        // Real Telegram Desktop's own window/window_main_menu.style:
+        // mainMenu's itemPadding is margins(76px, 13px, 28px, 13px) - 13px
+        // top+bottom around a semiboldTextStyle (13px) label gives ~46px
+        // for one line; this has no icon column (see this class's own
+        // comment on why), so it is not the full 76px left inset, but the
+        // vertical rhythm now matches instead of the earlier hand-picked
+        // 42/52px.
+        setFixedHeight(style::ConvertScale(subtitle_.isEmpty() ? 46 : 58));
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    std::function<void()> onClicked;
+
+    void setSubtitle(const QString& subtitle) {
+        subtitle_ = subtitle;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (hovered_) {
+            // Real windowBgOver (#f1f1f1, see colors.palette) - a plain
+            // opaque fill, not a translucent black tint (menu row hover in
+            // real Telegram is not accent-colored, unlike the purple this
+            // theme uses for actually-active/selected state elsewhere).
+            painter.fillRect(rect(), QColor(0xf1, 0xf1, 0xf1));
+        }
+        int left = style::ConvertScale(26);
+        QFont font = QGuiApplication::font();
+        // Real mainMenu.itemStyle is semiboldTextStyle (13px semibold) -
+        // this toolkit has no semibold weight readily available, bold at
+        // the real 13px size is the closer match, not the earlier 15px.
+        font.setPixelSize(style::ConvertScale(13));
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setPen(QColor(30, 30, 30));
+        if (subtitle_.isEmpty()) {
+            painter.drawText(QRect(left, 0, width() - left, height()), Qt::AlignVCenter | Qt::AlignLeft, label_);
+        } else {
+            painter.drawText(QRect(left, style::ConvertScale(8), width() - left, style::ConvertScale(20)),
+                              Qt::AlignVCenter | Qt::AlignLeft, label_);
+            QFont subFont = font;
+            subFont.setBold(false);
+            subFont.setPixelSize(style::ConvertScale(12));
+            painter.setFont(subFont);
+            painter.setPen(QColor(140, 140, 140));
+            painter.drawText(QRect(left, height() - style::ConvertScale(26), width() - left, style::ConvertScale(18)),
+                              Qt::AlignVCenter | Qt::AlignLeft, subtitle_);
+        }
+    }
+    // Ui::RpWidgetBase::enterEvent()/leaveEvent() are both declared
+    // `final` (rp_widget.h) - enterEventHook()/leaveEventHook() are the
+    // real extension points, same fix already applied to SidebarCanvas's
+    // own leaveEvent override earlier this session (see its own comment).
+    void enterEventHook(QEnterEvent*) override {
+        hovered_ = true;
+        update();
+    }
+    void leaveEventHook(QEvent*) override {
+        hovered_ = false;
+        update();
+    }
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && onClicked) {
+            onClicked();
+        }
+    }
+
+private:
+    QString label_;
+    QString subtitle_;
+    bool hovered_ = false;
 };
 
 // A rounded rectangle path with an independent radius per corner - plain
@@ -706,13 +941,21 @@ Ui::BubbleRounding bubbleRounding(bool tailOnLeft, bool showTail, bool joinedTop
 // knob instead of silently ignoring it.
 double bubbleLargeRadius() { return style::ConvertScale(16.0); }
 double bubbleSmallRadius() { return style::ConvertScale(6.0); }
-int bubbleMargin() { return style::ConvertScale(10); }
+// Real ui/chat/chat.style: msgPadding: margins(11px, 8px, 11px, 8px) - not
+// one uniform inset, horizontal and vertical differ (a bubble breathes more
+// side-to-side than top-to-bottom). Split into H/V rather than the single
+// bubbleMargin() this used to be, per a grep audit against telegram_fork's
+// real .style values.
+int bubbleMarginH() { return style::ConvertScale(11); }
+int bubbleMarginV() { return style::ConvertScale(8); }
 int bubbleTailHeight() { return style::ConvertScale(6); }
-int maxBubbleContentWidth() { return style::ConvertScale(420) - bubbleMargin() * 2; }
-int minBubbleContentWidth() { return style::ConvertScale(40); }
+// Real chat.style: msgMaxWidth: 430px, msgMinWidth: 160px.
+int maxBubbleContentWidth() { return style::ConvertScale(430) - bubbleMarginH() * 2; }
+int minBubbleContentWidth() { return style::ConvertScale(160); }
 // Timestamp/tick run at the end of a bubble: the font size of the muted
 // "HH:mm" span, and the side of the square the outgoing tick is drawn in.
-int bubbleMetaFontSize() { return style::ConvertScale(11); }
+// Real chat.style: msgDateFont: font(13px).
+int bubbleMetaFontSize() { return style::ConvertScale(13); }
 double tickSize() { return style::ConvertScale(13.0); }
 
 // Paints one bubble's body (fill, shadow, corners, tail) at bodyRect via
@@ -746,11 +989,12 @@ void paintBubbleBody(QPainter& painter, const QRect& bodyRect, int outerWidth, b
 
 // Inner padding between the bubble's own edge and its content - 0 for
 // media that fills the bubble (a photo/album with no caption sits flush
-// against the rounded edge, matching real Telegram), bubbleMargin()
+// against the rounded edge, matching real Telegram), bubbleMarginH()/V()
 // otherwise (text/system content, which does get breathing room). Distinct
 // from HistoryCanvas::sideMargin(), which is the OUTER gap between the
 // canvas edge and the bubble itself and never varies by content type.
-int bubblePadding(bool fillsBubble) { return fillsBubble ? 0 : bubbleMargin(); }
+int bubblePaddingH(bool fillsBubble) { return fillsBubble ? 0 : bubbleMarginH(); }
+int bubblePaddingV(bool fillsBubble) { return fillsBubble ? 0 : bubbleMarginV(); }
 
 // Radius to use for one bubble corner when clipping media to the bubble's
 // own rounded shape (see paintItem()'s album/isImage branches) - mirrors
@@ -799,6 +1043,14 @@ struct HistoryItem {
     // hand-rolled grid.
     QVector<QPixmap> albumPixmaps;
     QVector<QRect> albumLayout;
+    // Original, full-resolution file paths - pixmap/albumPixmaps above are
+    // downscaled to bubble/mosaic-cell size (see buildItem()), which looks
+    // fine inline but was also what MediaViewer was opening, stretched up
+    // to near-fullscreen - a real, visible quality loss on click. These are
+    // what tryActivateImageAt() actually loads fresh from disk for the
+    // viewer instead.
+    QString imagePath;
+    QVector<QString> albumImagePaths;
     // True for a standalone image or an album/mosaic with no caption text -
     // real Telegram gives media with nothing else in the bubble zero inner
     // padding (the photo fills the bubble edge-to-edge instead of sitting
@@ -808,6 +1060,16 @@ struct HistoryItem {
     bool showTail = true;
     qlonglong messageId = 0;
     bool hidden = false;  // in-conversation search filter, see HistoryCanvas::setSearchFilter()
+
+    // A companion's (or your own) voice message - painted as a play/pause
+    // button plus a progress track instead of drawDocument()'s normal text
+    // flow, see paintVoiceContent(). voicePath is empty until the audio has
+    // downloaded (see MainWindow::updateHistoryPhoto(), reused for voice
+    // too - both just replace a message's local file path on arrival).
+    bool isVoice = false;
+    qint32 voiceDuration = 0;
+    QString voicePath;
+    QByteArray voiceWaveform;
 
     // Outgoing "sent" tick. Drawn as a Glyph::Check over the run of
     // non-breaking spaces of this width reserved at the end of the text (see
@@ -856,141 +1118,31 @@ struct HistoryEntry {
     // unused when this is set; the single-photo path stays exactly as it
     // was for a standalone image.
     QVector<QString> albumFilePaths;
+    // See StoredMessage::isVoiceNote/voiceDuration's own comments -
+    // filePath above is the voice note's local audio path when this is set.
+    bool isVoiceNote = false;
+    qint32 voiceDuration = 0;
+    QByteArray voiceWaveform;
 };
 
-// Eases wheel-scrolled movement into place instead of the default
-// per-tick instant jump, on both the sidebar and message list. Real
-// Telegram Desktop feeds wheel input into a tuned Ui::Animations-driven
-// QScroller kinetic state machine (see
-// telegram_fork/tdesktop/Telegram/lib_ui/ui/widgets/scroll_area.cpp,
-// ScrollArea::viewportEvent()/_scroller->handleInput() -
-// DecelerationFactor 0.6, MaximumVelocity 0.95, overshoot off) - that
-// exact input-synthesis wiring is internal to lib_ui and not reusable
-// standalone, so this reaches the same *visible* result (a glide into
-// the target position rather than a stepped jump) through a
-// QVariantAnimation on the scrollbar value instead, same mechanism this
-// codebase already uses for RippleButton's ripple.
-// Real Telegram Desktop's own mechanism for kinetic wheel/trackpad
-// scrolling: a tuned QScroller fed directly from wheel input, not a
-// hand-written easing animation (an earlier version of this class did
-// that instead - it was an approximation of the *effect*, not the real
-// mechanism, and it looked wrong). Structure and every tuned constant
-// copied directly from telegram_fork/tdesktop/Telegram/lib_ui/ui/widgets/
-// scroll_area.cpp: SetupScrollerPhysics() for the QScrollerProperties,
-// ScrollArea::viewportEvent()'s QEvent::Wheel handling for the
-// phase-based press/move/release dispatch into QScroller::handleInput().
-//
-// Only phased wheel events (Qt::ScrollBegin/Update/End/Momentum - what a
-// trackpad or a precision mouse wheel sends) drive the scroller here,
-// exactly like tdesktop: a plain discrete wheel click
-// (Qt::NoScrollPhase, the common case for an ordinary USB/wireless mouse
-// on Windows) is left alone and falls through to
-// QAbstractScrollArea's own default wheel handling, same as in the real
-// client - not a limitation introduced here, tdesktop's own scroller
-// genuinely does not smooth a plain mouse wheel either.
-class KineticScroller {
-public:
-    explicit KineticScroller(QWidget* target) : target_(target), scroller_(QScroller::scroller(target)) {
-        QScrollerProperties props = scroller_->scrollerProperties();
-        using P = QScrollerProperties;
-        // The Qt default 0.125 gives a ~4s, slippery, constant-deceleration
-        // glide that "never slows down" - 0.6 brings a hard flick down to
-        // ~1-1.6s, close to macOS native momentum (tdesktop's own comment).
-        props.setScrollMetric(P::DecelerationFactor, 0.6);
-        // The default cap 0.5 m/s clips hard flicks below the feel tdesktop
-        // tunes for; this metric is m/s, converted to pixels internally.
-        props.setScrollMetric(P::MaximumVelocity, 0.95);
-        props.setScrollMetric(P::AcceleratingFlickMaximumTime, 0.0);
-        props.setScrollMetric(P::MaximumClickThroughVelocity, 0.0);
-        props.setScrollMetric(P::DragStartDistance, 0.0);
-        props.setScrollMetric(P::VerticalOvershootPolicy, QVariant::fromValue(P::OvershootAlwaysOff));
-        props.setScrollMetric(P::HorizontalOvershootPolicy, QVariant::fromValue(P::OvershootAlwaysOff));
-        scroller_->setScrollerProperties(props);
-    }
-
-    // Returns true if the event was consumed (a phased event handed to the
-    // scroller, or a plain wheel click animated by hand below) - the
-    // caller should treat false as "let default wheel handling run".
-    bool handleWheelEvent(QWheelEvent* event) {
-        switch (event->phase()) {
-        case Qt::ScrollBegin:
-        case Qt::ScrollUpdate: {
-            bool wasNull = wheelPos_.isNull();
-            if (wasNull) {
-                wheelPos_ = QPoint(target_->width(), target_->height()) / 2;
-            } else {
-                wheelPos_ += event->angleDelta();
-            }
-            scroller_->handleInput(wasNull ? QScroller::InputPress : QScroller::InputMove, wheelPos_,
-                                    QDateTime::currentMSecsSinceEpoch());
-            return true;
-        }
-        case Qt::ScrollEnd:
-        case Qt::ScrollMomentum:
-            if (!wheelPos_.isNull()) {
-                scroller_->handleInput(QScroller::InputRelease, wheelPos_, QDateTime::currentMSecsSinceEpoch());
-                wheelPos_ = {};
-            }
-            return true;
-        case Qt::NoScrollPhase:
-            // A plain USB/wireless mouse wheel reports no phase at all -
-            // QScroller::handleInput() above is only ever fed by the
-            // phased branches (a trackpad/precision wheel), so it does
-            // nothing for this, the actually common case on a normal
-            // desktop. Applied immediately below, not animated: an
-            // earlier version of this branch queued each notch onto a
-            // QVariantAnimation glide, retargeting it on every further
-            // notch - during a continuous scroll (many notches in quick
-            // succession, the normal way anyone actually uses a mouse
-            // wheel to read through a chat) the visible content
-            // permanently trailed the real input by however long the
-            // animation window was, which read as input lag, not
-            // smoothness. A plain, unanimated step - just a bigger one
-            // than QAbstractScrollArea's own tiny default - responds
-            // immediately and still moves a readable amount per notch.
-            applyWheelStep(event->angleDelta().y());
-            return true;
-        default:
-            return false;
-        }
-    }
-
-private:
-    void applyWheelStep(int angleDeltaY) {
-        auto* area = qobject_cast<QAbstractScrollArea*>(target_);
-        if (area == nullptr || angleDeltaY == 0) {
-            return;
-        }
-        QScrollBar* bar = area->verticalScrollBar();
-        // One notch (120 angle-delta units, Qt's own convention) moves
-        // about 3 rows' worth of pixels - matches this codebase's existing
-        // verticalScrollBar()->setSingleStep(20) sizing (see
-        // HistoryCanvas's constructor) scaled up for a single wheel click
-        // rather than the "programmatic single step" that value is
-        // actually for. Scaled the same way bubble/sidebar sizing is (see
-        // bubbleMargin() and friends), so a notch still covers roughly the
-        // same number of rows at any interface scale.
-        double pixelsPerNotch = style::ConvertScale(120.0);
-        double notches = angleDeltaY / 120.0;
-        int delta = qRound(-notches * pixelsPerNotch);
-        bar->setValue(qBound(bar->minimum(), bar->value() + delta, bar->maximum()));
-    }
-
-    QWidget* target_;
-    QScroller* scroller_;
-    QPoint wheelPos_;
-};
+// KineticScroller (a hand-rolled QScroller-based wheel/touch momentum
+// class, tuned to match telegram_fork/tdesktop/Telegram/lib_ui/ui/widgets/
+// scroll_area.cpp's own SetupScrollerPhysics()/viewportEvent()) used to
+// live here, for both SidebarCanvas and HistoryCanvas. Removed along with
+// each class's own last usage of it, once both moved onto a real
+// Ui::ScrollArea (see their own class comments) - its built-in momentum
+// scrolling covers this without a second, parallel implementation.
 
 // The message list itself - a single custom-painted, virtualized canvas
-// (QAbstractScrollArea + manual layout/paint/hit-test), not a
-// QAbstractItemView subclass with a child widget per row, matching real
-// Telegram Desktop's own architecture for this (see HistoryItem's own
-// comment above for the direct citation). Virtualized: paintEvent only
-// draws items intersecting the current viewport, however many messages
-// are actually loaded.
-class HistoryCanvas : public QAbstractScrollArea {
+// (Ui::RpWidget, owned by a real Ui::ScrollArea - see the MainWindow
+// constructor's own construction site), not a QAbstractItemView subclass
+// with a child widget per row, matching real Telegram Desktop's own
+// architecture for this (see HistoryItem's own comment above for the
+// direct citation). Virtualized: paintEvent only draws items intersecting
+// the current viewport, however many messages are actually loaded.
+class HistoryCanvas : public Ui::RpWidget {
 public:
-    explicit HistoryCanvas(QWidget* parent = nullptr) : QAbstractScrollArea(parent) {
+    explicit HistoryCanvas(QWidget* parent = nullptr) : Ui::RpWidget(parent) {
         // ClickFocus, not NoFocus: mouse text selection (see
         // mousePressEvent/keyPressEvent below) needs Ctrl+C to reach this
         // widget, which only happens once it can actually hold focus -
@@ -998,11 +1150,34 @@ public:
         // because clicking into the list to select text is itself the
         // natural way to focus it, same as any real text view.
         setFocusPolicy(Qt::ClickFocus);
-        setFrameShape(QFrame::NoFrame);
-        setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        kineticScroller_ = std::make_unique<KineticScroller>(this);
     }
+
+    // Called once, right after construction, from the MainWindow
+    // constructor's own setOwnedWidget() call site - HistoryCanvas needs
+    // to reach back into its own enclosing Ui::ScrollArea for scroll
+    // position (isNearBottom()/scrollToBottom()/prependItems()'s anchor
+    // restore) and viewport size (background wallpaper sizing, see
+    // resizeEvent), same as any owned widget that needs to know about its
+    // own scrolling - Ui::ScrollArea does not hand this to its owned
+    // widget automatically the way it hands out geometryChanged().
+    void setScrollArea(Ui::ScrollArea* area) {
+        scrollArea_ = area;
+        // Own width (bubble left/right alignment, see computeBubbleLeft())
+        // and background_'s own size (see paintEvent's own comment on why
+        // it needs the scroll area's visible size, not this widget's full
+        // content height) both track the scroll area's own geometry - same
+        // "geometryChanged() -> resizeToWidth()" wiring the MainWindow
+        // constructor already uses for SidebarCanvas/sidebarScroll.
+        area->geometryChanged() | rpl::on_next(
+            [this, area] {
+                resizeToWidth(area->width());
+                background_.setSize(area->size(), devicePixelRatioF());
+                update();
+            },
+            area->lifetime());
+    }
+
+    int resizeGetHeight(int /*newWidth*/) override { return totalHeight_; }
 
     void clear() {
         items_.clear();
@@ -1011,8 +1186,8 @@ public:
         lastTextItemIndex_ = -1;
         loadingMore_ = false;
         resetSelectionState();
-        updateScrollRange();
-        viewport()->update();
+        resizeToWidth(width());
+        update();
     }
 
     // Full replace - O(n) (every item is re-measured and re-laid-out).
@@ -1038,8 +1213,8 @@ public:
                 break;
             }
         }
-        updateScrollRange();
-        viewport()->update();
+        resizeToWidth(width());
+        update();
     }
 
     // Appends one new item at the end - O(1) amortized, the common case
@@ -1076,43 +1251,53 @@ public:
         bool isTextItem = !item.isImage && entry.kind != MessageKind::System;
         items_.push_back(std::move(item));
         lastTextItemIndex_ = isTextItem ? items_.size() - 1 : -1;
-        updateScrollRange();
-        viewport()->update();
+        resizeToWidth(width());
+        update();
     }
 
-    // Inserts a page of older messages at the front - O(k) in the new
-    // page's own size only, NOT O(n) in everything already loaded.
+    // Inserts a page of older messages at the front.
     //
-    // An earlier version of this laid the new page out at local top
-    // 0..y and then shifted every already-loaded item's top forward by
-    // y to make room - cheaper than the full setItems() rebuild it
-    // replaced (see below), but still O(n) per page, which is exactly
-    // the same "gets slower forever the further back you scroll"
-    // (effectively O(n^2) over a long scrollback session) pattern in
-    // miniature, just with a smaller constant - a chat with enough
-    // history to need dozens of pages would still eventually stall on
-    // this shift alone. Fixed properly here: the new page is laid out
-    // ending exactly at the CURRENT oldest item's top (which may itself
-    // already be negative from an earlier prepend) instead of at 0, so
-    // no already-loaded item's top ever needs to change at all -
-    // HistoryItem::top is simply allowed to go negative for older
-    // content, and updateScrollRange()'s minimum follows items_.front().top
-    // instead of assuming it is always 0. contentBottom_ (see
-    // appendItem()) is intentionally untouched here - where new live
-    // messages get appended at the bottom does not depend on how far
-    // back scrollback has grown.
+    // Two earlier versions of this existed: the original called
+    // setItems() with the whole growing list on every page (O(n^2) over a
+    // long scrollback session - redid every already-loaded message's
+    // QTextDocument work on every page load); the version this replaces
+    // avoided that by giving older pages NEGATIVE top coordinates instead
+    // of shifting anything already loaded (O(k) in the new page only).
+    // That negative-coordinate scheme is incompatible with migrating this
+    // class onto Ui::RpWidget/Ui::ScrollArea (see zkgram/TODO.md, "Что
+    // осталось для полного перехода на lib_ui" - a real widget's own
+    // local coordinate origin cannot host content above y=0, Ui::ScrollArea
+    // clips it away). Checked how real Telegram Desktop's own
+    // HistoryView::ListWidget (a real Ui::RpWidget) handles this
+    // (history_view_list_widget.cpp, saveScrollState()/restoreScrollState(),
+    // ~line 1108/2458 in telegram_fork): it does NOT use negative
+    // coordinates either - every relayout keeps everything in [0, height)
+    // and shifting old items forward is a plain O(n) loop, same as the
+    // very first version here. What makes that shift invisible to the
+    // user is not avoiding it, but restoring scroll position by ANCHOR
+    // ITEM instead of by raw pixel value: remember which item sits at the
+    // current viewport top and how many pixels into it (_visibleTopItem/
+    // _visibleTopFromItem there), then after the shift, scroll to that
+    // same item's new top plus the same offset - the visible content
+    // never appears to move even though its absolute coordinates did.
+    // Ported that here (anchorIndex/anchorOffset below) rather than the
+    // negative-coordinate trick, on the same reasoning: it is what the
+    // real, heavily-used implementation actually does, not a guess.
     //
-    // Still does not re-measure/rebuild any already-loaded item (that
-    // was the original, larger fix: calling setItems() with the whole
-    // growing list once per page redid the expensive QTextDocument work
-    // for every already-loaded message on every single page load - an
-    // O(n^2) pattern for a chat needing several pages to fill the view,
-    // see MainWindow::ensureHistoryFillsViewport() - the same class of
-    // freeze already found and fixed once for the sidebar, see
-    // TelegramClient::requestMoreChats()'s own comment in
-    // telegram_client.cpp).
+    // Still does not re-measure/rebuild any already-loaded item's own
+    // QTextDocument content - only its top offset changes, which is a
+    // plain int addition per item, not a re-layout.
     void prependItems(const QVector<HistoryEntry>& entries) {
-        int previousMinTop = items_.isEmpty() ? 0 : items_.front().top;
+        int anchorIndex = -1;
+        int anchorOffset = 0;
+        if (!items_.isEmpty() && scrollArea_) {
+            int visibleTop = scrollArea_->scrollTop();
+            anchorIndex = qMin(firstIndexNotBefore(visibleTop), items_.size() - 1);
+            if (anchorIndex >= 0) {
+                anchorOffset = visibleTop - items_[anchorIndex].top;
+            }
+        }
+
         QVector<HistoryItem> newItems;
         newItems.reserve(entries.size());
         int totalNewHeight = 0;
@@ -1121,10 +1306,13 @@ public:
             totalNewHeight += item.height;
             newItems.push_back(std::move(item));
         }
-        int y = previousMinTop - totalNewHeight;
+        int y = 0;
         for (HistoryItem& item : newItems) {
             item.top = y;
             y += item.height;
+        }
+        for (HistoryItem& item : items_) {
+            item.top += totalNewHeight;
         }
         // Only advance lastTextItemIndex_ (used by appendItem()'s tail
         // retraction) if it already pointed at a real text item - if the
@@ -1135,11 +1323,41 @@ public:
         }
         items_ = newItems + items_;
         totalHeight_ += totalNewHeight;
-        updateScrollRange();
-        viewport()->update();
+        // Every already-loaded item's top just moved forward by
+        // totalNewHeight (see the shift loop above) - contentBottom_ is an
+        // absolute coordinate into that same space, so it has to move
+        // with everything else or appendItem() would place the next live
+        // message at a now-stale position.
+        contentBottom_ += totalNewHeight;
+        resizeToWidth(width());
+        if (anchorIndex >= 0 && scrollArea_) {
+            int newAnchorIndex = anchorIndex + newItems.size();
+            scrollArea_->scrollToY(items_[newAnchorIndex].top + anchorOffset);
+        }
+        update();
     }
 
-    void scrollToBottom() { verticalScrollBar()->setValue(verticalScrollBar()->maximum()); }
+    void scrollToBottom() {
+        if (scrollArea_) {
+            scrollArea_->scrollToY(scrollArea_->scrollTopMax());
+        }
+    }
+
+    // Whether the viewport is at (or close enough to) the newest message
+    // that auto-scrolling to the bottom on a new arrival would not be a
+    // surprise - MainWindow::appendMessage() uses this to decide whether
+    // a live message should pull the view down at all. Every real chat
+    // client (this one previously did not) only autoscrolls when you were
+    // already reading the bottom; if you have scrolled up into history, a
+    // message arriving - typically from the other side, not something you
+    // did - must not suddenly snap you back down to it. A small threshold
+    // (not exact equality with maximum()) covers a user who is one or two
+    // rows short of the very bottom, which still reads as "at the bottom"
+    // to them.
+    bool isNearBottom() const {
+        return scrollArea_
+            && scrollArea_->scrollTop() >= scrollArea_->scrollTopMax() - style::ConvertScale(80);
+    }
 
     // Shown as a small fixed pill near the top of the viewport while an
     // older-history page fetch (see MainWindow::maybeLoadMoreHistory()) is
@@ -1156,22 +1374,20 @@ public:
             return;
         }
         loadingMore_ = loading;
-        viewport()->update();
+        update();
     }
 
     // Whether the currently loaded messages are tall enough to need
     // scrolling at all - MainWindow::ensureHistoryFillsViewport() uses
     // this to decide whether to keep auto-loading older pages on chat
-    // open. Deliberately NOT "verticalScrollBar()->maximum() == 0": that
-    // used to be equivalent (the scrollbar's range always started at a
-    // fixed 0), but stopped being true once prependItems() started giving
-    // older history negative top coordinates instead of shifting
-    // everything already loaded (see its own comment) - the range's
-    // minimum moves negative after the very first prepend, so its maximum
-    // does too, and the old check would then read "full" after just one
-    // page regardless of whether the viewport genuinely had enough
-    // content yet, silently cutting the auto-fill loop short.
-    bool contentFillsViewport() const { return totalHeight_ >= viewport()->height(); }
+    // open. Compares against the enclosing Ui::ScrollArea's own visible
+    // height, not this widget's height() (which, post-migration, is
+    // this canvas's real full content height - resizeGetHeight() returns
+    // totalHeight_ - so it is always >= totalHeight_ by definition and
+    // this check would always read "fills" if it used that instead).
+    bool contentFillsViewport() const {
+        return scrollArea_ && totalHeight_ >= scrollArea_->height();
+    }
 
     // In-conversation text filter (see MainWindow::onSearchTextChanged) -
     // hides non-matching rows in place rather than rebuilding the list.
@@ -1180,8 +1396,8 @@ public:
             item.hidden = !query.isEmpty() && !item.rawText.contains(query, Qt::CaseInsensitive);
         }
         relayoutFrom(0);
-        updateScrollRange();
-        viewport()->update();
+        resizeToWidth(width());
+        update();
     }
 
     struct HitResult {
@@ -1228,11 +1444,12 @@ public:
         return lo;
     }
 
-    // pos is in viewport-local coordinates, same convention as
-    // QAbstractItemView::itemAt() (customContextMenuRequested's own
-    // point), which is what this replaces.
+    // pos is in this widget's own local coordinates, which (post-migration
+    // - see the class comment) directly equal absolute item-space
+    // coordinates, same convention as QAbstractItemView::itemAt()
+    // (customContextMenuRequested's own point), which this replaces.
     HitResult itemAt(const QPoint& pos) const {
-        int y = pos.y() + verticalScrollBar()->value();
+        int y = pos.y();
         for (int i = firstIndexNotBefore(y); i < items_.size(); ++i) {
             const HistoryItem& item = items_[i];
             if (item.top > y) {
@@ -1275,27 +1492,35 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override {
-        QPainter painter(viewport());
+        QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
         // Painted by hand rather than left to QPalette::Base/
         // autoFillBackground - see git history for why that path silently
         // stopped painting anything at all once MainWindow got a
         // stylesheet. background_ owns its own cache (see ChatBackground's
         // own comment) and only regenerates on an actual resize, not on
-        // every paint.
-        QRect viewportRect = viewport()->rect();
+        // every paint. Sized to the enclosing Ui::ScrollArea's own visible
+        // window, not this widget's own (much taller, full-content) size -
+        // see resizeEvent - and positioned at the current scroll offset,
+        // so the wallpaper stays fixed relative to the window as content
+        // scrolls past it. Before this class moved onto Ui::ScrollArea,
+        // item painting itself subtracted the scroll offset, so a plain
+        // (0,0)-origin rect was already window-relative for free; now
+        // items paint at their real absolute position (see below), so the
+        // background has to track the scroll offset explicitly instead.
+        int scrollTop = scrollArea_ ? scrollArea_->scrollTop() : 0;
+        QRect viewportRect(0, scrollTop, width(), scrollArea_ ? scrollArea_->height() : height());
         background_.paint(painter, viewportRect);
-        int scrollY = verticalScrollBar()->value();
         QRect visible = event->rect();
         // Starts at the first item that could possibly intersect the
         // visible rect (see firstIndexNotBefore()'s own comment) instead
         // of scanning every loaded message from index 0 on every single
         // repaint - the actual painted subset is unchanged, only how fast
         // this loop finds it is.
-        for (int i = firstIndexNotBefore(visible.top() + scrollY); i < items_.size(); ++i) {
+        for (int i = firstIndexNotBefore(visible.top()); i < items_.size(); ++i) {
             const HistoryItem& item = items_[i];
-            int itemTop = item.top - scrollY;
+            int itemTop = item.top;
             if (itemTop > visible.bottom()) {
                 break;
             }
@@ -1325,7 +1550,12 @@ protected:
         int height = style::ConvertScale(26);
         int width = metrics.horizontalAdvance(text) + paddingH * 2;
         int top = style::ConvertScale(10);
-        QRect pillRect((viewportRect.width() - width) / 2, top, width, height);
+        // viewportRect.top() is the current scroll offset, not always 0
+        // post-migration (see paintEvent's own comment) - added here so
+        // the pill stays anchored near the top of the visible WINDOW
+        // rather than drifting to canvas-absolute y=10 (invisible once
+        // scrolled past the very first screenful).
+        QRect pillRect((viewportRect.width() - width) / 2, viewportRect.top() + top, width, height);
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
@@ -1337,19 +1567,14 @@ protected:
         painter.restore();
     }
 
-    void resizeEvent(QResizeEvent* event) override {
-        QAbstractScrollArea::resizeEvent(event);
-        updateScrollRange();
-        background_.setSize(viewport()->size(), devicePixelRatioF());
-    }
-
-    void wheelEvent(QWheelEvent* event) override {
-        if (kineticScroller_->handleWheelEvent(event)) {
-            event->accept();
-        } else {
-            QAbstractScrollArea::wheelEvent(event);
-        }
-    }
+    // No resizeEvent/wheelEvent overrides here anymore (unlike the
+    // pre-migration QAbstractScrollArea version) - resizeGetHeight() +
+    // resizeToWidth() (called from setScrollArea()'s own geometryChanged()
+    // subscription below, same as clear()/setItems()/appendItem()/
+    // prependItems()/setSearchFilter() above) cover layout, and the real
+    // Ui::ScrollArea wrapping this canvas (see MainWindow's construction
+    // site) covers wheel/touch/momentum scrolling on its own - same as
+    // SidebarCanvas's own migration earlier.
 
     // Real character-level mouse text selection (click-drag highlights a
     // range, double-click selects a word, Ctrl+C copies it) - the message
@@ -1360,7 +1585,7 @@ protected:
     // selection state, see history_view_element.h).
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) {
-            QAbstractScrollArea::mousePressEvent(event);
+            Ui::RpWidget::mousePressEvent(event);
             return;
         }
         int index = itemIndexAt(event->pos());
@@ -1414,7 +1639,7 @@ protected:
 
         if (index < 0 || items_[index].isImage || !items_[index].doc) {
             clearSelection();
-            QAbstractScrollArea::mousePressEvent(event);
+            Ui::RpWidget::mousePressEvent(event);
             return;
         }
         int pos = docPositionAt(items_[index], event->pos());
@@ -1422,7 +1647,7 @@ protected:
         selectionStart_ = pos;
         selectionEnd_ = pos;
         selecting_ = true;
-        viewport()->update();
+        update();
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
@@ -1434,11 +1659,11 @@ protected:
             longPressTimer_->stop();
         }
         if (!selecting_ || selectionItemIndex_ < 0) {
-            QAbstractScrollArea::mouseMoveEvent(event);
+            Ui::RpWidget::mouseMoveEvent(event);
             return;
         }
         selectionEnd_ = docPositionAt(items_[selectionItemIndex_], event->pos());
-        viewport()->update();
+        update();
     }
 
     void mouseReleaseEvent(QMouseEvent* event) override {
@@ -1457,8 +1682,9 @@ protected:
             !event->modifiers().testFlag(Qt::ControlModifier) &&
             (event->pos() - longPressStartPos_).manhattanLength() <= 6) {
             tryActivateImageAt(event->pos());
+            tryToggleVoiceAt(event->pos());
         }
-        QAbstractScrollArea::mouseReleaseEvent(event);
+        Ui::RpWidget::mouseReleaseEvent(event);
     }
 
     void tryActivateImageAt(const QPoint& pos) {
@@ -1468,20 +1694,63 @@ protected:
         }
         const HistoryItem& item = items_[index];
         int bubbleLeft = computeBubbleLeft(item);
-        int padding = bubblePadding(item.fillsBubble);
+        int paddingH = bubblePaddingH(item.fillsBubble);
+        int paddingV = bubblePaddingV(item.fillsBubble);
         int rowMargin = kRowVerticalMargin(item.attached);
-        int bubbleTop = (item.top - verticalScrollBar()->value()) + rowMargin / 2;
-        QPoint local = pos - QPoint(bubbleLeft + padding, bubbleTop + padding);
+        int bubbleTop = item.top + rowMargin / 2;
+        QPoint local = pos - QPoint(bubbleLeft + paddingH, bubbleTop + paddingV);
         if (!item.albumPixmaps.isEmpty()) {
             for (int k = 0; k < item.albumLayout.size(); ++k) {
                 if (item.albumLayout[k].contains(local)) {
-                    onImageActivated(item.albumPixmaps, k);
+                    onImageActivated(loadFullResolutionOrFallback(item.albumImagePaths, item.albumPixmaps), k);
                     return;
                 }
             }
         } else if (item.isImage && QRect(QPoint(0, 0), item.pixmap.size()).contains(local)) {
-            onImageActivated(QVector<QPixmap>{item.pixmap}, 0);
+            QPixmap full;
+            if (!item.imagePath.isEmpty() && full.load(item.imagePath)) {
+                onImageActivated(QVector<QPixmap>{full}, 0);
+            } else {
+                onImageActivated(QVector<QPixmap>{item.pixmap}, 0);
+            }
         }
+    }
+
+    // MediaViewer used to open the exact same downscaled QPixmap the
+    // bubble/mosaic itself paints (item.pixmap/albumPixmaps, scaled to
+    // bubble/cell size in buildItem()) - correct for an inline thumbnail,
+    // but stretched up to near-fullscreen it read as a real quality drop
+    // on click. Loads fresh from the original file instead, falling back
+    // to the already-cached thumbnail only if that file is genuinely gone
+    // (moved/deleted) so a click never opens a blank viewer.
+    static QVector<QPixmap> loadFullResolutionOrFallback(const QVector<QString>& paths,
+                                                           const QVector<QPixmap>& fallback) {
+        QVector<QPixmap> result;
+        result.reserve(fallback.size());
+        for (int i = 0; i < fallback.size(); ++i) {
+            QPixmap full;
+            if (i < paths.size() && !paths[i].isEmpty() && full.load(paths[i])) {
+                result.push_back(std::move(full));
+            } else {
+                result.push_back(fallback[i]);
+            }
+        }
+        return result;
+    }
+
+    // A quick click anywhere in a voice bubble's content area toggles its
+    // play/pause - not just the circular button itself, matching real
+    // Telegram's own generously-sized tap target for this.
+    void tryToggleVoiceAt(const QPoint& pos) {
+        int index = itemIndexAt(pos);
+        if (index < 0 || !onVoicePlayToggled) {
+            return;
+        }
+        const HistoryItem& item = items_[index];
+        if (!item.isVoice) {
+            return;
+        }
+        onVoicePlayToggled(item.messageId, item.voicePath);
     }
 
     // Same bubbleLeft geometry paintItem() computes inline - factored out
@@ -1489,9 +1758,9 @@ protected:
     // sync with where the image is actually painted, the same discipline
     // textOrigin() already follows for text hit-testing.
     int computeBubbleLeft(const HistoryItem& item) const {
-        int viewportWidth = viewport()->width();
-        int padding = bubblePadding(item.fillsBubble);
-        int bubbleOuterWidth = item.contentWidth + padding * 2;
+        int viewportWidth = width();
+        int paddingH = bubblePaddingH(item.fillsBubble);
+        int bubbleOuterWidth = item.contentWidth + paddingH * 2;
         int bubbleLeft;
         if (item.kind == MessageKind::Outgoing) {
             bubbleLeft = viewportWidth - bubbleOuterWidth - sideMargin();
@@ -1512,7 +1781,7 @@ protected:
         }
         int index = itemIndexAt(event->pos());
         if (index < 0 || items_[index].isImage || !items_[index].doc) {
-            QAbstractScrollArea::mouseDoubleClickEvent(event);
+            Ui::RpWidget::mouseDoubleClickEvent(event);
             return;
         }
         QTextCursor cursor(items_[index].doc.get());
@@ -1525,7 +1794,7 @@ protected:
         // guaranteed rather than incidental.
         selectionStart_ = qMin(cursor.selectionStart(), items_[index].textLength);
         selectionEnd_ = qMin(cursor.selectionEnd(), items_[index].textLength);
-        viewport()->update();
+        update();
     }
 
     void keyPressEvent(QKeyEvent* event) override {
@@ -1536,7 +1805,7 @@ protected:
             }
             return;
         }
-        QAbstractScrollArea::keyPressEvent(event);
+        Ui::RpWidget::keyPressEvent(event);
     }
 
     // ---- multi-message selection (real Telegram's "select messages" mode,
@@ -1555,7 +1824,7 @@ protected:
     //
     // Explicit public: here - everything above this point (paintEvent,
     // the mouse/key event overrides) sits under the class's own
-    // protected: section (QAbstractScrollArea's virtual overrides), and
+    // protected: section (QWidget's own virtual overrides), and
     // MainWindow needs to call several of the following methods from
     // outside the class.
 public:
@@ -1631,7 +1900,7 @@ public:
             setMultiSelectMode(false);
             return;
         }
-        viewport()->update();
+        update();
         if (onSelectionModeChanged) {
             onSelectionModeChanged(true, static_cast<int>(selectedIndices_.size()));
         }
@@ -1663,8 +1932,9 @@ public:
         return result;
     }
 
-    static int checkboxGutterWidth() { return style::ConvertScale(34); }
-    static int checkboxDiameter() { return style::ConvertScale(22); }
+    // Real chat.style: msgSelectionOffset: 30px, msgSelectionCheck.size: 20px.
+    static int checkboxGutterWidth() { return style::ConvertScale(30); }
+    static int checkboxDiameter() { return style::ConvertScale(20); }
 
     void animateSelectionReveal(qreal target) {
         if (selectionRevealAnim_) {
@@ -1677,7 +1947,7 @@ public:
         selectionRevealAnim_->setEasingCurve(QEasingCurve::OutCubic);
         connect(selectionRevealAnim_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
             selectionReveal_ = value.toReal();
-            viewport()->update();
+            update();
         });
         // deleteOnHide-style self-cleanup, same pattern used elsewhere in
         // this file (e.g. Ui::PopupMenu) - no owner needs to track this
@@ -1718,7 +1988,10 @@ public:
     }
 
 private:
-    std::unique_ptr<KineticScroller> kineticScroller_;
+    // Set once via setScrollArea() right after construction - see its own
+    // comment. Not owned (Ui::ScrollArea owns this widget, not the other
+    // way around).
+    Ui::ScrollArea* scrollArea_ = nullptr;
     ChatBackground background_;
     int selectionItemIndex_ = -1;
     int selectionStart_ = -1;
@@ -1738,6 +2011,15 @@ private:
     int longPressIndex_ = -1;
     QPoint longPressStartPos_;
 
+    // See setVoicePlaybackState()'s own comment - mirrors MainWindow's
+    // voicePlayer_ state just enough to paint the currently-playing
+    // bubble's icon/progress correctly, without this class knowing
+    // anything about QMediaPlayer.
+    qlonglong playingVoiceMessageId_ = 0;
+    bool voicePlaying_ = false;
+    qint64 voicePositionMs_ = 0;
+    qint64 voiceDurationMs_ = 0;
+
 public:
     // Public: MainWindow's own "Select" context-menu action and the
     // selection toolbar's Forward/Delete/Copy buttons both need to drive
@@ -1753,6 +2035,26 @@ public:
     // clicked, so the viewer can open already showing the right one and
     // still let the user step to its neighbors.
     std::function<void(const QVector<QPixmap>&, int)> onImageActivated;
+
+    // Fired by tryToggleVoiceAt() (see mouseReleaseEvent) when a quick
+    // click lands on a voice-note bubble - messageId/path identify which
+    // note, path possibly still empty if the audio has not finished
+    // downloading yet (MainWindow ignores the tap in that case, same as a
+    // photo that has not arrived).
+    std::function<void(qlonglong messageId, const QString& path)> onVoicePlayToggled;
+
+    // Pushed by MainWindow from voicePlayer_'s own Qt signals - lets the
+    // currently-playing bubble (if any is visible) repaint its play/pause
+    // icon and progress track without HistoryCanvas needing to know
+    // anything about QMediaPlayer itself. messageId 0 means "nothing is
+    // loaded", matching playingVoiceMessageId_'s own convention.
+    void setVoicePlaybackState(qlonglong messageId, bool playing, qint64 positionMs, qint64 durationMs) {
+        playingVoiceMessageId_ = messageId;
+        voicePlaying_ = playing;
+        voicePositionMs_ = positionMs;
+        voiceDurationMs_ = durationMs;
+        update();
+    }
 
     void enterSelectionMode(int startIndex) {
         // Bounds-checked before touching mode state at all: the
@@ -1776,7 +2078,7 @@ private:
         if (selectionItemIndex_ >= 0) {
             selectionItemIndex_ = -1;
             selectionStart_ = selectionEnd_ = -1;
-            viewport()->update();
+            update();
         }
     }
 
@@ -1787,8 +2089,8 @@ private:
     QPointF textOrigin(const HistoryItem& item, int rowTop) const {
         int rowMargin = kRowVerticalMargin(item.attached);
         int bubbleTop = rowTop + rowMargin / 2;
-        int viewportWidth = viewport()->width();
-        int bubbleOuterWidth = item.contentWidth + bubbleMargin() * 2;
+        int viewportWidth = width();
+        int bubbleOuterWidth = item.contentWidth + bubbleMarginH() * 2;
         int bubbleLeft;
         if (item.kind == MessageKind::Outgoing) {
             bubbleLeft = viewportWidth - bubbleOuterWidth - sideMargin();
@@ -1797,11 +2099,11 @@ private:
         } else {
             bubbleLeft = (viewportWidth - bubbleOuterWidth) / 2;
         }
-        return QPointF(bubbleLeft + bubbleMargin(), bubbleTop + bubbleMargin());
+        return QPointF(bubbleLeft + bubbleMarginH(), bubbleTop + bubbleMarginV());
     }
 
     int itemIndexAt(const QPoint& pos) const {
-        int y = pos.y() + verticalScrollBar()->value();
+        int y = pos.y();
         for (int i = firstIndexNotBefore(y); i < items_.size(); ++i) {
             if (items_[i].top > y) {
                 break;
@@ -1826,7 +2128,7 @@ private:
     // copyable - dragging into or past it just holds the selection at
     // the text's own end instead of reaching past it.
     int docPositionAt(const HistoryItem& item, const QPoint& viewportPos) const {
-        int rowTop = item.top - verticalScrollBar()->value();
+        int rowTop = item.top;
         QPointF docLocal = QPointF(viewportPos) - textOrigin(item, rowTop);
         int pos = item.doc->documentLayout()->hitTest(docLocal, Qt::FuzzyHit);
         if (pos < 0) {
@@ -1843,22 +2145,43 @@ private:
         item.showTail = entry.showTail;
         item.messageId = entry.messageId;
 
+        if (entry.isVoiceNote) {
+            item.isVoice = true;
+            item.voiceDuration = entry.voiceDuration;
+            item.voicePath = entry.filePath;
+            item.voiceWaveform = entry.voiceWaveform;
+            item.rawText = "Voice message";
+            item.contentWidth = style::ConvertScale(224);
+            // 44px play button/waveform row (matching the real
+            // msgFileLayout.thumbSize circle, see paintVoiceContent()) plus
+            // a duration/time line below.
+            item.contentHeight = style::ConvertScale(64);
+            int tailExtra = entry.showTail ? bubbleTailHeight() : 0;
+            item.height = item.contentHeight + bubbleMarginV() * 2 + tailExtra + kRowVerticalMargin(entry.attached);
+            return item;
+        }
+
         if (!entry.albumFilePaths.isEmpty()) {
             QVector<QPixmap> loaded;
+            QVector<QString> loadedPaths;
             std::vector<QSize> sizes;
             for (const QString& path : entry.albumFilePaths) {
                 QPixmap p;
                 if (p.load(path)) {
                     sizes.push_back(p.size());
                     loaded.push_back(std::move(p));
+                    loadedPaths.push_back(path);
                 }
             }
             if (loaded.size() > 1) {
                 // Real algorithm (Ui::LayoutMediaGroup, ui/grouped_layout.cpp -
                 // groups by aspect ratio into balanced rows, not a naive
                 // grid), not a guess at how Telegram's mosaic looks.
-                auto layout = Ui::LayoutMediaGroup(sizes, /*maxWidth=*/style::ConvertScale(340),
-                                                    /*minWidth=*/style::ConvertScale(120), /*spacing=*/2);
+                // Real chat.style: historyGroupWidthMax (aliases
+                // maxMediaSize: 430px), historyGroupWidthMin (aliases
+                // minPhotoSize: 100px), historyGroupSkip: 4px.
+                auto layout = Ui::LayoutMediaGroup(sizes, /*maxWidth=*/style::ConvertScale(430),
+                                                    /*minWidth=*/style::ConvertScale(100), /*spacing=*/style::ConvertScale(4));
                 int maxRight = 0;
                 int maxBottom = 0;
                 item.albumPixmaps.reserve(static_cast<int>(layout.size()));
@@ -1875,9 +2198,10 @@ private:
                 item.contentWidth = maxRight;
                 item.contentHeight = maxBottom;
                 item.fillsBubble = true;
+                item.albumImagePaths = loadedPaths;
                 int tailExtra = entry.showTail ? bubbleTailHeight() : 0;
                 item.height =
-                    item.contentHeight + bubblePadding(true) * 2 + tailExtra + kRowVerticalMargin(entry.attached);
+                    item.contentHeight + bubblePaddingV(true) * 2 + tailExtra + kRowVerticalMargin(entry.attached);
                 return item;
             }
         }
@@ -1885,18 +2209,23 @@ private:
         QPixmap pixmap;
         item.isImage = !entry.filePath.isEmpty() && pixmap.load(entry.filePath);
         if (item.isImage) {
-            item.pixmap = pixmap.scaledToWidth(style::ConvertScale(340), Qt::SmoothTransformation);
+            item.imagePath = entry.filePath;
+            // Real chat.style: maxMediaSize: 430px.
+            item.pixmap = pixmap.scaledToWidth(style::ConvertScale(430), Qt::SmoothTransformation);
             item.contentWidth = item.pixmap.width();
             item.contentHeight = item.pixmap.height();
             item.fillsBubble = true;
             int tailExtra = entry.showTail ? bubbleTailHeight() : 0;
             item.height =
-                item.contentHeight + bubblePadding(true) * 2 + tailExtra + kRowVerticalMargin(entry.attached);
+                item.contentHeight + bubblePaddingV(true) * 2 + tailExtra + kRowVerticalMargin(entry.attached);
             return item;
         }
 
         QFont bubbleFont = QGuiApplication::font();
-        bubbleFont.setPixelSize(style::ConvertScale(entry.kind == MessageKind::System ? 13 : 15));
+        // Real ui/basic.style/chat.style: fsize: 13px (msgFont), same size
+        // for every bubble's body text - the earlier 15px for non-System
+        // messages was never a real value.
+        bubbleFont.setPixelSize(style::ConvertScale(13));
 
         QString html;
         bool richText = entry.kind != MessageKind::System;
@@ -1988,7 +2317,7 @@ private:
         item.contentWidth = idealWidth;
         item.contentHeight = static_cast<int>(item.doc->size().height());
 
-        int bubbleOuterHeight = item.contentHeight + bubbleMargin() * 2;
+        int bubbleOuterHeight = item.contentHeight + bubbleMarginV() * 2;
         if (entry.kind != MessageKind::System && entry.showTail) {
             bubbleOuterHeight += bubbleTailHeight();
         }
@@ -2002,10 +2331,11 @@ private:
         int rowMargin = kRowVerticalMargin(item.attached);
         int bubbleOuterHeight = item.height - rowMargin;
         int bubbleTop = rowTop + rowMargin / 2;
-        int viewportWidth = viewport()->width();
+        int viewportWidth = width();
 
-        int padding = bubblePadding(item.fillsBubble);
-        int bubbleOuterWidth = item.contentWidth + padding * 2;
+        int paddingH = bubblePaddingH(item.fillsBubble);
+        int paddingV = bubblePaddingV(item.fillsBubble);
+        int bubbleOuterWidth = item.contentWidth + paddingH * 2;
         int bubbleLeft;
         if (item.kind == MessageKind::Outgoing) {
             bubbleLeft = viewportWidth - bubbleOuterWidth - sideMargin();
@@ -2040,9 +2370,23 @@ private:
             painter.setClipPath(bubbleClipPath(body, rounding), Qt::IntersectClip);
             for (int k = 0; k < item.albumPixmaps.size(); ++k) {
                 const QRect& rect = item.albumLayout[k];
-                painter.drawPixmap(bubbleLeft + padding + rect.x(), bubbleTop + padding + rect.y(),
+                painter.drawPixmap(bubbleLeft + paddingH + rect.x(), bubbleTop + paddingV + rect.y(),
                                     item.albumPixmaps[k]);
             }
+            painter.restore();
+            drawSelectionCheckbox(painter, index, bubbleTop, bubbleOuterHeight);
+            return;
+        }
+
+        if (item.isVoice) {
+            bool isOutgoingVoice = item.kind == MessageKind::Outgoing;
+            int voiceTailExtra = item.showTail ? bubbleTailHeight() : 0;
+            QRect body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight - voiceTailExtra);
+            paintBubbleBody(painter, body, viewportWidth, isOutgoingVoice, !isOutgoingVoice, item.showTail,
+                             item.attached);
+            painter.save();
+            painter.translate(bubbleLeft + paddingH, bubbleTop + paddingV);
+            paintVoiceContent(painter, item);
             painter.restore();
             drawSelectionCheckbox(painter, index, bubbleTop, bubbleOuterHeight);
             return;
@@ -2058,7 +2402,7 @@ private:
                              item.showTail, item.attached);
             painter.save();
             painter.setClipPath(bubbleClipPath(body, rounding), Qt::IntersectClip);
-            painter.drawPixmap(bubbleLeft + padding, bubbleTop + padding, item.pixmap);
+            painter.drawPixmap(bubbleLeft + paddingH, bubbleTop + paddingV, item.pixmap);
             painter.restore();
             drawSelectionCheckbox(painter, index, bubbleTop, bubbleOuterHeight);
             return;
@@ -2074,7 +2418,7 @@ private:
             painter.fillPath(path, st::msgServiceBg->c);
             painter.setPen(st::msgServiceFg->c);
             painter.save();
-            painter.translate(bubbleLeft + padding, bubbleTop + padding);
+            painter.translate(bubbleLeft + paddingH, bubbleTop + paddingV);
             drawDocument(painter, item, isSelected);
             painter.restore();
             return;
@@ -2085,13 +2429,131 @@ private:
         QRect body(bubbleLeft, bubbleTop, bubbleOuterWidth, bubbleOuterHeight - tailExtra);
         paintBubbleBody(painter, body, viewportWidth, isOutgoing, !isOutgoing, item.showTail, item.attached);
         painter.save();
-        painter.translate(bubbleLeft + padding, bubbleTop + padding);
+        painter.translate(bubbleLeft + paddingH, bubbleTop + paddingV);
         drawDocument(painter, item, isSelected);
         if (item.showTick) {
             paintSentTick(painter, item);
         }
         painter.restore();
         drawSelectionCheckbox(painter, index, bubbleTop, bubbleOuterHeight);
+    }
+
+    // Formats seconds as Telegram's own voice-note duration label ("0:07",
+    // "1:23") - no hours component, a voice note is never that long.
+    static QString formatVoiceDuration(int totalSeconds) {
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
+    }
+
+    // Painted entirely by hand rather than through QTextDocument (unlike
+    // drawDocument() above) - a voice note's content is a play/pause
+    // button, a progress track and a duration label, not flowing text, so
+    // the tick-slot trick the rest of this class uses to reserve space
+    // inside a text run does not apply here. Origin (0,0) is the bubble's
+    // own content origin, same convention drawDocument() uses.
+    void paintVoiceContent(QPainter& painter, const HistoryItem& item) const {
+        bool isOutgoing = item.kind == MessageKind::Outgoing;
+        // Real chat.style: msgFileLayout.thumbSize: 44px - the same circular
+        // play-button size real Telegram uses for a voice note (it reuses
+        // the generic file-attachment thumb layout).
+        int diameter = style::ConvertScale(44);
+        // Play button + waveform sit in a top row of exactly diameter's
+        // height; duration/time gets whatever the bubble's own contentHeight
+        // leaves below that (see buildItem()'s voice branch for the total).
+        QRectF circleRect(0, 0, diameter, diameter);
+
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        QColor accent = st::windowBgActive->c;
+        QColor circleFill = isOutgoing ? QColor(255, 255, 255, 60) : QColor(accent.red(), accent.green(), accent.blue(), 40);
+        painter.setBrush(circleFill);
+        QPen circlePen(accent, style::ConvertScale(1.5));
+        painter.setPen(circlePen);
+        painter.drawEllipse(circleRect);
+
+        bool isThisPlaying = item.messageId != 0 && item.messageId == playingVoiceMessageId_;
+        bool showPause = isThisPlaying && voicePlaying_;
+        double iconInset = diameter * 0.28;
+        QRectF iconRect = circleRect.adjusted(iconInset, iconInset, -iconInset, -iconInset);
+        paintGlyph(painter, iconRect, showPause ? Glyph::Pause : Glyph::Play);
+
+        int trackLeft = diameter + style::ConvertScale(10);
+        int trackWidth = item.contentWidth - trackLeft;
+        double progress = 0.0;
+        if (isThisPlaying && voiceDurationMs_ > 0) {
+            progress = qBound(0.0, static_cast<double>(voicePositionMs_) / static_cast<double>(voiceDurationMs_), 1.0);
+        }
+        paintVoiceWaveform(painter, item, isOutgoing, trackLeft, static_cast<int>(circleRect.center().y()),
+                            trackWidth, progress);
+
+        QFont durationFont = QGuiApplication::font();
+        durationFont.setPixelSize(bubbleMetaFontSize());
+        painter.setFont(durationFont);
+        painter.setPen((isOutgoing ? st::msgOutDateFg : st::msgInDateFg)->c);
+        int elapsedSeconds = static_cast<int>(voicePositionMs_ / 1000);
+        QString durationText = formatVoiceDuration(isThisPlaying ? elapsedSeconds : item.voiceDuration);
+        int durationTop = diameter + style::ConvertScale(2);
+        QRectF durationRect(trackLeft, durationTop, trackWidth, item.contentHeight - durationTop);
+        painter.drawText(durationRect, Qt::AlignLeft | Qt::AlignTop, durationText);
+        painter.restore();
+    }
+
+    // Ported from real Telegram Desktop's own HistoryView::PaintWaveform()
+    // (telegram_fork/tdesktop's history/view/media/history_view_document.cpp,
+    // already vendored under src/history/view/media/ - see its own comment
+    // for why it cannot be linked in directly: it is a method on a Media
+    // subclass entangled with Data::Session/HistoryItem/Main::Session, none
+    // of which this project vendors). The bar-layout math and every style
+    // value below (st::msgWaveformBar/Skip/Min/Max, st::msgWaveform*Active/
+    // Inactive) are copied from that function and its real, already-compiled
+    // ui/chat/chat.style + colors.palette declarations - only the hover/
+    // once-view particle-effect branches are dropped, since this player has
+    // no hover-preview or self-destructing voice messages to support.
+    void paintVoiceWaveform(QPainter& painter, const HistoryItem& item, bool isOutgoing, int left, int centerY,
+                             int availableWidth, double progress) const {
+        const QByteArray& wf = item.voiceWaveform;
+        int barWidth = st::msgWaveformBar;
+        int barSkip = st::msgWaveformSkip;
+        int barMin = st::msgWaveformMin;
+        int barMax = st::msgWaveformMax;
+        int wfSize = !wf.isEmpty() ? static_cast<int>(wf.size()) : 100;
+        int barCount = qMin(availableWidth / (barWidth + barSkip), wfSize);
+        if (barCount <= 0 || availableWidth <= 0) {
+            return;
+        }
+        int barNormValue = 1;
+        for (unsigned char sample : wf) {
+            barNormValue = qMax(barNormValue, int(sample));
+        }
+        barNormValue += 1;
+        int maxDelta = barMax - barMin;
+        int activeWidth = qRound(availableWidth * progress);
+        QColor active = (isOutgoing ? st::msgWaveformOutActive : st::msgWaveformInActive)->c;
+        QColor inactive = (isOutgoing ? st::msgWaveformOutInactive : st::msgWaveformInInactive)->c;
+        painter.setPen(Qt::NoPen);
+        int barLeft = 0;
+        int sum = 0;
+        int maxValue = 0;
+        for (int i = 0; i < wfSize; ++i) {
+            int value = !wf.isEmpty() ? static_cast<unsigned char>(wf[i]) : 0;
+            if (sum + barCount < wfSize) {
+                maxValue = qMax(maxValue, value);
+                sum += barCount;
+                continue;
+            }
+            sum = sum + barCount - wfSize;
+            if (sum < (barCount + 1) / 2) {
+                maxValue = qMax(maxValue, value);
+            }
+            int barValue = ((maxValue * maxDelta) + (barNormValue / 2)) / barNormValue;
+            int barHeight = barMin + barValue;
+            double barTop = centerY - barHeight / 2.0;
+            const QColor& color = (left + barLeft >= left + activeWidth) ? inactive : active;
+            painter.fillRect(QRectF(left + barLeft, barTop, barWidth, barHeight), color);
+            barLeft += barWidth + barSkip;
+            maxValue = (sum < (barCount + 1) / 2) ? 0 : value;
+        }
     }
 
     // Paints a translucent highlight rect under the selected range, then
@@ -2194,37 +2656,25 @@ private:
         totalHeight_ = y;
         // relayoutFrom(0) always starts items_.front() at top 0 (see y's
         // initial value above when index == 0, the only way this is ever
-        // called - see setItems()/setSearchFilter()), so the
-        // front-is-negative scheme prependItems() builds up over time
-        // (see its own comment) is reset back to a plain 0-based layout
-        // here - contentBottom_ must be re-synced to match, or a live
-        // appendItem() call right after a search-filter change would
-        // place its item using a stale, no-longer-correct bottom
-        // coordinate.
+        // called - see setItems()/setSearchFilter()), so the shifted
+        // layout prependItems() builds up over time (see its own comment)
+        // is reset back to a plain 0-based layout here - contentBottom_
+        // must be re-synced to match, or a live appendItem() call right
+        // after a search-filter change would place its item using a
+        // stale, no-longer-correct bottom coordinate.
         contentBottom_ = totalHeight_;
     }
 
-    void updateScrollRange() {
-        int viewportHeight = viewport()->height();
-        // minTop is 0 the first time content is ever loaded (see
-        // relayoutFrom(0)/setItems()) and goes negative as prependItems()
-        // adds older history above without shifting anything already
-        // loaded - see prependItems()'s own comment.
-        int minTop = items_.isEmpty() ? 0 : items_.front().top;
-        int maxTop = qMax(minTop, minTop + totalHeight_ - viewportHeight);
-        verticalScrollBar()->setRange(minTop, maxTop);
-        verticalScrollBar()->setPageStep(viewportHeight);
-        // Never set anywhere before, so QAbstractScrollArea's default
-        // wheelEvent() (the actual fallback path a plain, non-phased mouse
-        // wheel takes - see KineticScroller's own comment) was scrolling
-        // by Qt's raw QAbstractSlider default of 1, times whatever small
-        // multiplier Qt applies internally - a couple of pixels per
-        // notch, not a usable scroll speed. 20 lands close to one
-        // message's worth of movement per notch after that multiplier.
-        verticalScrollBar()->setSingleStep(20);
-    }
+    // No updateScrollRange() here anymore - the real Ui::ScrollArea
+    // wrapping this canvas (see MainWindow's construction site) derives
+    // its own scrollbar range from resizeGetHeight() automatically, the
+    // same as any owned widget; this class no longer owns a scrollbar to
+    // configure.
 
-    static int sideMargin() { return style::ConvertScale(8); }
+    // Real chat.style: msgMargin: margins(16px, 6px, 56px, 2px) - 16px is
+    // the near-edge component (the 56px far side is room for a group
+    // chat's inline sender avatar column, not applicable here).
+    static int sideMargin() { return style::ConvertScale(16); }
 
     QVector<HistoryItem> items_;
     int totalHeight_ = 0;
@@ -2279,10 +2729,18 @@ struct SidebarRowData {
     QPixmap avatar;
     int unread = 0;
     bool active = false;
+    // Real Telegram Desktop's own dialogs row shows the last message's
+    // time in the top-right corner (dialogsDateFont/dialogsDateSkip,
+    // dialogs.style) - pre-formatted here (not a raw qint64) since
+    // building the row already computes nameElided/previewElided the same
+    // way, and formatting per-paint would redo the same QDateTime work on
+    // every repaint instead of once per chat-list update. Empty if the
+    // chat has no last message at all (a brand new/empty chat).
+    QString timeText;
 };
 
 // The sidebar chat list itself - a single custom-painted, virtualized
-// canvas (QAbstractScrollArea + manual layout/paint/hit-test), the same
+// canvas (Ui::RpWidget + manual layout/paint/hit-test), the same
 // approach as HistoryCanvas and for the same reason: chatListWidget_ used
 // to be a QListWidget with setItemWidget(), which is NOT virtualized -
 // every row's widget exists for as long as it is in the list regardless
@@ -2293,16 +2751,27 @@ struct SidebarRowData {
 // hundreds of always-alive row widgets, and scrolling through them was
 // nowhere near as smooth as the real client - virtualizing this the same
 // way the message list already was fixes it the same way.
-class SidebarCanvas : public QAbstractScrollArea {
+// A pure content widget - virtualized row painting (still one widget
+// procedurally drawing every row, matching real Dialogs::InnerWidget's own
+// architecture, see UI.md §7's note on HistoryView::ListWidget/HistoryCanvas
+// following the same pattern) with no scrolling machinery of its own.
+// Scrolling is a real Ui::ScrollArea wrapping this (see its construction
+// site in MainWindow) - the hand-rolled KineticScroller class this used to
+// drive itself as a QAbstractScrollArea is gone, replaced by
+// Ui::ScrollArea's real momentum/touch scrolling (lib_ui/ui/widgets/
+// scroll_area.*, already vendored - see UI.md's "never hand-roll what
+// lib_ui already has" rule). A first attempt at this hit two apparent
+// blockers that both turned out to be non-issues once actually root-
+// caused: rpl::combine_previous "not a member of rpl" was an include-order
+// bug in this file (scroll_area.h needs <rpl/rpl.h> included first - see
+// this file's own top-of-file comment), not a gap in the vendored lib_rpl;
+// and RpWidgetBase::leaveEvent() being `final` has a real extension point,
+// leaveEventHook(), used below instead of trying to override the sealed
+// method directly.
+class SidebarCanvas : public Ui::RpWidget {
 public:
-    explicit SidebarCanvas(QWidget* parent = nullptr) : QAbstractScrollArea(parent) {
-        setFocusPolicy(Qt::NoFocus);
-        setFrameShape(QFrame::NoFrame);
-        setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    explicit SidebarCanvas(QWidget* parent = nullptr) : Ui::RpWidget(parent) {
         setMouseTracking(true);
-        viewport()->setMouseTracking(true);
-        kineticScroller_ = std::make_unique<KineticScroller>(this);
 
         // Real values: dialogsTextStyle/nameStyle both key off fsize (13px,
         // ui/basic.style), name in semiboldFont, preview in normalFont;
@@ -2316,6 +2785,11 @@ public:
         badgeFont_ = font();
         badgeFont_.setPixelSize(style::ConvertScale(12));
         badgeFont_.setWeight(QFont::Bold);
+        // dialogsDateFont (dialogs.style): font(13px), the row's own
+        // regular weight - same size as name/preview, just its own color
+        // role (dialogsDateFg).
+        dateFont_ = font();
+        dateFont_.setPixelSize(style::ConvertScale(13));
     }
 
     // Called from MainWindow::onChatListItemClicked() via a row click -
@@ -2345,19 +2819,24 @@ public:
             row.nameElided = nameMetrics.elidedText(title, Qt::ElideRight, textWidth);
             QString previewText = preview.isEmpty() ? "No messages yet" : preview;
             row.previewElided = previewMetrics.elidedText(previewText, Qt::ElideRight, textWidth);
+            qlonglong lastMessageDate = entry["lastMessageDate"].toLongLong();
+            row.timeText = lastMessageDate > 0 ? sidebarTimeText(lastMessageDate) : QString();
             rows_.push_back(std::move(row));
         }
         selectedChatId_ = selectedChatId;
         hoveredIndex_ = -1;
-        // Keeps the current scroll offset across a rebuild instead of
-        // jumping back to the top - setRange() below already clamps it into
-        // the new list's bounds, so it cannot end up stranded past the end
-        // of a list that momentarily got shorter (which is what
-        // renderSidebarRows() used to reset to the top to avoid). Without
-        // this, scrolling the sidebar during the post-login load was
-        // impossible: every push yanked the view back to the first row.
-        updateScrollRange();
-        viewport()->update();
+        // Real RpWidget contract (UI.md §4/§7): resizeToWidth() re-runs
+        // resizeGetHeight() below for the row count that just changed and
+        // resizes this widget to match - the owning Ui::ScrollArea then
+        // sees this widget's new height and adjusts its own scroll range
+        // automatically (real Qt QScrollArea behavior), same effect the
+        // old updateScrollRange()/verticalScrollBar()->setRange() had, but
+        // driven by this widget's own size instead of a scrollbar object
+        // this class no longer owns. The current scroll offset (owned by
+        // the wrapping ScrollArea now) is preserved across a rebuild for
+        // free - nothing here resets it, matching the old comment's intent.
+        resizeToWidth(width());
+        update();
     }
 
     void setSelectedChatId(qlonglong chatId) {
@@ -2365,25 +2844,32 @@ public:
             return;
         }
         selectedChatId_ = chatId;
-        viewport()->update();
+        update();
     }
-
-    // Not called from setRows()/renderSidebarRows() any more (see the
-    // comment there), kept for callers that genuinely want to jump to the
-    // newest chat rather than preserve the reader's position.
-    void scrollToTop() { verticalScrollBar()->setValue(0); }
 
     int rowCount() const { return rows_.size(); }
 
 protected:
+    // Real RpWidget contract (rp_widget.h) instead of a QAbstractScrollArea's
+    // verticalScrollBar()->setRange() bookkeeping - this widget's own height
+    // for a given width is simply every row stacked, no scroll math of its
+    // own at all (the wrapping Ui::ScrollArea owns that entirely).
+    int resizeGetHeight(int newWidth) override {
+        return rows_.size() * sidebarRowHeight();
+    }
+
     void paintEvent(QPaintEvent* event) override {
-        QPainter painter(viewport());
+        QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        int scrollY = verticalScrollBar()->value();
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        // No scroll-offset subtraction needed any more: this widget's own
+        // coordinate origin is the top of the full (scrollable) content,
+        // and Qt/Ui::ScrollArea only ever calls paintEvent for the actually
+        // visible sub-rect (event->rect()) - exactly what used to require
+        // manually reading verticalScrollBar()->value() for.
         QRect visible = event->rect();
         for (int i = 0; i < rows_.size(); ++i) {
-            int top = i * sidebarRowHeight() - scrollY;
+            int top = i * sidebarRowHeight();
             if (top + sidebarRowHeight() < visible.top() || top > visible.bottom()) {
                 continue;
             }
@@ -2391,23 +2877,21 @@ protected:
         }
     }
 
-    void resizeEvent(QResizeEvent* event) override {
-        QAbstractScrollArea::resizeEvent(event);
-        updateScrollRange();
-    }
-
     void mouseMoveEvent(QMouseEvent* event) override {
         int index = indexAt(event->pos());
         if (index != hoveredIndex_) {
             hoveredIndex_ = index;
-            viewport()->update();
+            update();
         }
     }
 
-    void leaveEvent(QEvent*) override {
+    // RpWidgetBase::leaveEvent() is declared `final` (rp_widget.h) - this
+    // is its real extension point instead, called from that sealed
+    // override's own body.
+    void leaveEventHook(QEvent*) override {
         if (hoveredIndex_ != -1) {
             hoveredIndex_ = -1;
-            viewport()->update();
+            update();
         }
     }
 
@@ -2418,29 +2902,15 @@ protected:
         }
     }
 
-    void wheelEvent(QWheelEvent* event) override {
-        if (kineticScroller_->handleWheelEvent(event)) {
-            event->accept();
-        } else {
-            QAbstractScrollArea::wheelEvent(event);
-        }
-    }
+    // No wheelEvent override any more - the real Ui::ScrollArea wrapping
+    // this widget (see its construction site in MainWindow) handles wheel/
+    // touch/momentum scrolling itself, the hand-rolled KineticScroller this
+    // used to drive is gone.
 
 private:
-    std::unique_ptr<KineticScroller> kineticScroller_;
     int indexAt(const QPoint& pos) const {
-        int y = pos.y() + verticalScrollBar()->value();
-        int index = y / sidebarRowHeight();
+        int index = pos.y() / sidebarRowHeight();
         return (index >= 0 && index < rows_.size()) ? index : -1;
-    }
-
-    void updateScrollRange() {
-        int viewportHeight = viewport()->height();
-        verticalScrollBar()->setRange(0, qMax(0, rows_.size() * sidebarRowHeight() - viewportHeight));
-        verticalScrollBar()->setPageStep(viewportHeight);
-        // See HistoryCanvas::updateScrollRange()'s identical line for why
-        // this is needed - never set anywhere before.
-        verticalScrollBar()->setSingleStep(20);
     }
 
     // Phase 6a (UI.md 13c): every color here is now a real dialogsXxx
@@ -2454,17 +2924,34 @@ private:
                                              : hovered ? st::dialogsBgOver
                                                        : st::dialogsBg)
                                        ->c;
-        painter.fillRect(QRect(0, top, viewport()->width(), sidebarRowHeight()), background);
+        painter.fillRect(QRect(0, top, width(), sidebarRowHeight()), background);
 
         painter.drawPixmap(sidebarMargin(), top + (sidebarRowHeight() - sidebarAvatarSize()) / 2, row.avatar);
 
         int textLeft = sidebarTextLeft();
         int badgeReserve = row.unread > 0 ? 40 : 0;
-        int textWidth = viewport()->width() - textLeft - sidebarMargin() - badgeReserve;
+        int textWidth = width() - textLeft - sidebarMargin() - badgeReserve;
+
+        // dialogsDateFont/dialogsDateSkip (dialogs.style): real Telegram
+        // draws the last message's time top-right, on the same line as the
+        // name - the name itself is elided (nameElided, computed against a
+        // generous fixed width, see updateChatList()'s own comment) short
+        // of the full row width specifically so this has somewhere to sit
+        // without the two overlapping.
+        int nameWidth = textWidth;
+        if (!row.timeText.isEmpty()) {
+            QFontMetrics dateMetrics(dateFont_);
+            int dateWidth = dateMetrics.horizontalAdvance(row.timeText);
+            QRect dateRect(width() - sidebarMargin() - dateWidth, top + 10, dateWidth, 20);
+            painter.setPen((selected ? st::dialogsDateFgActive : st::dialogsDateFg)->c);
+            painter.setFont(dateFont_);
+            painter.drawText(dateRect, Qt::AlignLeft | Qt::AlignVCenter, row.timeText);
+            nameWidth = qMax(0, textWidth - dateWidth - style::ConvertScale(5));
+        }
 
         painter.setPen((selected ? st::dialogsNameFgActive : st::dialogsNameFg)->c);
         painter.setFont(nameFont_);
-        painter.drawText(QRect(textLeft, top + 10, textWidth, 20), Qt::AlignLeft | Qt::AlignVCenter, row.nameElided);
+        painter.drawText(QRect(textLeft, top + 10, nameWidth, 20), Qt::AlignLeft | Qt::AlignVCenter, row.nameElided);
 
         int previewLeft = textLeft;
         if (row.active) {
@@ -2493,8 +2980,13 @@ private:
             int badgeHeight = style::ConvertScale(19);
             int badgePadding = style::ConvertScale(5);
             int badgeWidth = qMax(badgeHeight, badgeMetrics.horizontalAdvance(badgeText) + badgePadding * 2);
-            QRectF badgeRect(viewport()->width() - sidebarMargin() - badgeWidth,
-                              top + (sidebarRowHeight() - badgeHeight) / 2.0, badgeWidth, badgeHeight);
+            // Aligned with the preview line (top + 34, 20px tall - the same
+            // rect the preview text itself draws in below), not centered
+            // across the whole row - real Telegram pairs the badge with
+            // the message preview, under the time label, not floating in
+            // the row's vertical middle.
+            QRectF badgeRect(width() - sidebarMargin() - badgeWidth, top + 34 + (20 - badgeHeight) / 2.0,
+                              badgeWidth, badgeHeight);
             painter.setPen(Qt::NoPen);
             painter.setBrush((selected ? st::dialogsUnreadBgActive : st::dialogsUnreadBg)->c);
             painter.drawRoundedRect(badgeRect, badgeHeight / 2.0, badgeHeight / 2.0);
@@ -2510,6 +3002,7 @@ private:
     QFont nameFont_;
     QFont previewFont_;
     QFont badgeFont_;
+    QFont dateFont_;
 };
 
 SidebarCanvas* asSidebar(QWidget* widget) {
@@ -2581,31 +3074,63 @@ void ChatInput::clear() {
     field_->setText(QString());
 }
 
+void AuthSlide::paintEvent(QPaintEvent*) {
+    // Real Telegram's own login screen is a flat white page (windowBg), not
+    // a colored wallpaper - matches that exactly now, per explicit user
+    // request, while the rest of the app (chat wallpaper, accent color)
+    // keeps zkgram's purple identity. See zkgramAuthNextButton in
+    // zkgram_icons.style for the matching real-blue button accent.
+    QPainter painter(this);
+    painter.fillRect(rect(), st::windowBg);
+}
+
+void AuthSlide::recenterCard() {
+    // Manual centering of logo_+card_ as one group - the real "layout"
+    // this class has, now that neither is inside a Qt layout manager (see
+    // UI.md §4/§7 and this class's own constructor). card_ already knows
+    // its own height (VerticalLayout::resizeGetHeight, computed from its
+    // rows) whenever this runs - either from an actual resize, or from the
+    // heightValue() subscription below firing because runSlide() just set
+    // new text that wrapped onto a different number of lines.
+    int totalHeight = logo_->height() + card_->height();
+    int top = qMax(0, (height() - totalHeight) / 2);
+    logo_->move((width() - logo_->width()) / 2, top);
+    card_->moveToLeft((width() - card_->width()) / 2, top + logo_->height());
+}
+
+void AuthSlide::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    recenterCard();
+    update();
+}
+
 AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
     setObjectName("authSlide");
 
-    auto* outer = new QHBoxLayout(this);
-    outer->addStretch();
-
-    auto* card = new QWidget(this);
-    card->setObjectName("authCard");
-    card->setFixedWidth(360);
-    auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(0, 0, 0, 0);
-    cardLayout->setSpacing(18);
-    cardLayout->addStretch();
-
-    logo_ = new QLabel(card);
+    // logo_ sits above card_ as a plain sibling (see its own header
+    // comment for why it cannot live inside the VerticalLayout) - both are
+    // centered together manually in resizeEvent, the same "no Qt layout
+    // manager, position children yourself" contract every real tdesktop
+    // widget follows (UI.md §4/§7).
+    logo_ = new QLabel(this);
     logo_->setPixmap(loadAuthLogo(96));
     logo_->setAlignment(Qt::AlignCenter);
-    cardLayout->addWidget(logo_);
+    logo_->adjustSize();
+
+    card_ = new Ui::VerticalLayout(this);
+    card_->setObjectName("authCard");
+    // Ui::RpWidget starts hidden by default (see title_'s own comment below
+    // for the same gap) - card_ itself needs this too, or every child
+    // inside it stays invisible regardless of their own show() calls,
+    // since Qt visibility requires every ancestor to be visible as well.
+    card_->show();
+
+    static constexpr int kFieldMargin = 18;
 
     // Phase 6b (UI.md 13c): Ui::FlatLabel for title/subtitle/error (real
-    // text rendering/wrap, not QLabel's) - defaultFlatLabel is the only
-    // FlatLabel-typed instance already vendored (see widgets.style), so all
-    // three share it; alignment/color are set per-label below since the
-    // style itself does not distinguish them.
-    title_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
+    // text rendering/wrap, not QLabel's).
+    title_ = card_->add(object_ptr<Ui::FlatLabel>(card_, st::zkgramAuthTitle),
+                         style::margins(0, kFieldMargin, 0, 0));
     title_->setObjectName("authTitle");
     // Ui::RpWidget starts hidden by default, unlike plain QWidget - same
     // gap as startEncryptionButton_'s own earlier fix; title_/subtitle_
@@ -2613,48 +3138,81 @@ AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
     // which stays conditionally hidden), so shown once here rather than
     // in runSlide()/showStatus().
     title_->show();
-    cardLayout->addWidget(title_);
 
-    subtitle_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
+    subtitle_ = card_->add(object_ptr<Ui::FlatLabel>(card_, st::zkgramAuthDescription),
+                            style::margins(0, kFieldMargin, 0, 0));
     subtitle_->setObjectName("authSubtitle");
     subtitle_->show();
-    cardLayout->addWidget(subtitle_);
 
-    // Two real field types, not one QLineEdit toggled by echo mode: real
-    // tdesktop has no single widget that is both - Ui::PasswordInput
-    // (always-masked) and Ui::MaskedInputField (plain) are different C++
-    // types (fields/password_input.h, fields/masked_input_field.h). Both
-    // occupy the same layout slot; runSlide() shows exactly one via
-    // activeInput().
-    plainInput_ = new Ui::MaskedInputField(card, st::defaultInputField);
+    // Three real field types, not one QLineEdit toggled by echo mode: real
+    // tdesktop has no single widget that is all of these - Ui::PasswordInput
+    // (always-masked), Ui::MaskedInputField (plain phone-number entry), and
+    // Ui::SentCodeField (digit-only, strips anything else live and can
+    // auto-submit once enough digits are in - ui/widgets/sent_code_field.h)
+    // are different C++ types. All three occupy the same layout slot;
+    // runSlide() shows exactly one via activeInput() and setVisible().
+    //
+    // None of the three can go through card_->add() directly: Ui::
+    // MaskedInputField/Ui::PasswordInput do not derive from Ui::RpWidget in
+    // this project's vendored lib_ui (a real C2672/enable_if failure at
+    // compile time, not a guess - same class of vendored-version mismatch
+    // already found and documented for ui/widgets/multi_select.cpp, not
+    // something to patch vendored source over). Worked around with
+    // fieldSlot_: a plain Ui::RpWidget added to card_ that reserves the
+    // right amount of layout space, real Telegram Desktop's own real field
+    // height (defaultInputField.heightMin: 55px) - the three actual field
+    // widgets are ordinary children of card_ (not VerticalLayout rows),
+    // repositioned to match fieldSlot_'s geometry whenever it moves (see
+    // the geometryValue() subscription right after).
+    auto* fieldSlot_ = card_->add(object_ptr<Ui::RpWidget>(card_), style::margins(0, kFieldMargin, 0, 0));
+    fieldSlot_->resize(1, style::ConvertScale(55));
+    plainInput_ = new Ui::MaskedInputField(card_, st::zkgramAuthInputField);
     plainInput_->setObjectName("authInput");
-    cardLayout->addWidget(plainInput_);
-    passwordInput_ = new Ui::PasswordInput(card, st::defaultInputField);
+    passwordInput_ = new Ui::PasswordInput(card_, st::zkgramAuthInputField);
     passwordInput_->setObjectName("authInputPassword");
-    cardLayout->addWidget(passwordInput_);
+    codeInput_ = new Ui::SentCodeField(card_, st::zkgramAuthInputField);
+    codeInput_->setObjectName("authInputCode");
+    fieldSlot_->geometryValue() | rpl::on_next(
+        [this, fieldSlot_](const QRect& geometry) {
+            plainInput_->setGeometry(geometry);
+            passwordInput_->setGeometry(geometry);
+            codeInput_->setGeometry(geometry);
+        },
+        fieldSlot_->lifetime());
+    // No setAutoSubmit() length here - TDLib does not tell this codebase
+    // how many digits the code actually is (it varies by region/carrier),
+    // so auto-submitting at a guessed length would submit early for a
+    // longer code. Enter still submits, same as the other two fields.
+    codeInput_->submits() | rpl::on_next([this](Qt::KeyboardModifiers) { onNextClicked(); }, codeInput_->lifetime());
 
-    error_ = new Ui::FlatLabel(card, st::zkgramAuthLabel);
+    error_ = card_->add(object_ptr<Ui::FlatLabel>(card_, st::zkgramAuthDescription),
+                         style::margins(0, kFieldMargin, 0, 0));
     error_->setObjectName("authError");
     error_->setTextColorOverride(st::attentionButtonFg->c);
     error_->hide();
-    cardLayout->addWidget(error_);
 
-    // Phase 5 (UI.md 13c): defaultActiveButton is the real tdesktop
-    // text-only accent RoundButton (Telegram/lib_ui/ui/widgets/widgets.style)
-    // reused as-is, not a new .style type - a call-to-action button like
-    // this is exactly what it already exists for.
-    next_ = new Ui::RoundButton(card, rpl::single(QString("Next")), st::defaultActiveButton);
+    // zkgramAuthNextButton: real intro.style introNextButton values
+    // (300x42, 6px radius) on top of defaultActiveButton, not a new visual
+    // design - see zkgram_icons.style's own comment. Its own declared
+    // width (300px) is now what sizes it - no lockButtonSize() workaround
+    // needed, that was only ever necessary for a QBoxLayout's stretch
+    // squeezing a width:-34px (auto) button to 0.
+    next_ = card_->add(object_ptr<Ui::RoundButton>(card_, rpl::single(QString("Next")), st::zkgramAuthNextButton),
+                        style::margins(0, kFieldMargin, 0, kFieldMargin));
     next_->setObjectName("authNext");
-    // See lockButtonSize()'s own comment (main_window.cpp's anonymous
-    // namespace) - cardLayout is a QVBoxLayout, so this button's width is
-    // the cross axis (usually stretched to fill regardless), but its
-    // height is still the layout's main axis and at the same risk.
-    lockButtonSize(next_);
-    cardLayout->addWidget(next_);
 
-    cardLayout->addStretch();
-    outer->addWidget(card);
-    outer->addStretch();
+    // card_'s own width drives every child's width in turn (VerticalLayout
+    // rows are resized to the container's width minus their margins, see
+    // resizeGetHeight()) - fixed at the real introStepWidth so title/
+    // subtitle/fields/button all end up exactly 380px wide, matching real
+    // Telegram's own intro step, not whatever QVBoxLayout's stretch used
+    // to produce.
+    card_->resizeToWidth(380);
+    // Recenters whenever card_'s own height changes (a label re-wrapping
+    // after runSlide() sets new text), not only on an actual AuthSlide
+    // resize - the reactive rpl subscription §4/§7 describe, not a manual
+    // poll.
+    card_->heightValue() | rpl::on_next([this](int) { recenterCard(); }, card_->lifetime());
 
     next_->setClickedCallback([this] { onNextClicked(); });
     connect(plainInput_, &Ui::MaskedInputField::submitted, this, &AuthSlide::onNextClicked);
@@ -2662,20 +3220,29 @@ AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
 }
 
 QWidget* AuthSlide::activeInput() const {
-    return passwordInput_->isVisible() ? static_cast<QWidget*>(passwordInput_) : static_cast<QWidget*>(plainInput_);
+    if (passwordInput_->isVisible()) {
+        return passwordInput_;
+    }
+    if (codeInput_->isVisible()) {
+        return codeInput_;
+    }
+    return plainInput_;
 }
 
 QString AuthSlide::runSlide(const QString& title, const QString& subtitle, const QString& placeholder, bool masked,
-                             Validator validator, const QString& initialError) {
+                             Validator validator, const QString& initialError, bool isCode) {
     logDebug("runSlide: entered, title=" + title);
     title_->setText(title);
     subtitle_->setText(subtitle);
     plainInput_->setPlaceholder(rpl::single(placeholder));
     passwordInput_->setPlaceholder(rpl::single(placeholder));
+    codeInput_->setPlaceholder(rpl::single(placeholder));
     plainInput_->setText(QString());
     passwordInput_->setText(QString());
-    plainInput_->setVisible(!masked);
+    codeInput_->setText(QString());
+    plainInput_->setVisible(!masked && !isCode);
     passwordInput_->setVisible(masked);
+    codeInput_->setVisible(!masked && isCode);
     next_->show();
     activeInput()->setFocus();
     if (initialError.isEmpty()) {
@@ -2701,6 +3268,7 @@ void AuthSlide::showStatus(const QString& title, const QString& subtitle) {
     error_->hide();
     plainInput_->hide();
     passwordInput_->hide();
+    codeInput_->hide();
     next_->hide();
 }
 
@@ -2713,7 +3281,13 @@ void AuthSlide::cancelPending() {
 
 void AuthSlide::onNextClicked() {
     logDebug("onNextClicked: entered");
-    QString value = passwordInput_->isVisible() ? passwordInput_->getLastText() : plainInput_->getLastText();
+    // getDigitsOnly(), not getLastText(), for the code field - SentCodeField
+    // already strips non-digit/dash characters live (see its own fix()),
+    // but this also drops any stray '-' separators it kept for display,
+    // matching what the login-code API call actually expects.
+    QString value = passwordInput_->isVisible() ? passwordInput_->getLastText()
+                     : codeInput_->isVisible()   ? codeInput_->getDigitsOnly()
+                                                  : plainInput_->getLastText();
     // Empty input just refocuses instead of submitting - the fields here
     // (password/phone/code) are always required, there is no valid empty
     // submission to accept.
@@ -2758,7 +3332,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // ---- sidebar: chat list + "start a new conversation" ----
     auto* sidebar = new QWidget(splitter);
     sidebar->setObjectName("sidebar");
-    sidebar->setMinimumWidth(style::ConvertScale(220));
+    // Real window/window.style: columnMinimalWidthLeft: 260px.
+    sidebar->setMinimumWidth(style::ConvertScale(260));
     auto* sidebarLayout = new QVBoxLayout(sidebar);
     sidebarLayout->setContentsMargins(0, 0, 0, 0);
     sidebarLayout->setSpacing(0);
@@ -2766,14 +3341,36 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* searchRow = new QWidget(sidebar);
     auto* searchRowLayout = new QHBoxLayout(searchRow);
     searchRowLayout->setContentsMargins(10, 8, 10, 8);
-    chatSearchInput_ = new QLineEdit(searchRow);
-    chatSearchInput_->setPlaceholderText("Search");
-    // Magnifier inside the field rather than a bare rounded box with a
-    // "Search" placeholder - the same leading glyph tdesktop puts in its own
-    // dialogs search field. QLineEdit::addAction() reserves the space and
-    // keeps the text clear of it on its own, so nothing here has to nudge
-    // the field's padding.
-    chatSearchInput_->addAction(glyphIcon(Glyph::Search), QLineEdit::LeadingPosition);
+    searchRowLayout->setSpacing(style::ConvertScale(8));
+    // Top-left corner of the whole window, next to the chat-list search
+    // field - matches real Telegram Desktop's own layout (the hamburger
+    // lives in the sidebar's own top bar, not the conversation header on
+    // the right, which is where this was placed before).
+    auto* hamburgerButton = new HamburgerButton(searchRow);
+    hamburgerButton->onClicked = [this] { toggleMainMenu(); };
+    searchRowLayout->addWidget(hamburgerButton);
+    // st::dialogsFilter: real values from telegram_fork/tdesktop's own
+    // dialogs.style (rounded pill, filterInputInactiveBg/ActiveBg -
+    // already vendored in src/dialogs/dialogs.style, already generated
+    // for SidebarCanvas's own row metrics). Ui::InputField has no
+    // QLineEdit::addAction() leading-icon slot, so the magnifier is a
+    // plain sibling icon in the same row instead of embedded in the
+    // field - a layout-level approximation of real Telegram's own
+    // overlaid icon, not pixel-identical, but real lib_ui/real style
+    // values rather than a hand-painted QLineEdit.
+    auto* chatSearchIcon = new Ui::RpWidget(searchRow);
+    chatSearchIcon->resize(style::ConvertScale(20), style::ConvertScale(20));
+    chatSearchIcon->paintRequest(
+    ) | rpl::on_next(
+        [chatSearchIcon] {
+            QPainter painter(chatSearchIcon);
+            st::zkgramIconSearch.paint(painter, 0, 0, chatSearchIcon->width());
+        },
+        chatSearchIcon->lifetime());
+    searchRowLayout->addWidget(chatSearchIcon);
+    chatSearchInput_ =
+        new Ui::InputField(searchRow, st::dialogsFilter, Ui::InputField::Mode::SingleLine, rpl::single(QString("Search")));
+    chatSearchInput_->show();
     searchRowLayout->addWidget(chatSearchInput_);
     sidebarLayout->addWidget(searchRow);
 
@@ -2796,11 +3393,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         renderCurrentConversation();
     });
 
-    auto* sidebarCanvas = new SidebarCanvas(sidebar);
+    // Real Ui::ScrollArea (lib_ui/ui/widgets/scroll_area.*, already
+    // vendored) wrapping SidebarCanvas as its owned content widget - real
+    // momentum/touch scrolling and real scrollbar painting, replacing the
+    // QAbstractScrollArea + hand-rolled KineticScroller this used to be.
+    // See SidebarCanvas's own class comment for the rest of the migration.
+    auto* sidebarScroll = new Ui::ScrollArea(sidebar);
+    sidebarScroll->setObjectName("chatListScroll");
+    auto sidebarCanvasOwned = object_ptr<SidebarCanvas>(sidebarScroll);
+    auto* sidebarCanvas = sidebarScroll->setOwnedWidget(std::move(sidebarCanvasOwned)).data();
     sidebarCanvas->setObjectName("chatListWidget");
     sidebarCanvas->onRowClicked = [this](qlonglong chatId) { onChatListItemClicked(chatId); };
     chatListWidget_ = sidebarCanvas;
-    sidebarLayout->addWidget(chatListWidget_);
+    // Ui::ScrollArea does not auto-resize its owned widget's width to the
+    // viewport the way a plain QScrollArea with widgetResizable(true) would
+    // (its own resizeEvent only recounts its custom scrollbars/shadows,
+    // see scroll_area.cpp) - real tdesktop content widgets are told their
+    // width explicitly by whatever owns the relationship, so this does
+    // that: resizeToWidth() re-runs SidebarCanvas::resizeGetHeight() for
+    // the scroll area's current width every time it changes.
+    sidebarScroll->geometryChanged() | rpl::on_next(
+        [sidebarScroll, sidebarCanvas] { sidebarCanvas->resizeToWidth(sidebarScroll->width()); },
+        sidebarScroll->lifetime());
+    sidebarLayout->addWidget(sidebarScroll);
     splitter->addWidget(sidebar);
 
     // ---- right side: header + selected conversation ----
@@ -2816,8 +3431,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                                       style::ConvertScale(6));
     headerLayout->setSpacing(style::ConvertScale(10));
     companionAvatar_ = new QLabel(headerRow_);
-    companionAvatar_->setFixedSize(style::ConvertScale(38), style::ConvertScale(38));
+    // Real info/info.style: topBarInfoButtonInnerSize: 42px.
+    companionAvatar_->setFixedSize(style::ConvertScale(42), style::ConvertScale(42));
     companionAvatar_->hide();  // no chat selected yet, see onChatListItemClicked
+    // REVERTED to QLabel (2026-08-17): Ui::FlatLabel here crashed on the
+    // very first real chat click - Ui::Text::BlockParser::parse() (inside
+    // FlatLabel::setText -> Text::String::setText) segfaulted on a null/
+    // wild pointer given the chat's real TDLib title (dynamic content),
+    // while the exact same st::zkgramCompanionLabel style with the fixed
+    // string "zkgram" at construction did not crash, and AuthSlide's own
+    // FlatLabels (title_/subtitle_, same defaultFlatLabel/defaultTextStyle
+    // ancestry) call setText() repeatedly without issue. Root cause not
+    // found yet (crash dump analysis via cdb pointed at BlockParser
+    // dereferencing a small/invalid address, not obviously tied to any one
+    // style field) - reverted rather than guessed at further, since a
+    // crash on the single most common interaction (opening a chat) is not
+    // acceptable to leave in place while still investigating. See TODO.md.
     companionLabel_ = new QLabel("zkgram", headerRow_);
     companionLabel_->setObjectName("companionLabel");
     // Per-chat secret-mode toggle - see secretModeOn_'s own comment in
@@ -2830,11 +3459,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     secretModeToggle_->setObjectName("secretModeToggle");
     secretModeToggle_->hide();
     // Filters the message list below by substring - the currently open
-    // conversation only, not a search across every chat.
-    searchInput_ = new QLineEdit(headerRow_);
-    searchInput_->setPlaceholderText("Search in conversation");
+    // conversation only, not a search across every chat. st::dialogsFilter
+    // (real tdesktop values, see chatSearchInput_'s own comment above for
+    // why the magnifier is a plain sibling icon, not embedded).
+    searchInput_ =
+        new Ui::InputField(headerRow_, st::dialogsFilter, Ui::InputField::Mode::SingleLine,
+                            rpl::single(QString("Search in conversation")));
+    searchInput_->show();
     searchInput_->setMaximumWidth(style::ConvertScale(180));
-    searchInput_->addAction(glyphIcon(Glyph::Search), QLineEdit::LeadingPosition);
     // statusDot_/statusLabel_ are not added to the header - a persistent
     // "Connected" pill is not something real Telegram Desktop shows once
     // logged in (it only ever surfaces a transient "Connecting..."/
@@ -2852,6 +3484,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     headerLayout->addWidget(companionLabel_);
     headerLayout->addWidget(secretModeToggle_);
     headerLayout->addStretch();
+    auto* headerSearchIcon = new Ui::RpWidget(headerRow_);
+    headerSearchIcon->resize(style::ConvertScale(20), style::ConvertScale(20));
+    headerSearchIcon->paintRequest(
+    ) | rpl::on_next(
+        [headerSearchIcon] {
+            QPainter painter(headerSearchIcon);
+            st::zkgramIconSearch.paint(painter, 0, 0, headerSearchIcon->width());
+        },
+        headerSearchIcon->lifetime());
+    headerLayout->addWidget(headerSearchIcon);
     headerLayout->addWidget(searchInput_);
     layout->addWidget(headerRow_);
 
@@ -2897,15 +3539,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     selectionLayout->addWidget(deleteButton);
     layout->addWidget(selectionToolbar_);
 
-    auto* historyCanvas = new HistoryCanvas(conversationColumn);
+    // Ui::RpWidget owned by a real Ui::ScrollArea, same migration
+    // SidebarCanvas/sidebarScroll already went through (see that
+    // construction site above) - not a QAbstractScrollArea anymore, see
+    // HistoryCanvas's own class comment.
+    auto* historyScroll = new Ui::ScrollArea(conversationColumn);
+    historyScroll->setObjectName("messagesScroll");
+    auto historyCanvasOwned = object_ptr<HistoryCanvas>(historyScroll);
+    auto* historyCanvas = historyScroll->setOwnedWidget(std::move(historyCanvasOwned)).data();
     historyCanvas->setObjectName("messages");
-    // Set on the viewport, not historyCanvas itself: for a
-    // QAbstractScrollArea, mouse events actually land on the viewport
-    // child widget, so that is where a context-menu policy/signal has to
-    // be attached for showMessageContextMenu()'s pos to come through
-    // reliably in viewport-local coordinates, matching what
-    // HistoryCanvas::itemAt() expects.
-    historyCanvas->viewport()->setContextMenuPolicy(Qt::CustomContextMenu);
+    historyCanvas->setScrollArea(historyScroll);
+    // Context menu policy/signal attached directly to historyCanvas, not
+    // historyScroll - post-migration, mouse events land on the canvas
+    // itself in its own absolute-content-coordinate local space, exactly
+    // what showMessageContextMenu()'s pos -> HistoryCanvas::itemAt() call
+    // expects (see itemAt()'s own comment).
+    historyCanvas->setContextMenuPolicy(Qt::CustomContextMenu);
     // Wallpaper is painted directly in HistoryCanvas::paintEvent() (via
     // its own background_ member, see ChatBackground), not via
     // QPalette::Base/autoFillBackground here - that path silently stopped
@@ -2922,7 +3571,189 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     historyCanvas->onImageActivated = [this](const QVector<QPixmap>& images, int index) {
         asMediaViewer(mediaViewer_)->open(images, index);
     };
-    layout->addWidget(messages_);
+    historyCanvas->onVoicePlayToggled = [this](qlonglong messageId, const QString& path) {
+        onVoicePlayToggleRequested(messageId, path);
+    };
+    layout->addWidget(historyScroll);
+
+    // ---- hamburger slide-out menu (profile + Monero wallet) ----
+    // Parented to chatPage_, same reasoning as mediaViewer_ above - a
+    // fullscreen dimmer and a panel that slides in from the true left edge
+    // of the window, not just the message pane.
+    mainMenuDimmer_ = new MainMenuDimmer(chatPage_);
+    mainMenuDimmer_->setGeometry(chatPage_->rect());
+    static_cast<MainMenuDimmer*>(mainMenuDimmer_)->onClicked = [this] { closeMainMenu(); };
+
+    // Real window/window_main_menu.style: mainMenuWidth: 274px.
+    const int kMainMenuWidth = style::ConvertScale(274);
+    mainMenuPanel_ = new MainMenuPanel(chatPage_);
+    mainMenuPanel_->setFixedWidth(kMainMenuWidth);
+    mainMenuPanel_->hide();
+
+    auto* menuLayout = new QVBoxLayout(mainMenuPanel_);
+    menuLayout->setContentsMargins(0, style::ConvertScale(20), 0, 0);
+    menuLayout->setSpacing(0);
+
+    auto* profileSection = new QWidget(mainMenuPanel_);
+    auto* profileLayout = new QVBoxLayout(profileSection);
+    profileLayout->setContentsMargins(style::ConvertScale(20), 0, style::ConvertScale(20), style::ConvertScale(16));
+    profileLayout->setSpacing(style::ConvertScale(6));
+
+    mainMenuAvatar_ = new QLabel(profileSection);
+    // Real window.style: mainMenuUserpic is UserpicButton(defaultUserpicButton)
+    // with photoSize: 48px.
+    int avatarSize = style::ConvertScale(48);
+    mainMenuAvatar_->setFixedSize(avatarSize, avatarSize);
+    mainMenuAvatar_->setPixmap(avatarPixmap("?", 0, avatarSize));
+
+    mainMenuNameLabel_ = new QLabel("...", profileSection);
+    {
+        QFont nameFont = mainMenuNameLabel_->font();
+        nameFont.setPixelSize(style::ConvertScale(17));
+        nameFont.setBold(true);
+        mainMenuNameLabel_->setFont(nameFont);
+    }
+    mainMenuUsernameLabel_ = new QLabel(QString(), profileSection);
+    {
+        QFont subFont = mainMenuUsernameLabel_->font();
+        subFont.setPixelSize(style::ConvertScale(13));
+        mainMenuUsernameLabel_->setFont(subFont);
+        QPalette pal = mainMenuUsernameLabel_->palette();
+        pal.setColor(QPalette::WindowText, QColor(140, 140, 140));
+        mainMenuUsernameLabel_->setPalette(pal);
+    }
+    profileLayout->addWidget(mainMenuAvatar_);
+    profileLayout->addSpacing(style::ConvertScale(8));
+    profileLayout->addWidget(mainMenuNameLabel_);
+    profileLayout->addWidget(mainMenuUsernameLabel_);
+    menuLayout->addWidget(profileSection);
+
+    auto addDivider = [this, menuLayout] {
+        auto* divider = new QWidget(mainMenuPanel_);
+        divider->setFixedHeight(style::ConvertScale(1));
+        QPalette pal = divider->palette();
+        pal.setColor(QPalette::Window, QColor(0, 0, 0, 25));
+        divider->setAutoFillBackground(true);
+        divider->setPalette(pal);
+        menuLayout->addWidget(divider);
+    };
+    addDivider();
+
+    auto* myProfileRow = new MenuRow(mainMenuPanel_, "My Profile");
+    myProfileRow->onClicked = [this] { closeMainMenu(); };
+    menuLayout->addWidget(myProfileRow);
+
+    walletRow_ = new MenuRow(mainMenuPanel_, "Wallet", "Monero");
+    static_cast<MenuRow*>(walletRow_)->onClicked = [this] { openWalletSection(); };
+    menuLayout->addWidget(walletRow_);
+    addDivider();
+
+    // Wallet detail: address/balance, shown/hidden in place instead of a
+    // separate page - toggled open by walletRow_ above, closed the same
+    // way (tap it again). Real Telegram drills into a whole new page for
+    // this; a simpler in-place reveal covers what was actually asked for
+    // (profile info + wallet info) without a second navigation layer.
+    walletDetail_ = new QWidget(mainMenuPanel_);
+    walletDetail_->hide();
+    auto* walletLayout = new QVBoxLayout(walletDetail_);
+    walletLayout->setContentsMargins(style::ConvertScale(20), style::ConvertScale(4), style::ConvertScale(20),
+                                      style::ConvertScale(12));
+    walletLayout->setSpacing(style::ConvertScale(4));
+    walletBalanceLabel_ = new QLabel("", walletDetail_);
+    {
+        QFont balanceFont = walletBalanceLabel_->font();
+        balanceFont.setPixelSize(style::ConvertScale(15));
+        balanceFont.setBold(true);
+        walletBalanceLabel_->setFont(balanceFont);
+    }
+    walletAddressLabel_ = new QLabel("", walletDetail_);
+    walletAddressLabel_->setWordWrap(true);
+    {
+        QFont addressFont = walletAddressLabel_->font();
+        addressFont.setPixelSize(style::ConvertScale(12));
+        walletAddressLabel_->setFont(addressFont);
+        QPalette pal = walletAddressLabel_->palette();
+        pal.setColor(QPalette::WindowText, QColor(120, 120, 120));
+        walletAddressLabel_->setPalette(pal);
+    }
+    walletStatusLabel_ = new QLabel("", walletDetail_);
+    {
+        QFont statusFont = walletStatusLabel_->font();
+        statusFont.setPixelSize(style::ConvertScale(12));
+        walletStatusLabel_->setFont(statusFont);
+        QPalette pal = walletStatusLabel_->palette();
+        pal.setColor(QPalette::WindowText, QColor(200, 60, 60));
+        walletStatusLabel_->setPalette(pal);
+    }
+    walletLayout->addWidget(walletBalanceLabel_);
+    walletLayout->addWidget(walletAddressLabel_);
+    walletLayout->addWidget(walletStatusLabel_);
+    menuLayout->addWidget(walletDetail_);
+
+    // Visual parity with real Telegram's own menu (see the screenshot this
+    // was built from) - not wired to any feature yet, clicking any of
+    // these just closes the menu.
+    for (const char* label : {"New Group", "New Channel", "Contacts", "Calls", "Saved Messages"}) {
+        auto* row = new MenuRow(mainMenuPanel_, QString(label));
+        row->onClicked = [this] { closeMainMenu(); };
+        menuLayout->addWidget(row);
+    }
+    addDivider();
+    auto* settingsRow = new MenuRow(mainMenuPanel_, "Settings");
+    settingsRow->onClicked = [this] { closeMainMenu(); };
+    menuLayout->addWidget(settingsRow);
+
+    // Night Mode: shown for visual parity with the real menu but not
+    // wired to an actual dark theme - that would mean re-deriving every
+    // color this app paints by hand at runtime (bubbles, sidebar, wallpaper,
+    // the whole palette), a separate feature on its own, not part of "left
+    // menu + profile + wallet". Disabled rather than a fake toggle that
+    // silently does nothing when checked - a control that visibly does
+    // nothing is more honest than one that looks like it works.
+    auto* nightModeRow = new QWidget(mainMenuPanel_);
+    nightModeRow->setFixedHeight(style::ConvertScale(42));
+    auto* nightModeLayout = new QHBoxLayout(nightModeRow);
+    nightModeLayout->setContentsMargins(style::ConvertScale(20), 0, style::ConvertScale(20), 0);
+    auto* nightModeLabel = new QLabel("Night Mode", nightModeRow);
+    auto* nightModeCheck = new QCheckBox(nightModeRow);
+    nightModeCheck->setEnabled(false);
+    nightModeCheck->setToolTip("Not implemented yet");
+    nightModeLayout->addWidget(nightModeLabel);
+    nightModeLayout->addStretch();
+    nightModeLayout->addWidget(nightModeCheck);
+    menuLayout->addWidget(nightModeRow);
+
+    menuLayout->addStretch();
+    mainMenuPanel_->setGeometry(-kMainMenuWidth, 0, kMainMenuWidth, chatPage_->height());
+
+    mainMenuAnimation_ = new QPropertyAnimation(mainMenuPanel_, "geometry", this);
+    mainMenuAnimation_->setDuration(220);
+    mainMenuAnimation_->setEasingCurve(QEasingCurve::OutCubic);
+    // Only actually hides the panel once its geometry animation finishes
+    // CLOSED (mainMenuOpen_ already false by then, see closeMainMenu()) -
+    // this same finished signal also fires at the end of the OPEN
+    // animation, where hiding would immediately undo the reveal that just
+    // happened. Connected once here rather than per-call in closeMainMenu(),
+    // so there is exactly one persistent connection to reason about instead
+    // of relying on Qt::UniqueConnection to dedupe repeated ones.
+    connect(mainMenuAnimation_, &QPropertyAnimation::finished, this, [this] {
+        if (!mainMenuOpen_) {
+            mainMenuPanel_->hide();
+        }
+    });
+
+    // ZKGRAM_MONERO_RPC_URL/_USER/_PASSWORD override monero-wallet-rpc's
+    // endpoint/login - same env-var configuration idiom telegram_client.cpp
+    // already uses for its own optional MTProto proxy
+    // (configureProxyIfSet()), not a new pattern for this codebase. Falls
+    // back to MoneroWalletRpc's own stagenet-default URL with no auth if
+    // unset.
+    QString moneroRpcUrl = qEnvironmentVariable("ZKGRAM_MONERO_RPC_URL");
+    QString moneroRpcUser = qEnvironmentVariable("ZKGRAM_MONERO_RPC_USER");
+    QString moneroRpcPassword = qEnvironmentVariable("ZKGRAM_MONERO_RPC_PASSWORD");
+    moneroClient_ = moneroRpcUrl.isEmpty()
+                         ? new zkgram::monero::MoneroWalletRpc(this)
+                         : new zkgram::monero::MoneroWalletRpc(this, moneroRpcUrl, moneroRpcUser, moneroRpcPassword);
 
     // Same trigger point as tdesktop's HistoryView::ListWidget detecting
     // the top of the scroll area reached (see maybeLoadMoreHistory()) - a
@@ -2943,11 +3774,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // "the app just freezes and messages don't load in time" - see also
     // setLoadingMore()'s own comment for the second half of that fix (a
     // visible indicator instead of blank space while it is in flight).
-    connect(historyCanvas->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, historyCanvas](int value) {
-        if (value <= historyCanvas->verticalScrollBar()->minimum() + style::ConvertScale(600)) {
-            maybeLoadMoreHistory();
-        }
-    });
+    historyScroll->scrollTopValue() | rpl::on_next(
+        [this](int value) {
+            if (value <= style::ConvertScale(600)) {
+                maybeLoadMoreHistory();
+            }
+        },
+        historyScroll->lifetime());
 
     // A write-restriction bar, shown instead of/alongside the composer
     // when there is no crypto::CryptoLayer session - the same structural
@@ -2970,6 +3803,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     startEncryptionRow->setFixedHeight(style::ConvertScale(46));
     auto* startEncryptionRowLayout = new QHBoxLayout(startEncryptionRow);
     startEncryptionRowLayout->setContentsMargins(style::ConvertScale(12), 0, style::ConvertScale(12), 0);
+    // REVERTED to QLabel (2026-08-17): same batch as companionLabel_'s
+    // real crash (see its own comment) - this one didn't crash but went
+    // invisible instead (user report: the private/plain-mode text
+    // disappeared after the FlatLabel conversion). Same root cause not
+    // found yet, same precaution - reverted rather than guessed at again.
     plainSendWarning_ = new QLabel("Not encrypted - sent as plain Telegram text", startEncryptionRow);
     plainSendWarning_->setObjectName("plainSendWarning");
     startEncryptionRowLayout->addWidget(plainSendWarning_);
@@ -3082,6 +3920,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     recordDot_->setFixedSize(style::ConvertScale(10), style::ConvertScale(10));
     recordDot_->setPixmap(dotPixmap(style::ConvertScale(10), QColor("#e41e3f")));
 
+    // REVERTED to QLabel (2026-08-17): same batch/precaution as
+    // companionLabel_/plainSendWarning_ (see their own comments) - not
+    // individually confirmed broken, but 2 of 3 FlatLabel conversions in
+    // this same pass already were (one crash, one invisible), so treating
+    // this one as equally unproven rather than waiting for a third bug
+    // report to roll it back too.
     recordTime_ = new QLabel("0:00,00", recordBar_);
     recordTime_->setObjectName("recordTime");
 
@@ -3124,6 +3968,27 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     voiceFormat.setAudioCodec(QMediaFormat::AudioCodec::AAC);
     recorder_->setMediaFormat(voiceFormat);
 
+    // Plays back a companion's (or your own) incoming voice notes - see
+    // HistoryCanvas::onVoicePlayToggled/paintVoiceContent above. Separate
+    // from captureSession_/recorder_ above, which only ever write audio,
+    // never play it back.
+    voicePlayer_ = new QMediaPlayer(this);
+    voiceAudioOutput_ = new QAudioOutput(this);
+    voicePlayer_->setAudioOutput(voiceAudioOutput_);
+    connect(voicePlayer_, &QMediaPlayer::positionChanged, this, &MainWindow::onVoicePlaybackStateChanged);
+    connect(voicePlayer_, &QMediaPlayer::playbackStateChanged, this, &MainWindow::onVoicePlaybackStateChanged);
+    connect(voicePlayer_, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status) {
+        // Real Telegram resets a finished voice note back to its start
+        // (Play, not a frozen Pause icon at the end of the track) rather
+        // than leaving it sitting at 100% - matches that instead of
+        // relying on playbackStateChanged alone, which QMediaPlayer does
+        // not always fire a further update for once EndOfMedia is reached.
+        if (status == QMediaPlayer::EndOfMedia) {
+            playingVoiceMessageId_ = 0;
+            asCanvas(messages_)->setVoicePlaybackState(0, false, 0, 0);
+        }
+    });
+
     // Nothing selected in the sidebar yet.
     updateConversationControlsVisibility();
 
@@ -3156,12 +4021,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(recordTimer_, &QTimer::timeout, this, &MainWindow::onRecordingTick);
     connect(input_, &ChatInput::submitted, this, &MainWindow::onSendClicked);
     connect(input_, &ChatInput::textChanged, this, &MainWindow::updateSendButtonIcon);
-    connect(historyCanvas->viewport(), &QWidget::customContextMenuRequested, this, &MainWindow::showMessageContextMenu);
+    connect(historyCanvas, &QWidget::customContextMenuRequested, this, &MainWindow::showMessageContextMenu);
     connect(recorder_, &QMediaRecorder::recorderStateChanged, this, &MainWindow::onRecorderStateChanged);
-    connect(searchInput_, &QLineEdit::textChanged, this, &MainWindow::onSearchTextChanged);
+    // Ui::InputField::changes() carries no value (see ChatInput's own
+    // constructor for the same pattern) - reads getLastText() itself
+    // instead of relying on a signal argument, unlike QLineEdit::textChanged.
+    searchInput_->changes(
+    ) | rpl::on_next([this] { onSearchTextChanged(searchInput_->getLastText()); }, searchInput_->lifetime());
     startEncryptionButton_->setClickedCallback([this] { onStartEncryptionClicked(); });
     secretModeToggle_->setClickedCallback([this] { onSecretModeToggleClicked(); });
-    connect(chatSearchInput_, &QLineEdit::textChanged, this, &MainWindow::onChatSearchTextChanged);
+    chatSearchInput_->changes(
+    ) | rpl::on_next([this] { onChatSearchTextChanged(chatSearchInput_->getLastText()); },
+                      chatSearchInput_->lifetime());
     connect(searchDebounceTimer_, &QTimer::timeout, this, &MainWindow::onChatSearchDebounceTimeout);
 
     // Application-wide, not installed on input_/field_ directly: Key_Up
@@ -3447,6 +4318,88 @@ void MainWindow::setConnectionStatus(const QString& text, const QString& colorHe
     }
 }
 
+void MainWindow::updateMyProfile(const QString& name, const QString& username) {
+    QString displayName = name.isEmpty() ? "You" : name;
+    mainMenuNameLabel_->setText(displayName);
+    mainMenuUsernameLabel_->setText(username.isEmpty() ? QString() : "@" + username);
+    int avatarSize = mainMenuAvatar_->width();
+    mainMenuAvatar_->setPixmap(avatarPixmap(displayName, 0, avatarSize));
+}
+
+void MainWindow::toggleMainMenu() {
+    if (mainMenuOpen_) {
+        closeMainMenu();
+    } else {
+        mainMenuOpen_ = true;
+        int panelWidth = mainMenuPanel_->width();
+        mainMenuDimmer_->setGeometry(chatPage_->rect());
+        mainMenuDimmer_->show();
+        mainMenuDimmer_->raise();
+        mainMenuPanel_->setGeometry(-panelWidth, 0, panelWidth, chatPage_->height());
+        mainMenuPanel_->show();
+        mainMenuPanel_->raise();
+        mainMenuAnimation_->stop();
+        mainMenuAnimation_->setStartValue(mainMenuPanel_->geometry());
+        mainMenuAnimation_->setEndValue(QRect(0, 0, panelWidth, chatPage_->height()));
+        mainMenuAnimation_->start();
+    }
+}
+
+void MainWindow::closeMainMenu() {
+    if (!mainMenuOpen_) {
+        return;
+    }
+    mainMenuOpen_ = false;
+    mainMenuDimmer_->hide();
+    int panelWidth = mainMenuPanel_->width();
+    mainMenuAnimation_->stop();
+    mainMenuAnimation_->setStartValue(mainMenuPanel_->geometry());
+    mainMenuAnimation_->setEndValue(QRect(-panelWidth, 0, panelWidth, chatPage_->height()));
+    mainMenuAnimation_->start();
+}
+
+void MainWindow::openWalletSection() {
+    bool showing = walletDetail_->isVisible();
+    walletDetail_->setVisible(!showing);
+    if (!showing && !walletInfoLoaded_) {
+        refreshWalletInfo();
+    }
+}
+
+void MainWindow::refreshWalletInfo() {
+    walletInfoLoaded_ = true;
+    walletBalanceLabel_->setText("Loading...");
+    walletAddressLabel_->setText(QString());
+    walletStatusLabel_->setText(QString());
+
+    // Both requests are independent HTTP round trips (see
+    // MoneroWalletRpc::call()) - each updates only its own label on
+    // return, so one failing (e.g. the daemon answered get_address but not
+    // get_balance) does not blank out whatever the other already showed.
+    moneroClient_->fetchBalance([this](bool ok, std::uint64_t balance, std::uint64_t unlocked, const QString& error) {
+        if (!ok) {
+            walletBalanceLabel_->setText(QString());
+            walletStatusLabel_->setText("Could not reach monero-wallet-rpc: " + error);
+            return;
+        }
+        QString text = zkgram::monero::MoneroWalletRpc::formatAtomicXmr(balance);
+        if (unlocked != balance) {
+            text += QString(" (%1 unlocked)").arg(zkgram::monero::MoneroWalletRpc::formatAtomicXmr(unlocked));
+        }
+        walletBalanceLabel_->setText(text);
+    });
+    moneroClient_->fetchPrimaryAddress([this](bool ok, const QString& address, const QString& error) {
+        if (!ok) {
+            walletAddressLabel_->setText(QString());
+            if (walletStatusLabel_->text().isEmpty()) {
+                walletStatusLabel_->setText("Could not reach monero-wallet-rpc: " + error);
+            }
+            return;
+        }
+        walletAddressLabel_->setText(address);
+    });
+}
+
 void MainWindow::updateConversationMetadata(const QVariantList& chats) {
     for (const QVariant& entryVariant : chats) {
         QVariantMap entry = entryVariant.toMap();
@@ -3511,7 +4464,7 @@ void MainWindow::updateChatList(QVariantList chats) {
     // visually clobber search results currently on screen - it still
     // updates lastChatListSnapshot_/the title caches above, just does not
     // re-render until the search box is cleared.
-    if (chatSearchInput_->text().trimmed().isEmpty()) {
+    if (chatSearchInput_->getLastText().trimmed().isEmpty()) {
         // Throttled, not called directly: TelegramClient::requestMoreChats()
         // can push updateChatList many times in a tight burst while paging
         // through a large account's full chat list (see its own comment in
@@ -3574,7 +4527,7 @@ void MainWindow::onChatSearchTextChanged(const QString& query) {
 }
 
 void MainWindow::onChatSearchDebounceTimeout() {
-    QString query = chatSearchInput_->text().trimmed();
+    QString query = chatSearchInput_->getLastText().trimmed();
     logDebug(QString("onChatSearchDebounceTimeout: query=\"%1\"").arg(query));
     if (query.isEmpty()) {
         renderSidebarRows(lastChatListSnapshot_);
@@ -3599,7 +4552,7 @@ void MainWindow::onChatSearchDebounceTimeout() {
             // Guards against an older, slower search response landing
             // after a newer keystroke already changed the query - without
             // this a stale result set could flash back on screen.
-            if (chatSearchInput_->text().trimmed() != query) {
+            if (chatSearchInput_->getLastText().trimmed() != query) {
                 return;
             }
             updateConversationMetadata(list);
@@ -3612,15 +4565,15 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
     logDebug(QString("onChatListItemClicked: entered, chatId=%1, chatListWidget_ rowCount=%2, searchText=\"%3\"")
                  .arg(chatId)
                  .arg(asSidebar(chatListWidget_)->rowCount())
-                 .arg(chatSearchInput_->text()));
+                 .arg(chatSearchInput_->getLastText()));
     currentChatId_ = chatId;
     cancelReply();  // a pending reply belongs to the chat it was started in
 
     // Opening a chat (whether from the normal list or a search result)
     // closes the search, same as tdesktop: back to the regular dialog list
     // underneath whatever was just opened.
-    if (!chatSearchInput_->text().isEmpty()) {
-        chatSearchInput_->clear();
+    if (!chatSearchInput_->getLastText().isEmpty()) {
+        chatSearchInput_->setText(QString());
         renderSidebarRows(lastChatListSnapshot_);
     } else {
         asSidebar(chatListWidget_)->setSelectedChatId(currentChatId_);
@@ -3628,8 +4581,8 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
 
     QString title = conversationTitles_.value(currentChatId_, "zkgram");
     companionLabel_->setText(title);
-    companionAvatar_->setPixmap(
-        chatAvatarPixmap(title, currentChatId_, conversationPhotoPaths_.value(currentChatId_), 38));
+    companionAvatar_->setPixmap(chatAvatarPixmap(title, currentChatId_, conversationPhotoPaths_.value(currentChatId_),
+                                                  style::ConvertScale(42)));
     companionAvatar_->show();
     maybeLoadCachedHistory(currentChatId_);
     updateSecretModeIndicator();
@@ -3728,11 +4681,14 @@ void MainWindow::maybeLoadPlainHistory(qlonglong chatId) {
                 // with no active session (see the !conversationActive_
                 // guard above), so its Telegram content was always
                 // ordinary plain text/media, never CryptoLayer ciphertext.
-                history.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
-                                                 QString::fromStdString(message.text),
-                                                 QString::fromStdString(message.photoPath), messageId,
-                                                 QString::fromStdString(message.senderName), /*isSecret=*/false,
-                                                 message.date, message.mediaAlbumId});
+                history.push_back(StoredMessage{
+                    message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
+                    QString::fromStdString(message.text),
+                    QString::fromStdString(message.isVoiceNote ? message.voiceNotePath : message.photoPath),
+                    messageId, QString::fromStdString(message.senderName), /*isSecret=*/false, message.date,
+                    message.mediaAlbumId, message.isVoiceNote, message.voiceNoteDuration,
+                    QByteArray(reinterpret_cast<const char*>(message.voiceWaveform.data()),
+                               static_cast<int>(message.voiceWaveform.size()))});
             }
             if (!history.isEmpty()) {
                 conversationMessages_[chatId] = history + conversationMessages_[chatId];
@@ -3828,11 +4784,14 @@ void MainWindow::maybeLoadMoreHistory() {
                 // isSecret=false - see maybeLoadPlainHistory()'s identical
                 // comment, the same !conversationActive_ guard applies
                 // here (this function's own entry check, above).
-                older.push_back(StoredMessage{message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
-                                               QString::fromStdString(message.text),
-                                               QString::fromStdString(message.photoPath), messageId,
-                                               QString::fromStdString(message.senderName), /*isSecret=*/false,
-                                               message.date, message.mediaAlbumId});
+                older.push_back(StoredMessage{
+                    message.isOutgoing ? MessageKind::Outgoing : MessageKind::Incoming,
+                    QString::fromStdString(message.text),
+                    QString::fromStdString(message.isVoiceNote ? message.voiceNotePath : message.photoPath),
+                    messageId, QString::fromStdString(message.senderName), /*isSecret=*/false, message.date,
+                    message.mediaAlbumId, message.isVoiceNote, message.voiceNoteDuration,
+                    QByteArray(reinterpret_cast<const char*>(message.voiceWaveform.data()),
+                               static_cast<int>(message.voiceWaveform.size()))});
             }
             if (older.isEmpty()) {
                 // Every message on this page was already on screen. Move
@@ -3869,8 +4828,12 @@ void MainWindow::maybeLoadMoreHistory() {
                 } else {
                     showTail = !attached[i + 1];
                 }
-                entries.push_back(HistoryEntry{older[i].kind, older[i].text, older[i].filePath, attached[i],
-                                                older[i].senderName, showTail, older[i].messageId, older[i].date});
+                HistoryEntry entry{older[i].kind, older[i].text, older[i].filePath, attached[i], older[i].senderName,
+                                    showTail, older[i].messageId, older[i].date};
+                entry.isVoiceNote = older[i].isVoiceNote;
+                entry.voiceDuration = older[i].voiceDuration;
+                entry.voiceWaveform = older[i].voiceWaveform;
+                entries.push_back(entry);
             }
 
             // messages is chronological oldest-first, same as the initial
@@ -3949,7 +4912,8 @@ void MainWindow::onStartEncryptionClicked() {
 
 void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
                                 const QString& filePath, qlonglong messageId, const QString& senderName,
-                                qint64 date, qint64 mediaAlbumId) {
+                                qint64 date, qint64 mediaAlbumId, bool isVoiceNote, int voiceDuration,
+                                const QByteArray& voiceWaveform) {
     // Same sender AND same kind AND same isSecret, not just same kind:
     // two different people's consecutive messages in a group chat must
     // not read as one attached block with only the first person's name
@@ -3971,8 +4935,8 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
     if (date == 0) {
         date = QDateTime::currentDateTime().toSecsSinceEpoch();
     }
-    conversationMessages_[chatId].push_back(
-        StoredMessage{kind, text, filePath, messageId, senderName, isSecret, date, mediaAlbumId});
+    conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName, isSecret, date,
+                                                            mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform});
     if (isSecret) {
         hasSecretContent_.insert(chatId);
         if (chatId == currentChatId_) {
@@ -3989,9 +4953,22 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         // in place if this one attaches to it, and lays out and paints
         // this new one - O(1) amortized, not a full conversation rebuild,
         // which matters for a long-running session with many messages.
-        asCanvas(messages_)->appendItem(
-            HistoryEntry{kind, text, filePath, attached, senderName, true, messageId, date});
-        asCanvas(messages_)->scrollToBottom();
+        // Outgoing (you just sent this - a deliberate action, real
+        // Telegram always jumps you to it regardless of where you were
+        // scrolled) always scrolls; anything else (an incoming message,
+        // a system/status line) only scrolls if the view was already at
+        // the bottom - see isNearBottom()'s own comment for the bug this
+        // fixes (any new message used to yank the view down out of
+        // history you were actively scrolled up reading).
+        bool shouldScrollToBottom = kind == MessageKind::Outgoing || asCanvas(messages_)->isNearBottom();
+        HistoryEntry entry{kind, text, filePath, attached, senderName, true, messageId, date};
+        entry.isVoiceNote = isVoiceNote;
+        entry.voiceDuration = voiceDuration;
+        entry.voiceWaveform = voiceWaveform;
+        asCanvas(messages_)->appendItem(entry);
+        if (shouldScrollToBottom) {
+            asCanvas(messages_)->scrollToBottom();
+        }
     }
     if (kind != MessageKind::System && isSecret) {
         cacheConversationHistory(chatId);
@@ -4141,9 +5118,13 @@ void MainWindow::renderCurrentConversation() {
             }
         }
         bool showTail = (i == conversation.size() - 1) || !attached[i + 1];
-        entries.push_back(HistoryEntry{conversation[i].kind, conversation[i].text, conversation[i].filePath,
-                                        attached[i], conversation[i].senderName, showTail, conversation[i].messageId,
-                                        conversation[i].date});
+        HistoryEntry entry{conversation[i].kind,       conversation[i].text,      conversation[i].filePath,
+                            attached[i],                conversation[i].senderName, showTail,
+                            conversation[i].messageId, conversation[i].date};
+        entry.isVoiceNote = conversation[i].isVoiceNote;
+        entry.voiceDuration = conversation[i].voiceDuration;
+        entry.voiceWaveform = conversation[i].voiceWaveform;
+        entries.push_back(entry);
         ++i;
     }
     asCanvas(messages_)->setItems(entries);
@@ -4172,7 +5153,9 @@ void MainWindow::appendConversationFileReceived(qlonglong chatId, const QString&
 
 void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
                                              const QString& senderName, const QString& filePath, bool isOutgoing,
-                                             qlonglong date, qlonglong mediaAlbumId, qlonglong replyToMessageId) {
+                                             qlonglong date, qlonglong mediaAlbumId, qlonglong replyToMessageId,
+                                             bool isVoiceNote, int voiceDuration, const QString& voicePath,
+                                             const QByteArray& voiceWaveform) {
     (void)replyToMessageId;  // not yet rendered as a reply header, see TODO.md
     // Only for chats whose history has already been asked for, i.e. ones
     // the user has opened at least once this run. For any other chat the
@@ -4207,8 +5190,11 @@ void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageI
         }
         seen.insert(messageId);
     }
-    appendMessage(chatId, MessageKind::Incoming, text, /*isSecret=*/false, filePath, messageId, senderName, date,
-                  mediaAlbumId);
+    // filePath carries photoPath here (empty for a voice note); voicePath
+    // is what StoredMessage::filePath actually needs to hold for one - see
+    // its own comment for why the two are stored in the same field.
+    appendMessage(chatId, MessageKind::Incoming, text, /*isSecret=*/false, isVoiceNote ? voicePath : filePath,
+                  messageId, senderName, date, mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform);
 }
 
 void MainWindow::setConversationReady(qlonglong chatId) {
@@ -4302,7 +5288,7 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
     // discoverable affordance on a plain desktop mouse the way it does on
     // touch, where real Telegram's own equivalent lives.
     menu->addAction("Select", [this, index = hit.index] { asCanvas(messages_)->enterSelectionMode(index); });
-    menu->popup(asCanvas(messages_)->viewport()->mapToGlobal(pos));
+    menu->popup(asCanvas(messages_)->mapToGlobal(pos));
 }
 
 bool MainWindow::showConfirmSignaturesDialog(qlonglong chatId, const QString& mySign, const QString& companionSign) {
@@ -4337,11 +5323,12 @@ QString MainWindow::showRequestCredentialDialog(const QString& prompt, const QSt
     QString lastError = prompt.section('\n', 1).trimmed();
 
     bool isPassword = step.contains("password", Qt::CaseInsensitive);
+    bool isCode = step.contains("code", Qt::CaseInsensitive);
     QString title = "Your phone number";
     QString subtitle = "Please confirm your country code\nand enter your phone number.";
     QString placeholder = "Phone number";
     AuthSlide::Validator validator;
-    if (step.contains("code", Qt::CaseInsensitive)) {
+    if (isCode) {
         title = "Enter code";
         subtitle = "We've sent an activation code to your phone.\nPlease enter it below.";
         placeholder = "Code";
@@ -4365,7 +5352,7 @@ QString MainWindow::showRequestCredentialDialog(const QString& prompt, const QSt
 
     centralStack_->setCurrentWidget(authSlide_);
     logDebug("showRequestCredentialDialog: calling runSlide");
-    QString result = authSlide_->runSlide(title, subtitle, placeholder, isPassword, validator, lastError);
+    QString result = authSlide_->runSlide(title, subtitle, placeholder, isPassword, validator, lastError, isCode);
     logDebug("showRequestCredentialDialog: runSlide returned, result.length()=" + QString::number(result.length()));
     return result;
 }
@@ -4601,6 +5588,36 @@ void MainWindow::onRecorderStateChanged() {
         }
         sendFilePath(path, "Voice message: ");
     }
+}
+
+void MainWindow::onVoicePlayToggleRequested(qlonglong messageId, const QString& path) {
+    if (path.isEmpty()) {
+        return;  // audio still downloading - see TelegramClient::onHistoryVoiceReady
+    }
+    bool isSameNote = messageId != 0 && messageId == playingVoiceMessageId_;
+    if (isSameNote && voicePlayer_->playbackState() == QMediaPlayer::PlayingState) {
+        voicePlayer_->pause();
+        return;
+    }
+    if (isSameNote && voicePlayer_->playbackState() == QMediaPlayer::PausedState) {
+        voicePlayer_->play();
+        return;
+    }
+    // A different voice note (or nothing) was loaded - real Telegram only
+    // ever plays one voice note at a time, switching stops whatever was
+    // playing before instead of overlapping the two.
+    playingVoiceMessageId_ = messageId;
+    voicePlayer_->setSource(QUrl::fromLocalFile(path));
+    voicePlayer_->play();
+}
+
+void MainWindow::onVoicePlaybackStateChanged() {
+    if (playingVoiceMessageId_ == 0) {
+        return;
+    }
+    bool playing = voicePlayer_->playbackState() == QMediaPlayer::PlayingState;
+    asCanvas(messages_)->setVoicePlaybackState(playingVoiceMessageId_, playing, voicePlayer_->position(),
+                                                voicePlayer_->duration());
 }
 
 void MainWindow::updateSendButtonIcon() {

@@ -15,11 +15,73 @@
 using "ui/colors.palette";
 using "ui/widgets/widgets.style";
 
-// Phase 6b (UI.md 13c): AuthSlide's title/subtitle/error - defaultFlatLabel
-// itself aligns left, but the auth card centers everything (was
-// QLabel::setAlignment(Qt::AlignCenter) before the Ui::FlatLabel swap).
-zkgramAuthLabel: FlatLabel(defaultFlatLabel) {
+// AuthSlide's title/subtitle/error - real values from telegram_fork's
+// intro/intro.style (introTitle: font(17px semibold), introDescription:
+// minWidth 300px, both centered here since zkgram's card layout centers
+// everything unlike real Telegram's own multi-column step layout, which
+// this is a simplified single-card adaptation of - see this .style file's
+// own header comment on why chat_helpers.style/intro.style themselves are
+// not vendored wholesale). error_ reuses zkgramAuthDescription (real
+// introError does exactly this too: "FlatLabel(introDescription)", only the
+// text color differs, set at runtime via setTextColorOverride()).
+zkgramAuthTitle: FlatLabel(defaultFlatLabel) {
 	align: align(center);
+	style: TextStyle(defaultTextStyle) {
+		font: font(17px semibold);
+	}
+}
+zkgramAuthDescription: FlatLabel(defaultFlatLabel) {
+	align: align(center);
+	minWidth: 300px;
+}
+
+// companionLabel_/plainSendWarning_/recordTime_ (main_window.cpp) - real
+// FlatLabel instances instead of QLabel+style.qss text-color rules
+// (windowBoldFg/windowSubTextFg are the real palette roles the old
+// literal #222222/#999999 hex already happened to match).
+zkgramCompanionLabel: FlatLabel(defaultFlatLabel) {
+	textFg: windowBoldFg;
+	style: TextStyle(defaultTextStyle) {
+		font: font(14px semibold);
+	}
+}
+zkgramPlainSendWarning: FlatLabel(defaultFlatLabel) {
+	textFg: windowSubTextFg;
+	style: TextStyle(defaultTextStyle) {
+		font: font(13px);
+	}
+}
+zkgramRecordTime: FlatLabel(defaultFlatLabel) {
+	textFg: windowBoldFg;
+	style: TextStyle(defaultTextStyle) {
+		font: font(14px);
+	}
+}
+// Real intro.style: introNextButton: RoundButton(defaultActiveButton) {
+// width: 300px; height: 42px; radius: 6px; textTop: 11px; }. textBg/
+// textBgOver/ripple color overridden to zkgramAuthAccent* (real Telegram
+// blue, see colors.palette) rather than defaultActiveButton's inherited
+// app-wide purple - the login screen keeps real Telegram's own accent, per
+// explicit user request, while the rest of the app stays purple.
+// AuthSlide's fields (plainInput_/passwordInput_, both st::defaultInputField
+// below) otherwise show the app-wide purple focus label/underline
+// (placeholderFgActive: windowActiveTextFg, borderFgActive: activeLineFg,
+// both purple-shifted in colors.palette) - real Telegram blue here too,
+// same scope as zkgramAuthNextButton above.
+zkgramAuthInputField: InputField(defaultInputField) {
+	placeholderFgActive: zkgramAuthAccentTextFg;
+	borderFgActive: zkgramAuthAccentLineFg;
+}
+zkgramAuthNextButton: RoundButton(defaultActiveButton) {
+	width: 300px;
+	height: 42px;
+	radius: 6px;
+	textTop: 11px;
+	textBg: zkgramAuthAccentBg;
+	textBgOver: zkgramAuthAccentBgOver;
+	ripple: RippleAnimation(defaultRippleAnimation) {
+		color: zkgramAuthAccentRipple;
+	}
 }
 
 // The composer's own message field - real historyComposeField values

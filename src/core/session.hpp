@@ -92,6 +92,9 @@ public:
     // marshalling onResults back to its own thread.
     void searchChats(const std::string& query, std::function<void(const std::vector<ChatListEntry>&)> onResults);
 
+    // See telegram::TelegramClient::fetchMyProfile's own comment.
+    void fetchMyProfile(std::function<void(const std::string& name, const std::string& username)> callback);
+
     void sendText(ConversationId chatId, const std::string& text);
     void sendFile(ConversationId chatId, const std::string& filePath);
 

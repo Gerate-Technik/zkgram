@@ -141,6 +141,36 @@ bool looksLikeImagePath(const std::string& filePath) {
     return ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "gif" || ext == "webp" || ext == "bmp";
 }
 
+// Unpacks td_api::voiceNote::waveform_ - Telegram's own compact wire
+// format for a voice note's amplitude envelope: consecutive 5-bit samples
+// (0-31 each), packed LSB-first starting from bit 0 of the first byte,
+// capped at 100 samples (Media::Player::kWaveformSamplesCount in real
+// tdesktop - see history_view_document.cpp's own FillWaveform/
+// PaintWaveform, ported into paintVoiceContent() in main_window.cpp). The
+// decoder itself is not part of tdesktop's own vendored source under
+// third_party/ (that lives in data/data_document.cpp, which was not
+// pulled in - see docs/README.md's "не вендорим целиком" decision); this
+// implements the same publicly documented bit layout every MTProto client
+// (including TDLib itself, which passes the bytes through undecoded) has
+// to agree on to read a voice note's waveform at all.
+std::vector<std::uint8_t> decodeVoiceWaveform(const std::string& raw) {
+    constexpr std::size_t kMaxSamples = 100;
+    std::size_t totalBits = raw.size() * 8;
+    std::size_t sampleCount = std::min(kMaxSamples, totalBits / 5);
+    std::vector<std::uint8_t> samples;
+    samples.reserve(sampleCount);
+    for (std::size_t i = 0; i < sampleCount; ++i) {
+        std::size_t bitOffset = i * 5;
+        std::size_t byteIndex = bitOffset / 8;
+        std::size_t bitShift = bitOffset % 8;
+        std::uint16_t low = static_cast<std::uint8_t>(raw[byteIndex]);
+        std::uint16_t high = (byteIndex + 1 < raw.size()) ? static_cast<std::uint8_t>(raw[byteIndex + 1]) : 0;
+        std::uint16_t combined = static_cast<std::uint16_t>(low | (high << 8));
+        samples.push_back(static_cast<std::uint8_t>((combined >> bitShift) & 0x1F));
+    }
+    return samples;
+}
+
 // Short preview text for the chat list sidebar - only messageText gets a
 // real preview (its content is plaintext-shaped already, whether or not it
 // is actually a zkgram ciphertext blob); everything else just names the
@@ -159,6 +189,8 @@ std::string previewFor(const td_api::message& message) {
             return "Document";
         case td_api::messagePhoto::ID:
             return "Photo";
+        case td_api::messageVoiceNote::ID:
+            return "Voice message";
         default:
             return "";
     }
@@ -621,6 +653,7 @@ struct TelegramClient::Impl {
         entry.unreadCount = chat.unread_count_;
         if (chat.last_message_ != nullptr) {
             entry.lastMessagePreview = previewFor(*chat.last_message_);
+            entry.lastMessageDate = chat.last_message_->date_;
         }
         for (auto& position : chat.positions_) {
             if (isMainListOrder(position.get())) {
@@ -715,6 +748,7 @@ struct TelegramClient::Impl {
             return;
         }
         it->second.lastMessagePreview = lastMessage != nullptr ? previewFor(*lastMessage) : "";
+        it->second.lastMessageDate = lastMessage != nullptr ? lastMessage->date_ : 0;
         publishChatList();
     }
 
@@ -810,8 +844,8 @@ struct TelegramClient::Impl {
         for (const auto& orderedChat : ordered) {
             ChatId id = orderedChat.second;
             const ChatEntry& entry = chats_.at(id);
-            summaries.push_back(
-                ChatSummary{id, entry.title, entry.lastMessagePreview, entry.unreadCount, entry.isChannel, entry.photoPath});
+            summaries.push_back(ChatSummary{id, entry.title, entry.lastMessagePreview, entry.unreadCount,
+                                             entry.isChannel, entry.photoPath, entry.lastMessageDate});
         }
         chatListCallback_(summaries);
     }
@@ -944,6 +978,24 @@ struct TelegramClient::Impl {
                             }
                         }
                     }
+                    // Same "already local vs. still downloading" split as
+                    // the photo branch above, for a voice note's audio file
+                    // - see PlainMessage::voiceNotePath's own comment.
+                    if (messagePtr->content_ != nullptr && messagePtr->content_->get_id() == td_api::messageVoiceNote::ID) {
+                        auto* content = static_cast<td_api::messageVoiceNote*>(messagePtr->content_.get());
+                        if (content->voice_note_ != nullptr) {
+                            plain.isVoiceNote = true;
+                            plain.voiceNoteDuration = content->voice_note_->duration_;
+                            plain.voiceWaveform = decodeVoiceWaveform(content->voice_note_->waveform_);
+                            if (content->voice_note_->voice_ != nullptr) {
+                                requestHistoryVoice(chatId, plain.id, *content->voice_note_->voice_);
+                                if (content->voice_note_->voice_->local_ != nullptr &&
+                                    content->voice_note_->voice_->local_->is_downloading_completed_) {
+                                    plain.voiceNotePath = content->voice_note_->voice_->local_->path_;
+                                }
+                            }
+                        }
+                    }
                     result.push_back(std::move(plain));
                 }
             }
@@ -978,6 +1030,23 @@ struct TelegramClient::Impl {
         });
     }
 
+    void fetchMyProfile(std::function<void(const std::string&, const std::string&)> callback) {
+        sendWithHandler(td_api::make_object<td_api::getMe>(), [callback](ObjectPtr object) {
+            if (object->get_id() != td_api::user::ID) {
+                callback("", "");
+                return;
+            }
+            auto* user = static_cast<td_api::user*>(object.get());
+            std::string name = user->first_name_;
+            if (!user->last_name_.empty()) {
+                name += name.empty() ? user->last_name_ : (" " + user->last_name_);
+            }
+            std::string username =
+                user->usernames_ != nullptr ? user->usernames_->editable_username_ : std::string();
+            callback(name, username);
+        });
+    }
+
     // Same idea as requestChatPhoto() (a real request_id via
     // sendWithHandler, not the request_id-0 sendNotify that was confirmed
     // to silently never produce a download for avatars - see
@@ -1006,6 +1075,35 @@ struct TelegramClient::Impl {
                              }
                              // If not completed yet, onFileUpdate() picks it
                              // up from here via pendingHistoryPhotos_ once
+                             // TDLib pushes updateFile for this file id.
+                         });
+    }
+
+    // Same idea as requestHistoryPhoto() above, for a voice note's audio
+    // file instead of a photo - own pending map/callback since a voice note
+    // and a photo downloading concurrently must not be confused with each
+    // other in onFileUpdate() (both are just a raw td_api::file id there).
+    void requestHistoryVoice(ChatId chatId, MessageId messageId, const td_api::file& file) {
+        if (file.local_ != nullptr && file.local_->is_downloading_completed_) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(pendingHistoryVoicesMutex_);
+            pendingHistoryVoices_[file.id_] = {chatId, messageId};
+        }
+        sendWithHandler(td_api::make_object<td_api::downloadFile>(file.id_, 32, 0, 0, false),
+                         [this, chatId, messageId](ObjectPtr object) {
+                             if (object->get_id() != td_api::file::ID) {
+                                 return;
+                             }
+                             auto* file = static_cast<td_api::file*>(object.get());
+                             if (file->local_ != nullptr && file->local_->is_downloading_completed_ && onHistoryVoice_) {
+                                 std::lock_guard<std::mutex> lock(pendingHistoryVoicesMutex_);
+                                 pendingHistoryVoices_.erase(file->id_);
+                                 onHistoryVoice_(chatId, messageId, file->local_->path_);
+                             }
+                             // If not completed yet, onFileUpdate() picks it
+                             // up from here via pendingHistoryVoices_ once
                              // TDLib pushes updateFile for this file id.
                          });
     }
@@ -1050,7 +1148,8 @@ struct TelegramClient::Impl {
                 auto it = chats_.find(id);
                 if (it != chats_.end()) {
                     summaries.push_back(ChatSummary{id, it->second.title, it->second.lastMessagePreview,
-                                                     it->second.unreadCount, it->second.isChannel, it->second.photoPath});
+                                                     it->second.unreadCount, it->second.isChannel,
+                                                     it->second.photoPath, it->second.lastMessageDate});
                 }
             }
             onResults(summaries);
@@ -1260,6 +1359,23 @@ struct TelegramClient::Impl {
                 }
                 break;
             }
+            case td_api::messageVoiceNote::ID: {
+                auto* content = static_cast<td_api::messageVoiceNote*>(message.content_.get());
+                if (content->voice_note_ != nullptr) {
+                    plain.isVoiceNote = true;
+                    plain.voiceNoteDuration = content->voice_note_->duration_;
+                    plain.voiceWaveform = decodeVoiceWaveform(content->voice_note_->waveform_);
+                    if (content->voice_note_->voice_ != nullptr) {
+                        if (content->voice_note_->voice_->local_ != nullptr &&
+                            content->voice_note_->voice_->local_->is_downloading_completed_) {
+                            plain.voiceNotePath = content->voice_note_->voice_->local_->path_;
+                        } else {
+                            requestHistoryVoice(chatId, plain.id, *content->voice_note_->voice_);
+                        }
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -1368,6 +1484,28 @@ struct TelegramClient::Impl {
                           std::to_string(pending.messageId) + " downloaded to " + file.local_->path_);
                 if (onHistoryPhoto_) {
                     onHistoryPhoto_(pending.chatId, pending.messageId, file.local_->path_);
+                }
+                return;
+            }
+        }
+
+        {
+            PendingHistoryPhoto pending{};
+            bool isHistoryVoice = false;
+            {
+                std::lock_guard<std::mutex> lock(pendingHistoryVoicesMutex_);
+                auto it = pendingHistoryVoices_.find(file.id_);
+                isHistoryVoice = it != pendingHistoryVoices_.end();
+                if (isHistoryVoice) {
+                    pending = it->second;
+                    pendingHistoryVoices_.erase(it);
+                }
+            }
+            if (isHistoryVoice) {
+                logDebug("onFileUpdate: history voice for chat " + std::to_string(pending.chatId) + " message " +
+                          std::to_string(pending.messageId) + " downloaded to " + file.local_->path_);
+                if (onHistoryVoice_) {
+                    onHistoryVoice_(pending.chatId, pending.messageId, file.local_->path_);
                 }
                 return;
             }
@@ -1490,6 +1628,12 @@ struct TelegramClient::Impl {
     std::function<void(ChatId, MessageId, const std::string&)> onHistoryPhoto_;
     std::function<void(ChatId, MessageId, const std::string&)> onHistorySenderName_;
 
+    // Reuses PendingHistoryPhoto's shape (chatId, messageId) - same idea,
+    // a different content type, see requestHistoryVoice()'s own comment.
+    std::mutex pendingHistoryVoicesMutex_;
+    std::map<std::int32_t, PendingHistoryPhoto> pendingHistoryVoices_;
+    std::function<void(ChatId, MessageId, const std::string&)> onHistoryVoice_;
+
     // ---- zkgram presence probe state ------------------------------------
     std::mutex probesMutex_;
     std::map<ChatId, std::function<void(bool)>> pendingProbes_;
@@ -1503,6 +1647,7 @@ struct TelegramClient::Impl {
         std::int64_t order = 0;
         bool isChannel = false;
         std::string photoPath;
+        std::int64_t lastMessageDate = 0;
     };
     std::map<ChatId, ChatEntry> chats_;
     std::function<void(const std::vector<ChatSummary>&)> chatListCallback_;
@@ -1589,6 +1734,14 @@ void TelegramClient::onHistoryPhotoReady(std::function<void(ChatId, MessageId, c
 
 void TelegramClient::onHistorySenderNameReady(std::function<void(ChatId, MessageId, const std::string&)> callback) {
     impl_->onHistorySenderName_ = std::move(callback);
+}
+
+void TelegramClient::onHistoryVoiceReady(std::function<void(ChatId, MessageId, const std::string&)> callback) {
+    impl_->onHistoryVoice_ = std::move(callback);
+}
+
+void TelegramClient::fetchMyProfile(std::function<void(const std::string&, const std::string&)> callback) {
+    impl_->fetchMyProfile(std::move(callback));
 }
 
 void TelegramClient::disconnect() {

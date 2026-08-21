@@ -33,6 +33,10 @@ data/
 # Diagnostic log written next to zkgram.exe at runtime, not source
 zkgram_debug.log
 
+# Ad-hoc build logs (build-cmake.ps1 output redirected here during
+# iteration, e.g. build_log63.txt) - not source, not meant to be committed.
+build_log*.txt
+
 .vs/
 .vscode/
 .idea/

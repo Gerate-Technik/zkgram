@@ -115,9 +115,17 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
         plain.senderName = message.senderName;
         plain.mediaAlbumId = message.mediaAlbumId;
         plain.replyToMessageId = message.replyToMessageId;
-        dataRegistry_.upsertMessage(MessageData{chatId, message.id, MessageOrigin::Plain, message.isOutgoing,
-                                                 message.text, message.photoPath, message.senderName, message.date,
-                                                 message.mediaAlbumId, message.replyToMessageId});
+        plain.isVoiceNote = message.isVoiceNote;
+        plain.voiceNoteDuration = message.voiceNoteDuration;
+        plain.voiceNotePath = message.voiceNotePath;
+        plain.voiceWaveform = message.voiceWaveform;
+        MessageData data{chatId, message.id, MessageOrigin::Plain, message.isOutgoing,
+                          message.text, message.photoPath, message.senderName, message.date,
+                          message.mediaAlbumId, message.replyToMessageId};
+        data.isVoiceNote = message.isVoiceNote;
+        data.voiceNoteDuration = message.voiceNoteDuration;
+        data.voiceNotePath = message.voiceNotePath;
+        dataRegistry_.upsertMessage(std::move(data));
         uiProvider_->onPlainMessageReceived(chatId, plain);
     });
     telegramClient_.onHistoryPhotoReady([this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& path) {
@@ -134,6 +142,14 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
                 dataRegistry_.notifyUpdated(existing);
             }
             uiProvider_->onHistorySenderNameReady(chatId, messageId, name);
+        });
+    telegramClient_.onHistoryVoiceReady(
+        [this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& path) {
+            if (MessageData* existing = dataRegistry_.message(chatId, messageId)) {
+                existing->voiceNotePath = path;
+                dataRegistry_.notifyUpdated(existing);
+            }
+            uiProvider_->onHistoryVoiceReady(chatId, messageId, path);
         });
 
     uiProvider_->onInit();
@@ -160,6 +176,7 @@ void Session::start() {
             entry.hasActiveConversation = conversations_.count(chat.id) != 0;
             entry.isChannel = chat.isChannel;
             entry.photoPath = chat.photoPath;
+            entry.lastMessageDate = chat.lastMessageDate;
             // Only actually written when something about this peer changed.
             // A chat-list push carries every known chat, but a push is
             // almost always triggered by a change to one or two of them -
@@ -198,10 +215,15 @@ void Session::searchChats(const std::string& query, std::function<void(const std
             entry.hasActiveConversation = conversations_.count(chat.id) != 0;
             entry.isChannel = chat.isChannel;
             entry.photoPath = chat.photoPath;
+            entry.lastMessageDate = chat.lastMessageDate;
             entries.push_back(std::move(entry));
         }
         onResults(entries);
     });
+}
+
+void Session::fetchMyProfile(std::function<void(const std::string&, const std::string&)> callback) {
+    telegramClient_.fetchMyProfile(std::move(callback));
 }
 
 namespace {
@@ -210,7 +232,9 @@ std::vector<PlainMessage> convertHistory(const std::vector<telegram::PlainMessag
     converted.reserve(messages.size());
     for (const auto& message : messages) {
         converted.push_back(PlainMessage{message.id, message.isOutgoing, message.text, message.date, message.photoPath,
-                                          message.senderName, message.mediaAlbumId, message.replyToMessageId});
+                                          message.senderName, message.mediaAlbumId, message.replyToMessageId,
+                                          message.isVoiceNote, message.voiceNoteDuration, message.voiceNotePath,
+                                          message.voiceWaveform});
     }
     return converted;
 }

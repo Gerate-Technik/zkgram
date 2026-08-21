@@ -36,6 +36,12 @@ struct ChatSummary {
     // downloaded - empty until then (or if the chat has no photo at all),
     // see TelegramClient's avatar download tracking.
     std::string photoPath;
+    // td_api::chat::last_message_::date_ (unix seconds), 0 if the chat has
+    // no last message at all - real Telegram Desktop's own dialogs row
+    // shows this in the top-right corner (dialogsDateFont/dialogsDateSkip,
+    // dialogs.style) and its total absence here was one concrete way this
+    // sidebar visibly did not match the real client.
+    std::int64_t lastMessageDate = 0;
 };
 
 using MessageId = std::int64_t;
@@ -74,6 +80,26 @@ struct PlainMessage {
     // only - external/story replies are not surfaced), 0 if this message is
     // not a reply to anything in the same chat.
     MessageId replyToMessageId = 0;
+    // True for a td_api::messageVoiceNote - lets the UI draw a play button
+    // instead of treating this like a generic document (previewFor() already
+    // labels it "Voice message", but that alone does not distinguish it from
+    // a real .txt/.pdf document with the same placeholder-style text).
+    bool isVoiceNote = false;
+    // td_api::voiceNote::duration_ (seconds) - known synchronously from the
+    // message itself, unlike voiceNotePath below.
+    std::int32_t voiceNoteDuration = 0;
+    // Local filesystem path to the voice note's audio file, empty until
+    // downloaded - same "already local vs. still downloading" split as
+    // PlainMessage::photoPath, delivered the same way via
+    // TelegramClient::onHistoryVoiceReady() for a note not yet local when
+    // this struct was returned.
+    std::string voiceNotePath;
+    // Decoded peak samples (0-31 each, up to 100 of them) for the real
+    // waveform bar UI - see decodeVoiceWaveform() in telegram_client.cpp.
+    // TDLib's own td_api::voiceNote::waveform_ is still the raw 5-bit
+    // packed MTProto wire format, not ready-to-paint samples, so the
+    // unpacking happens here rather than being pushed onto every caller.
+    std::vector<std::uint8_t> voiceWaveform;
 };
 
 class TelegramClient {
@@ -150,6 +176,18 @@ public:
     // not yet resolved at the time loadMessageHistory()/
     // loadMoreMessageHistory() returned it (see PlainMessage::senderName).
     void onHistorySenderNameReady(std::function<void(ChatId, MessageId, const std::string& name)> callback);
+
+    // Fires once for each history/live voice note whose audio was not yet
+    // downloaded at the time it was returned/received (see
+    // PlainMessage::voiceNotePath) - same pattern as onHistoryPhotoReady.
+    void onHistoryVoiceReady(std::function<void(ChatId, MessageId, const std::string& path)> callback);
+
+    // The logged-in account's own display name/username (td_api::getMe) -
+    // one-shot, not a standing subscription, and not tied to any chat. Used
+    // for the app's own profile panel (see MainWindow's hamburger menu),
+    // unlike requestSenderName (per-chat, resolves someone else's name).
+    // username is empty if the account has none set.
+    void fetchMyProfile(std::function<void(const std::string& name, const std::string& username)> callback);
 
     // Resolves an arbitrary Telegram username ("name"/"@name") or phone
     // number ("+1234567890", international format) to a chat id, creating

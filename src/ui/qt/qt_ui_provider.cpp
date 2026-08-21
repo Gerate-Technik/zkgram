@@ -1,5 +1,6 @@
 #include "ui/qt/qt_ui_provider.hpp"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
@@ -52,6 +53,7 @@ void QtUiProvider::onChatListUpdated(const std::vector<zkgram::core::ChatListEnt
         entry["active"] = chat.hasActiveConversation;
         entry["channel"] = chat.isChannel;
         entry["photo"] = QString::fromStdString(chat.photoPath);
+        entry["lastMessageDate"] = static_cast<qlonglong>(chat.lastMessageDate);
         list.append(entry);
     }
     QMetaObject::invokeMethod(window_, "updateChatList", kFireAndForget, Q_ARG(QVariantList, list));
@@ -84,7 +86,11 @@ void QtUiProvider::onPlainMessageReceived(zkgram::core::ConversationId conversat
                                Q_ARG(QString, QString::fromStdString(message.photoPath)),
                                Q_ARG(bool, message.isOutgoing), Q_ARG(qlonglong, static_cast<qlonglong>(message.date)),
                                Q_ARG(qlonglong, static_cast<qlonglong>(message.mediaAlbumId)),
-                               Q_ARG(qlonglong, static_cast<qlonglong>(message.replyToMessageId)));
+                               Q_ARG(qlonglong, static_cast<qlonglong>(message.replyToMessageId)),
+                               Q_ARG(bool, message.isVoiceNote), Q_ARG(int, message.voiceNoteDuration),
+                               Q_ARG(QString, QString::fromStdString(message.voiceNotePath)),
+                               Q_ARG(QByteArray, QByteArray(reinterpret_cast<const char*>(message.voiceWaveform.data()),
+                                                             static_cast<int>(message.voiceWaveform.size()))));
 }
 
 void QtUiProvider::onHistoryPhotoReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
@@ -99,6 +105,16 @@ void QtUiProvider::onHistorySenderNameReady(zkgram::core::ConversationId convers
     QMetaObject::invokeMethod(window_, "updateHistorySenderName", kFireAndForget, Q_ARG(qlonglong, conversation),
                                Q_ARG(qlonglong, static_cast<qlonglong>(messageId)),
                                Q_ARG(QString, QString::fromStdString(name)));
+}
+
+void QtUiProvider::onHistoryVoiceReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
+                                        const std::string& path) {
+    // A voice note's audio and a photo's image both just replace
+    // StoredMessage::filePath and trigger a re-render on arrival - same
+    // slot, no separate "updateHistoryVoice" needed on the Qt side.
+    QMetaObject::invokeMethod(window_, "updateHistoryPhoto", kFireAndForget, Q_ARG(qlonglong, conversation),
+                               Q_ARG(qlonglong, static_cast<qlonglong>(messageId)),
+                               Q_ARG(QString, QString::fromStdString(path)));
 }
 
 void QtUiProvider::onReady(zkgram::core::ConversationId conversation) {

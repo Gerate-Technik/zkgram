@@ -14,20 +14,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Pin the MSVC runtime library before any vendored subdirectory can set its
 # own default. TDLib and the OpenSSL-Win64 install zkgram links against were
 # both built with the dynamic CRT (/MD); the vendored desktop-app cmake
-# helpers (third_party/desktop-app/cmake/variables.cmake, used when
-# ZKGRAM_VENDOR_LIB_UI is on) default CMAKE_MSVC_RUNTIME_LIBRARY to the
-# static CRT (/MT) instead, which is correct for the real tdesktop's own
-# fully-static toolchain but not for zkgram's existing dependencies. Setting
-# this CACHE variable here first means the vendored tree's own
-# set(... CACHE STRING "") (no FORCE) leaves it alone, so lib_ui builds
-# against the same CRT as the rest of zkgram instead of imposing its own.
+# helpers (third_party/desktop-app/cmake/variables.cmake) default
+# CMAKE_MSVC_RUNTIME_LIBRARY to the static CRT (/MT) instead, which is
+# correct for the real tdesktop's own fully-static toolchain but not for
+# zkgram's existing dependencies. Setting this CACHE variable here first
+# means the vendored tree's own set(... CACHE STRING "") (no FORCE) leaves
+# it alone, so lib_ui builds against the same CRT as the rest of zkgram
+# instead of imposing its own.
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "")
 endif()
 
-# UI plugin selected at configure time (see docs/README.md, UI plugins section).
-set(ZKGRAM_UI "console" CACHE STRING "UI plugin to build: console or qt")
-set_property(CACHE ZKGRAM_UI PROPERTY STRINGS console qt)
+# The Qt UI (with the vendored real Telegram Desktop lib_ui toolkit) is the
+# only build this project produces - there used to be a console-only
+# ZKGRAM_UI=console plugin and an off-by-default ZKGRAM_VENDOR_LIB_UI switch,
+# both removed per the user's explicit request: the console UI was never
+# actually used or kept up to date once the Qt client existed, and lib_ui's
+# real .style values (msgWaveformBar, dialogs.style, chat.style, ...) are now
+# load-bearing for the Qt UI's own rendering, so building without it was
+# never actually a supported configuration in practice either.
 
 # Directory containing the sibling cryptolayer/cryptolayer-module-interface
 # repos (see src/crypto/python_bridge.cpp). Resolved to an ABSOLUTE path at
@@ -105,119 +110,120 @@ set(ZKGRAM_SOURCES
     src/core/session.cpp
 )
 
-if(ZKGRAM_UI STREQUAL "qt")
-    # Off by default: the vendored lib_ui build (see third_party/desktop-app/)
-    # is Phase 1 infrastructure only - src/ui/qt/ does not use any of its
-    # widgets yet (that is Phase 4-6, not done, see zkgram/.claude/UI.md
-    # section 13c and prompt.md). Turning this on also requires codegen_style
-    # to be able to actually run as a build-time subprocess, which is not
-    # guaranteed on every machine (see docs/README.md for a known,
-    # unresolved case where it fails with STATUS_DLL_NOT_FOUND for reasons
-    # that needed administrator rights to diagnose further). Until Phase 4-6
-    # lands, leave this OFF so normal qt builds are not blocked by it.
-    option(ZKGRAM_VENDOR_LIB_UI "Build and link the vendored Telegram Desktop lib_ui (Phase 1 migration infrastructure, not yet used by src/ui/qt/)" OFF)
+find_package(Qt6 COMPONENTS Widgets Multimedia Network Svg OpenGL OpenGLWidgets DBus REQUIRED)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+# This target also embeds Python.h (via crypto_layer.hpp -> pybind11), which
+# declares a struct field literally named "slots". Qt's "slots"/"signals"/
+# "emit" keyword macros collide with that, so keywords are disabled here;
+# our own code uses Q_SLOTS/Q_SIGNALS/Q_EMIT instead, see docs/README.md.
+add_compile_definitions(QT_NO_KEYWORDS)
 
-    if(ZKGRAM_VENDOR_LIB_UI)
-        find_package(Qt6 COMPONENTS Widgets Multimedia Network Svg OpenGL OpenGLWidgets DBus REQUIRED)
-    else()
-        find_package(Qt6 COMPONENTS Widgets Multimedia REQUIRED)
-    endif()
-    set(CMAKE_AUTOMOC ON)
-    set(CMAKE_AUTORCC ON)
-    # This target also embeds Python.h (via crypto_layer.hpp -> pybind11), which
-    # declares a struct field literally named "slots". Qt's "slots"/"signals"/
-    # "emit" keyword macros collide with that, so keywords are disabled here;
-    # our own code uses Q_SLOTS/Q_SIGNALS/Q_EMIT instead, see docs/README.md.
-    add_compile_definitions(QT_NO_KEYWORDS)
+# Vendored subset of Telegram Desktop's own UI toolkit (lib_ui/lib_base/
+# lib_rpl/lib_crl/codegen, from github.com/desktop-app) - always built and
+# linked now (see this file's own comment above on why the old off-by-default
+# switch is gone). GPLv3: this makes the resulting zkgram.exe subject to
+# GPLv3 as a whole, see third_party/desktop-app/CMakeLists.txt's own header
+# comment.
+#
+# lib_base's own crash reporter needs Google Breakpad
+# (client/windows/handler/exception_handler.h), which is not vendored here -
+# zkgram has its own crash-diagnostics path already (see main_qt.cpp's
+# std::set_terminate handler), so this is not needed rather than a gap to
+# fill in later.
+set(DESKTOP_APP_DISABLE_CRASH_REPORTS ON CACHE BOOL "" FORCE)
 
-    if(ZKGRAM_VENDOR_LIB_UI)
-        # Vendored subset of Telegram Desktop's own UI toolkit (lib_ui/lib_base/
-        # lib_rpl/lib_crl/codegen, from github.com/desktop-app). This link only
-        # builds codegen_style and links lib_ui into zkgram; src/ui/qt/ itself
-        # still uses the pre-migration hand-painted widgets for now (Phase 1 of
-        # the migration - see zkgram/.claude/UI.md, section 13c, and prompt.md
-        # one level above this repo for the full phase plan). GPLv3: this makes
-        # the resulting zkgram.exe (qt build) subject to GPLv3 as a whole, see
-        # third_party/desktop-app/CMakeLists.txt's own header comment.
-        #
-        # lib_base's own crash reporter needs Google Breakpad
-        # (client/windows/handler/exception_handler.h), which is not
-        # vendored here - zkgram has its own crash-diagnostics path already
-        # (see main_qt.cpp's std::set_terminate handler), so this is not
-        # needed rather than a gap to fill in later.
-        set(DESKTOP_APP_DISABLE_CRASH_REPORTS ON CACHE BOOL "" FORCE)
-
-        # Fails here, with one readable line, instead of a few hundred
-        # template errors deep inside lib_ui: ui/accessible/ui_accessible_widget
-        # implements QAccessibleSelectionInterface (Qt 6.5) and
-        # QAccessibleAttributesInterface (Qt 6.8), so anything older cannot
-        # build lib_ui at all. Notably older than what LTS distributions ship -
-        # Ubuntu 24.04 is on 6.4.2 - hence the pointer to a side-by-side Qt.
-        if(Qt6_VERSION VERSION_LESS 6.8)
-            message(FATAL_ERROR
-                "ZKGRAM_UI=qt needs Qt 6.8 or newer (found ${Qt6_VERSION}): the vendored "
-                "lib_ui implements QAccessibleAttributesInterface, added in Qt 6.8. "
-                "Install a newer Qt alongside the system one and point at it, e.g.\n"
-                "  pip install aqtinstall\n"
-                "  python3 -m aqt install-qt linux desktop 6.8.2 linux_gcc_64 -m qtmultimedia qtsvg -O /opt/Qt\n"
-                "  ./build.sh --ui qt --qt-prefix /opt/Qt/6.8.2/gcc_64 ...")
-        endif()
-
-        add_subdirectory(third_party/desktop-app)
-    endif()
-
-    list(APPEND ZKGRAM_SOURCES
-        src/ui/qt/main_qt.cpp
-        src/ui/qt/qt_ui_provider.cpp
-        src/ui/qt/main_window.cpp
-        src/ui/qt/icons.cpp
-        src/ui/qt/chat_background.cpp
-        src/ui/qt/resources.qrc
-    )
-    if(ZKGRAM_VENDOR_LIB_UI)
-        # crl::on_main_update_requests() is missing from upstream lib_crl -
-        # see src/ui/qt/crl_on_main_qt.cpp's own header comment.
-        list(APPEND ZKGRAM_SOURCES src/ui/qt/crl_on_main_qt.cpp)
-        # Required Ui::Integration implementation - see
-        # src/ui/qt/ui_integration.hpp's own comment for why.
-        list(APPEND ZKGRAM_SOURCES src/ui/qt/ui_integration.cpp)
-
-        # Real Telegram Desktop chat design code, copied from
-        # telegram_fork/tdesktop/Telegram/SourceFiles (not referenced as a
-        # submodule/library - copied and adapted directly into zkgram's own
-        # src/ tree per project convention, see src/ui/chat/chat_style.cpp's
-        # own header comment for what was trimmed and why). None of this
-        # depends on HistoryItem/Data::Session/Main::Session - it is
-        # self-contained bubble geometry/painting/theme machinery.
-        list(APPEND ZKGRAM_SOURCES
-            src/ui/chat/message_bubble.cpp
-            src/ui/chat/chat_style.cpp
-            src/ui/chat/chat_style_radius.cpp
-            src/ui/chat/chat_theme.cpp
-            src/ui/chat/message_bar.cpp
-            src/ui/cached_round_corners.cpp
-            src/ui/color_contrast.cpp
-            src/ui/color_int_conversion.cpp
-            src/ui/power_saving.cpp
-            src/ui/text/text_options.cpp
-            src/ui/grouped_layout.cpp
-            src/layout/layout_selection.cpp
-        )
-    endif()
-elseif(ZKGRAM_UI STREQUAL "console")
-    list(APPEND ZKGRAM_SOURCES src/main.cpp)
-else()
-    message(FATAL_ERROR "Unknown ZKGRAM_UI value: ${ZKGRAM_UI} (expected console or qt)")
+# Fails here, with one readable line, instead of a few hundred template
+# errors deep inside lib_ui: ui/accessible/ui_accessible_widget implements
+# QAccessibleSelectionInterface (Qt 6.5) and QAccessibleAttributesInterface
+# (Qt 6.8), so anything older cannot build lib_ui at all. Notably older than
+# what LTS distributions ship - Ubuntu 24.04 is on 6.4.2 - hence the pointer
+# to a side-by-side Qt.
+if(Qt6_VERSION VERSION_LESS 6.8)
+    message(FATAL_ERROR
+        "zkgram needs Qt 6.8 or newer (found ${Qt6_VERSION}): the vendored "
+        "lib_ui implements QAccessibleAttributesInterface, added in Qt 6.8. "
+        "Install a newer Qt alongside the system one and point at it, e.g.\n"
+        "  pip install aqtinstall\n"
+        "  python3 -m aqt install-qt linux desktop 6.8.2 linux_gcc_64 -m qtmultimedia qtsvg -O /opt/Qt\n"
+        "  ./build.sh --qt-prefix /opt/Qt/6.8.2/gcc_64 ...")
 endif()
+
+add_subdirectory(third_party/desktop-app)
+
+list(APPEND ZKGRAM_SOURCES
+    src/ui/qt/main_qt.cpp
+    src/ui/qt/qt_ui_provider.cpp
+    src/ui/qt/main_window.cpp
+    src/ui/qt/icons.cpp
+    src/ui/qt/chat_background.cpp
+    src/ui/qt/resources.qrc
+    # Monero wallet-rpc HTTP client for the hamburger menu's wallet panel -
+    # see src/monero/monero.h's own comment for why this talks to an
+    # external monero-wallet-rpc process instead of linking monero-cpp/
+    # monero-core in. Does not touch lib_ui itself (QNetworkAccessManager
+    # only), listed here rather than with the lib_ui-dependent sources below.
+    src/monero/monero.cpp
+    # crl::on_main_update_requests() is missing from upstream lib_crl - see
+    # src/ui/qt/crl_on_main_qt.cpp's own header comment.
+    src/ui/qt/crl_on_main_qt.cpp
+    # Required Ui::Integration implementation - see
+    # src/ui/qt/ui_integration.hpp's own comment for why.
+    src/ui/qt/ui_integration.cpp
+)
+
+# Real Telegram Desktop chat design code, copied from
+# telegram_fork/tdesktop/Telegram/SourceFiles (not referenced as a
+# submodule/library - copied and adapted directly into zkgram's own src/
+# tree per project convention, see src/ui/chat/chat_style.cpp's own header
+# comment for what was trimmed and why). None of this depends on
+# HistoryItem/Data::Session/Main::Session - it is self-contained bubble
+# geometry/painting/theme machinery.
+list(APPEND ZKGRAM_SOURCES
+    src/ui/chat/message_bubble.cpp
+    src/ui/chat/chat_style.cpp
+    src/ui/chat/chat_style_radius.cpp
+    src/ui/chat/chat_theme.cpp
+    src/ui/chat/message_bar.cpp
+    src/ui/cached_round_corners.cpp
+    src/ui/color_contrast.cpp
+    src/ui/color_int_conversion.cpp
+    src/ui/power_saving.cpp
+    src/ui/text/text_options.cpp
+    src/ui/grouped_layout.cpp
+    src/layout/layout_selection.cpp
+)
+
+# Pulled from the user's own real-tdesktop copy under src/ui/widgets/ (not
+# the whole tree - see historyview-port-guide.md and this session's own
+# dependency scan for why vendoring that tree wholesale is not viable: 513+
+# missing transitive includes spanning window/boxes/api/storage/mtproto,
+# i.e. the entire app). Trimmed to remove its only non-self-contained
+# dependency (lang/lang_keys.h, unused here - see the file's own comment).
+#
+# src/ui/widgets/multi_select.cpp/.h are NOT listed here despite also being
+# copied in: they come from a newer upstream tdesktop revision than what
+# third_party/desktop-app/lib_base|lib_rpl|lib_ui actually vendor -
+# compiling it fails deep inside those vendored headers themselves
+# (base::object_ptr has no .take() in our version; rpl::combine_previous/
+# filter/mappers::_1 do not exist in our vendored lib_rpl at all), not from
+# anything wrong in multi_select.cpp itself. Has no call site anywhere yet
+# either. Left in src/ as reference for when a real "forward to multiple
+# chats" feature gets built - either hand-port it against this project's
+# actual vendored rpl/base API, or write a smaller zkgram-native version
+# inspired by it, not just re-add it to this list and expect it to compile.
+list(APPEND ZKGRAM_SOURCES
+    src/ui/widgets/sent_code_field.cpp
+)
 
 # Кастомная иконка приложения (Windows): положите resources/app.ico — см. resources/README.md
 if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/resources/app.ico")
     list(APPEND ZKGRAM_SOURCES resources/app.rc)
 endif()
 
-# WIN32 (no console window) only for the Qt build - the console UI is meant
-# to run in a terminal (reads stdin via std::getline) and needs one.
-if(ZKGRAM_UI STREQUAL "qt" AND WIN32)
+# WIN32 subsystem (no console window) - this is the only build zkgram
+# produces now.
+if(WIN32)
     add_executable(zkgram WIN32 ${ZKGRAM_SOURCES})
 else()
     add_executable(zkgram ${ZKGRAM_SOURCES})
@@ -307,66 +313,63 @@ if(zkgram_python_runtime_dll OR ZKGRAM_VCRUNTIME140_1_DLL)
     )
 endif()
 
-if(ZKGRAM_UI STREQUAL "qt")
-    target_link_libraries(zkgram PRIVATE Qt6::Widgets Qt6::Multimedia)
-    # windeployqt copies every Qt DLL zkgram.exe actually needs (it inspects
-    # the built binary itself), including Qt6Multimedia.dll's own plugins
-    # (multimedia/*.dll) that a plain DLL copy would miss.
-    get_filename_component(zkgram_qt_bin_dir "${Qt6_DIR}/../../../bin" ABSOLUTE)
-    find_program(ZKGRAM_WINDEPLOYQT windeployqt PATHS "${zkgram_qt_bin_dir}" NO_DEFAULT_PATH)
-    if(ZKGRAM_WINDEPLOYQT)
-        add_custom_command(TARGET zkgram POST_BUILD
-            COMMAND "${ZKGRAM_WINDEPLOYQT}" --release "$<TARGET_FILE:zkgram>"
-            COMMENT "Running windeployqt on zkgram.exe"
-        )
-    endif()
-    if(ZKGRAM_VENDOR_LIB_UI)
-        target_link_libraries(zkgram PRIVATE desktop-app::lib_ui)
+# Qt6::Network - zkgram::monero::MoneroWalletRpc's HTTP JSON-RPC client
+# (src/monero/monero.cpp), the only user of QNetworkAccessManager in this
+# target.
+target_link_libraries(zkgram PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::Network)
+# windeployqt copies every Qt DLL zkgram.exe actually needs (it inspects the
+# built binary itself), including Qt6Multimedia.dll's own plugins
+# (multimedia/*.dll) that a plain DLL copy would miss.
+get_filename_component(zkgram_qt_bin_dir "${Qt6_DIR}/../../../bin" ABSOLUTE)
+find_program(ZKGRAM_WINDEPLOYQT windeployqt PATHS "${zkgram_qt_bin_dir}" NO_DEFAULT_PATH)
+if(ZKGRAM_WINDEPLOYQT)
+    add_custom_command(TARGET zkgram POST_BUILD
+        COMMAND "${ZKGRAM_WINDEPLOYQT}" --release "$<TARGET_FILE:zkgram>"
+        COMMENT "Running windeployqt on zkgram.exe"
+    )
+endif()
 
-        # lib_ui's own common_options (see cmake/options_win.cmake) sets
-        # /DEPENDENTLOADFLAG:0x800, which restricts the loader to resolving
-        # dependent DLLs from System32 only. It is PRIVATE-linked into
-        # lib_ui, so it should not propagate here per ordinary CMake usage
-        # requirement rules - but it demonstrably does (confirmed via
-        # dumpbin /loadconfig on the built zkgram.exe: 0800 Dependent Load
-        # Flag was present), so zkgram.exe itself failed to launch with
-        # STATUS_DLL_NOT_FOUND for Qt6Multimedia.dll/python313.dll/etc even
-        # though they were sitting right next to it - the exact same root
-        # cause as codegen_style/codegen_emoji earlier, now hitting the
-        # shipped app itself, not just a build-time tool. Same fix: link the
-        # override after lib_ui so its 0x0 is the last (winning) occurrence.
-        target_link_libraries(zkgram PRIVATE zkgram_allow_nonsystem32_deps)
+target_link_libraries(zkgram PRIVATE desktop-app::lib_ui)
 
-        # zkgram's own .style files (Phase 3+ of the migration, see
-        # zkgram/.claude/UI.md section 13c). These reuse lib_ui's already
-        # generated palette (Ui::Palette, exposed transitively via
-        # desktop-app::lib_ui's PUBLIC include of its own gen/ directory,
-        # see third_party/desktop-app/lib_ui/cmake/generate_target.cmake) -
-        # not a second, separately generated palette.
-        get_filename_component(submodules_loc "third_party/desktop-app" REALPATH)
-        # src_loc is now the whole src/ tree (not just src/ui/qt), because
-        # ui/chat/chat.style's own "using" directives reference sibling
-        # files by src-relative path (dialogs/dialogs.style,
-        # ui/chat/chat.style) - see src/ui/chat/ for where those real
-        # tdesktop chat-design files were copied in from.
-        generate_styles(zkgram "${CMAKE_SOURCE_DIR}/src"
-            "ui/qt/zkgram_icons.style;ui/menu_icons.style;ui/chat/chat.style;ui/chat/chat_style.style;ui/chat/zkgram_chat_style_stub.style;dialogs/dialogs.style"
-            "")
+# lib_ui's own common_options (see cmake/options_win.cmake) sets
+# /DEPENDENTLOADFLAG:0x800, which restricts the loader to resolving
+# dependent DLLs from System32 only. It is PRIVATE-linked into lib_ui, so it
+# should not propagate here per ordinary CMake usage requirement rules - but
+# it demonstrably does (confirmed via dumpbin /loadconfig on the built
+# zkgram.exe: 0800 Dependent Load Flag was present), so zkgram.exe itself
+# failed to launch with STATUS_DLL_NOT_FOUND for Qt6Multimedia.dll/
+# python313.dll/etc even though they were sitting right next to it - the
+# exact same root cause as codegen_style/codegen_emoji earlier, now hitting
+# the shipped app itself, not just a build-time tool. Same fix: link the
+# override after lib_ui so its 0x0 is the last (winning) occurrence.
+target_link_libraries(zkgram PRIVATE zkgram_allow_nonsystem32_deps)
 
-        # codegen_style's own generated .cpp files (gen/styles/style_*.cpp)
-        # only #include their own header + styles/palette.h. lib_ui's own
-        # generated style files get away with this because every lib_ui.cpp
-        # (generated ones included) shares lib_ui's PCH, which brings in
-        # base/basic_types.h (float64 and friends, used by
-        # style_core_font.h/style_core_scale.h) implicitly. zkgram has no
-        # PCH of its own, so its generated style_zkgram_icons.cpp does not
-        # get that for free - force-include it for every zkgram translation
-        # unit instead of hand-patching a generated (overwritten-on-rebuild)
-        # file.
-        if(MSVC)
-            target_compile_options(zkgram PRIVATE "/FI${CMAKE_SOURCE_DIR}/third_party/desktop-app/lib_base/base/basic_types.h")
-        else()
-            target_compile_options(zkgram PRIVATE "-include${CMAKE_SOURCE_DIR}/third_party/desktop-app/lib_base/base/basic_types.h")
-        endif()
-    endif()
+# zkgram's own .style files (Phase 3+ of the migration, see
+# zkgram/.claude/UI.md section 13c). These reuse lib_ui's already generated
+# palette (Ui::Palette, exposed transitively via desktop-app::lib_ui's
+# PUBLIC include of its own gen/ directory, see
+# third_party/desktop-app/lib_ui/cmake/generate_target.cmake) - not a
+# second, separately generated palette.
+get_filename_component(submodules_loc "third_party/desktop-app" REALPATH)
+# src_loc is now the whole src/ tree (not just src/ui/qt), because
+# ui/chat/chat.style's own "using" directives reference sibling files by
+# src-relative path (dialogs/dialogs.style, ui/chat/chat.style) - see
+# src/ui/chat/ for where those real tdesktop chat-design files were copied
+# in from.
+generate_styles(zkgram "${CMAKE_SOURCE_DIR}/src"
+    "ui/qt/zkgram_icons.style;ui/menu_icons.style;ui/chat/chat.style;ui/chat/chat_style.style;ui/chat/zkgram_chat_style_stub.style;ui/chat/zkgram_chat_helpers_stub.style;dialogs/dialogs.style"
+    "")
+
+# codegen_style's own generated .cpp files (gen/styles/style_*.cpp) only
+# #include their own header + styles/palette.h. lib_ui's own generated style
+# files get away with this because every lib_ui.cpp (generated ones
+# included) shares lib_ui's PCH, which brings in base/basic_types.h (float64
+# and friends, used by style_core_font.h/style_core_scale.h) implicitly.
+# zkgram has no PCH of its own, so its generated style_zkgram_icons.cpp does
+# not get that for free - force-include it for every zkgram translation unit
+# instead of hand-patching a generated (overwritten-on-rebuild) file.
+if(MSVC)
+    target_compile_options(zkgram PRIVATE "/FI${CMAKE_SOURCE_DIR}/third_party/desktop-app/lib_base/base/basic_types.h")
+else()
+    target_compile_options(zkgram PRIVATE "-include${CMAKE_SOURCE_DIR}/third_party/desktop-app/lib_base/base/basic_types.h")
 endif()

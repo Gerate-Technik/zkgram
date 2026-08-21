@@ -77,10 +77,19 @@ QWidget#writeRestrictionBar {
     border: none;
 }
 
-QLabel#plainSendWarning {
-    color: #999999;
-    font-size: 13px;
-}
+/* companionLabel_/plainSendWarning_/recordTime_ were all tried as
+   Ui::FlatLabel (2026-08-17) and all reverted back to QLabel in the same
+   pass - one crashed (Ui::Text::BlockParser on real dynamic chat-title
+   text), one went invisible (plainSendWarning_ - the private/plain-mode
+   indicator disappearing is what the user actually noticed and reported),
+   the third (recordTime_) reverted as a precaution rather than waiting for
+   a third bug report. Root cause not found yet - see TODO.md before
+   trying any of these three again.
+   statusLabel_ is still a plain QLabel but is never actually shown (see its
+   own comment in main_window.cpp - setConnectionStatus() drives auth-screen
+   switching but the pill itself is not added to the header), so converting
+   its styling was not worth new .style declarations for something with no
+   visible effect. */
 
 QLabel#companionLabel {
     font-weight: 600;
@@ -88,22 +97,21 @@ QLabel#companionLabel {
     color: #222222;
 }
 
-QLabel#statusLabel {
-    color: #707579;
-    font-size: 12px;
+QLabel#plainSendWarning {
+    color: #999999;
+    font-size: 13px;
 }
 
-QLineEdit {
-    border: 1px solid #dfe2e5;
-    border-radius: 16px;
-    padding: 6px 12px;
-    background: #ffffff;
+QLabel#recordTime {
     color: #222222;
+    font-family: "DejaVu Sans Mono", "Consolas", monospace;
+    font-size: 14px;
 }
 
-QLineEdit:focus {
-    border: 1px solid #37a1de;
-}
+/* chatSearchInput_/searchInput_ are real Ui::InputField now (st::dialogsFilter,
+   see main_window.cpp) - paint themselves from their own .style declaration,
+   ignoring this stylesheet entirely, same reasoning as the composer field
+   comment below. No more QLineEdit anywhere in this codebase. */
 
 /* The composer bar itself (see #composeBar in main_window.cpp) -
    historyComposeAreaBg background (white, #ffffff), no rounding
@@ -122,11 +130,11 @@ QWidget#recordBar {
     border: none;
 }
 
-QLabel#recordTime {
-    color: #222222;
-    font-family: "DejaVu Sans Mono", "Consolas", monospace;
-    font-size: 14px;
-}
+/* recordTime_ is a real Ui::FlatLabel now (st::zkgramRecordTime) - paints
+   itself. Dropped the monospace font-family override in the move (real
+   .style font() declarations in this vendored subset take a size/weight,
+   not an arbitrary family list) - a cosmetic loss (digits no longer
+   perfectly aligned as they change), not a functional one. */
 
 /* ChatInput (composeField) is a real Ui::InputField now (see main_window.hpp),
    and the attach/send-or-mic buttons are real Ui::IconButton (zkgramAttachButton/
@@ -147,13 +155,12 @@ QLabel[messageKind="system"] {
 
 /* Full-window onboarding slide (AuthSlide, see main_window.cpp/.hpp) -
    local password, phone number, login code, 2FA password all reuse this
-   one styled card, centered in the window, styled after tdesktop's own
-   intro screen: plain light background, one blue accent card in the
-   middle, no chrome. */
-
-QWidget#authSlide {
-    background-color: #ffffff;
-}
+   one slide. Its background is painted directly in C++
+   (AuthSlide::paintEvent(), a flat st::windowBg fill matching real
+   Telegram's own login screen exactly, per explicit user request - the
+   rest of the app keeps zkgram's purple identity, this screen does not) -
+   no QSS rule needed here, any background-color set on #authSlide would
+   just be painted over and never seen. */
 
 /* title_/subtitle_/error_ are real Ui::FlatLabel (zkgramAuthLabel style),
    plainInput_/passwordInput_ are real Ui::MaskedInputField/Ui::PasswordInput,

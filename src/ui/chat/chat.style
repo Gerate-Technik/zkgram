@@ -9,6 +9,7 @@ using "ui/basic.style";
 using "dialogs/dialogs.style";
 using "ui/widgets/widgets.style";
 using "ui/menu_icons.style";
+using "ui/chat/zkgram_chat_helpers_stub.style"; // GroupCallUserpics only, see that file's header comment
 
 msgMaxWidth: 430px;
 msgFont: font(fsize);
@@ -95,37 +96,6 @@ msgDateDelta: point(2px, 5px);
 msgDateImgDelta: 4px;
 msgDateImgPadding: point(8px, 2px);
 
-// historyQuoteStyle/historyTextStyle: real declarations, copied verbatim
-// from chat_helpers/chat_helpers.style (that file's the only other place
-// they exist upstream) instead of pulling in the rest of that file (box/
-// premium/calls machinery unrelated to blockquote rendering) - QuoteStyle
-// itself and defaultQuoteStyle are already in ui/basic.style, already
-// vendored.
-historyQuoteStyle: QuoteStyle(defaultQuoteStyle) {
-	padding: margins(10px, 2px, 4px, 2px);
-	verticalSkip: 4px;
-	outline: 3px;
-	outlineShift: 2px;
-	radius: 5px;
-}
-historyTextStyle: TextStyle(defaultTextStyle) {
-	blockquote: QuoteStyle(historyQuoteStyle) {
-		padding: margins(10px, 2px, 20px, 2px);
-		icon: icon{{ "chat/mini_quote", windowFg }};
-		iconPosition: point(4px, 4px);
-		expand: icon{{ "intro_country_dropdown", windowFg }};
-		expandPosition: point(6px, 4px);
-		collapse: icon{{ "intro_country_dropdown-flip_vertical", windowFg }};
-		collapsePosition: point(6px, 4px);
-	}
-	pre: QuoteStyle(historyQuoteStyle) {
-		header: 20px;
-		headerPosition: point(10px, 2px);
-		scrollable: true;
-		icon: icon{{ "chat/mini_copy", windowFg }};
-		iconPosition: point(4px, 2px);
-	}
-}
 messageQuoteStyle: historyQuoteStyle;
 messageTextStyle: historyTextStyle;
 historyPagePreview: QuoteStyle(messageQuoteStyle) {
@@ -504,9 +474,12 @@ historyAdminLogSearchTop: 11px;
 historyAdminLogSearchSlideDuration: 150;
 historyAdminLogTopBarLeft: 17px;
 historyAdminLogTopBarUserpicSkip: 35px;
-// topPeersSelectorUserpicSize (chat_helpers.style, an unrelated feature)
-// inlined as its own real 31px value instead of pulling that file in.
-historyFastShareSize: 31px;
+historyAdminLogWhatIsThis: IconButton(historyAttach) {
+	icon: icon {{ "menu/faq", windowActiveTextFg }};
+	iconOver: icon {{ "menu/faq", windowActiveTextFg }};
+}
+
+historyFastShareSize: topPeersSelectorUserpicSize;
 historyFastShareLeft: 13px;
 historyFastShareBottom: 5px;
 historyFastCloseSize: 30px;
@@ -571,6 +544,13 @@ historyCommentsButtonHeight: 40px;
 historyCommentsSkipLeft: 9px;
 historyCommentsSkipText: 10px;
 historyCommentsSkipRight: 8px;
+historyCommentsUserpics: GroupCallUserpics {
+	size: 25px;
+	shift: 6px;
+	stroke: 2px;
+	align: align(left);
+}
+
 historyGroupAboutMargin: 16px;
 historyGroupAboutPadding: margins(24px, 16px, 24px, 16px);
 historyGroupAboutBulletSkip: 16px;
@@ -588,6 +568,12 @@ historyAudioRadialLine: 2px;
 historyAudioDownloadShift: 28px;
 
 
+historyGroupCallUserpics: GroupCallUserpics {
+	size: 32px;
+	shift: 12px;
+	stroke: 4px;
+	align: align(top);
+}
 historyGroupCallBlobMinRadius: 23px;
 historyGroupCallBlobMaxRadius: 25px;
 
@@ -708,6 +694,12 @@ reactionInlineTagPromoPosition: point(20px, 2px);
 reactionInlineBetween: 4px;
 reactionInlineInBubbleLeft: -3px;
 reactionInlineUserpicsPadding: margins(1px, 1px, 1px, 1px);
+reactionInlineUserpics: GroupCallUserpics {
+	size: 20px;
+	shift: 7px;
+	stroke: 1px;
+	align: align(left);
+}
 
 reactionInfoSize: 15px;
 reactionInfoSkip: 3px;
@@ -941,6 +933,10 @@ awayEmptyIcon: icon{{ "chat/large_away", msgServiceFg }};
 repliesEmptyWidth: 264px;
 repliesEmptySkip: 16px;
 repliesEmptyPadding: margins(10px, 20px, 10px, 16px);
+repliesComposeControls: ComposeControls(defaultComposeControls) {
+	tabbedHeightMin: 220px;
+}
+
 boostMessageIcon: IconEmoji {
 	icon: icon {{ "stories/boost_mini", windowFg }};
 	padding: margins(0px, 2px, 0px, 0px);
@@ -962,6 +958,56 @@ chatIntroStickerSize: 96px;
 chatGiftPreviewWidth: 224px;
 
 liveLocationRemainingSize: 28px;
+
+previewMenu: PopupMenu(defaultPopupMenu) {
+	scrollPadding: margins(0px, 0px, 0px, 0px);
+	menu: Menu(defaultMenu) {
+		widthMin: 380px;
+		widthMax: 380px;
+	}
+	maxHeight: 420px;
+	radius: boxRadius;
+}
+previewTop: PeerListItem(defaultPeerListItem) {
+	height: 52px;
+	photoPosition: point(10px, 6px);
+	namePosition: point(60px, 9px);
+	statusPosition: point(60px, 27px);
+	photoSize: 40px;
+}
+previewMarkRead: FlatButton(historyComposeButton) {
+	height: 39px;
+	textTop: 10px;
+}
+previewName: FlatLabel(defaultFlatLabel) {
+	style: semiboldTextStyle;
+	textFg: windowFg;
+	maxHeight: 30px;
+}
+previewStatus: FlatLabel(defaultFlatLabel) {
+	textFg: windowSubTextFg;
+}
+previewUserpic: UserpicButton(defaultUserpicButton) {
+	size: size(40px, 40px);
+	photoSize: 40px;
+}
+
+effectPreviewSend: FlatButton(previewMarkRead) {
+	bgColor: transparent;
+	overBgColor: transparent;
+}
+effectPreviewPromoLabel: FlatLabel(defaultFlatLabel) {
+	minWidth: 64px;
+	align: align(top);
+	textFg: windowSubTextFg;
+	style: TextStyle(defaultTextStyle) {
+		font: font(11px);
+	}
+}
+effectPreviewPromoPadding: margins(4px, 6px, 4px, 6px);
+effectPreviewLoading: InfiniteRadialAnimation(defaultInfiniteRadialAnimation) {
+	thickness: 2px;
+}
 
 factcheckFooterSkip: 16px;
 factcheckFooterStyle: TextStyle(defaultTextStyle) {
@@ -996,6 +1042,35 @@ msgSelectionCheck: RoundCheckbox(defaultPeerListCheck) {
 }
 
 sponsoredMessageBarMaxHeight: 156px;
+
+botEmojiStatusPreviewHeight: 148px;
+botEmojiStatusTitle: FlatLabel(boxTitle) {
+	style: TextStyle(defaultTextStyle) {
+		font: font(16px semibold);
+		lineHeight: 20px;
+	}
+	minWidth: 256px;
+	maxHeight: 0px;
+	align: align(top);
+}
+botEmojiStatusText: FlatLabel(defaultFlatLabel) {
+	style: boxTextStyle;
+	minWidth: 256px;
+	maxHeight: 0px;
+	align: align(top);
+}
+botEmojiStatusUserpic: UserpicButton(defaultUserpicButton) {
+	size: size(chatGiveawayPeerSize, chatGiveawayPeerSize);
+	photoSize: chatGiveawayPeerSize;
+}
+botEmojiStatusName: FlatLabel(defaultFlatLabel) {
+	minWidth: 32px;
+	maxHeight: 20px;
+}
+botEmojiStatusEmoji: FlatLabel(botEmojiStatusName) {
+	margin: margins(4px, 4px, 4px, 4px);
+	textFg: profileVerifiedCheckBg;
+}
 
 botDownloadLabel: boxLabel;
 botDownloadProgress: FlatLabel(defaultFlatLabel) {

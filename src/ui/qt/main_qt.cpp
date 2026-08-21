@@ -156,6 +156,15 @@ int main(int argc, char** argv) {
             session->start();
             QMetaObject::invokeMethod(&window, "setConnectionStatus", Qt::QueuedConnection,
                                        Q_ARG(QString, QString("Connected")), Q_ARG(QString, QString("#31a24c")));
+            // One-shot, for the hamburger menu's profile section (see
+            // MainWindow::updateMyProfile()) - runs on this same worker
+            // thread's callback, same marshalling as setConnectionStatus
+            // above.
+            session->fetchMyProfile([&window](const std::string& name, const std::string& username) {
+                QMetaObject::invokeMethod(&window, "updateMyProfile", Qt::QueuedConnection,
+                                           Q_ARG(QString, QString::fromStdString(name)),
+                                           Q_ARG(QString, QString::fromStdString(username)));
+            });
         } catch (const std::exception& e) {
             QMetaObject::invokeMethod(&window, "setConnectionStatus", Qt::QueuedConnection,
                                        Q_ARG(QString, QString("Connection failed")), Q_ARG(QString, QString("#e41e3f")));

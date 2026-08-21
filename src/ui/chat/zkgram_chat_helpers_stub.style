@@ -1,0 +1,135 @@
+// Not part of real Telegram Desktop - a stand-in for chat_helpers/
+// chat_helpers.style, which ui/chat/chat.style includes for a handful of
+// declarations (GroupCallUserpics struct, historyQuoteStyle/historyTextStyle
+// instances - messageQuoteStyle/messageTextStyle alias these directly).
+// zkgram has no group calls or premium/boxes UI, and the real
+// chat_helpers.style pulls in boxes.style (-> intro.style, layers.style,
+// premium.style, ...), none of which anything else here needs - so only
+// what chat.style actually references is kept, copied verbatim from
+// telegram_fork/tdesktop/Telegram/SourceFiles/chat_helpers/chat_helpers.style.
+
+using "ui/basic.style";
+using "ui/widgets/widgets.style";
+
+GroupCallUserpics {
+	size: pixels;
+	shift: pixels;
+	stroke: pixels;
+	align: align;
+}
+
+historyQuoteStyle: QuoteStyle(defaultQuoteStyle) {
+	padding: margins(10px, 2px, 4px, 2px);
+	verticalSkip: 4px;
+	outline: 3px;
+	outlineShift: 2px;
+	radius: 5px;
+}
+historyTextStyle: TextStyle(defaultTextStyle) {
+	blockquote: QuoteStyle(historyQuoteStyle) {
+		padding: margins(10px, 2px, 20px, 2px);
+		icon: icon{{ "chat/mini_quote", windowFg }};
+		iconPosition: point(4px, 4px);
+		expand: icon{{ "intro_country_dropdown", windowFg }};
+		expandPosition: point(6px, 4px);
+		collapse: icon{{ "intro_country_dropdown-flip_vertical", windowFg }};
+		collapsePosition: point(6px, 4px);
+	}
+	pre: QuoteStyle(historyQuoteStyle) {
+		header: 20px;
+		headerPosition: point(10px, 2px);
+		scrollable: true;
+		icon: icon{{ "chat/mini_copy", windowFg }};
+		iconPosition: point(4px, 2px);
+	}
+}
+
+historyAttach: IconButton(defaultIconButton) {
+	width: 44px;
+	height: 46px;
+
+	icon: icon {{ "chat/input_attach", historyComposeIconFg }};
+	iconOver: icon {{ "chat/input_attach", historyComposeIconFgOver }};
+
+	rippleAreaPosition: point(2px, 3px);
+	rippleAreaSize: 40px;
+	ripple: defaultRippleAnimationBgOver;
+}
+
+topPeersSelectorUserpicSize: 31px;
+
+// ComposeControls (chat_helpers.style:236) is a large struct (InputField/
+// SendButton/EmojiButton/EmojiPan/RecordBar/ComposeFiles/PremiumLimits/
+// ChooseSendAs, ...) for the real emoji-panel/record-bar/send-as compose
+// bar - none of which zkgram has or builds (see history_view_compose_
+// controls.cpp etc. under src/history, src/media - not in ZKGRAM_SOURCES,
+// not compiled). chat.style's only touch is repliesComposeControls, which
+// overrides just tabbedHeightMin and is itself never referenced by any
+// compiled zkgram code (grepped: only chat.style declares it). So this is
+// a type-only stand-in, same as the Markdown family in
+// zkgram_chat_style_stub.style - trimmed to the one field chat.style
+// actually sets, not the real struct's full field list.
+ComposeControls {
+	tabbedHeightMin: pixels;
+}
+defaultComposeControls: ComposeControls {
+	tabbedHeightMin: 0px;
+}
+
+historyComposeButton: FlatButton {
+	color: windowActiveTextFg;
+	overColor: windowActiveTextFg;
+
+	bgColor: historyComposeButtonBg;
+	overBgColor: historyComposeButtonBgOver;
+
+	width: -32px;
+	height: 46px;
+
+	textTop: 14px;
+
+	font: semiboldFont;
+	overFont: semiboldFont;
+
+	ripple: RippleAnimation(defaultRippleAnimation) {
+		color: historyComposeButtonBgRipple;
+	}
+}
+
+// UserpicButton is really from ui/controls/userpic_button.style (not
+// chat_helpers.style), but chat.style needs it the same way and that file
+// is not vendored either - self-contained (only ui/widgets/widgets.style,
+// already in scope), copied verbatim here rather than adding a second
+// stub file for one struct + one instance.
+UserpicButton {
+	size: size;
+	photoSize: pixels;
+	photoPosition: point;
+	changeButton: RoundButton;
+	changeIcon: icon;
+	changeIconPosition: point;
+	duration: int;
+	uploadHeight: pixels;
+	uploadBg: color;
+	uploadIcon: icon;
+	uploadIconPosition: point;
+	uploadProgressLine: pixels;
+	uploadProgressMargin: pixels;
+}
+defaultChangeUserpicIcon: icon {{ "new_chat_photo", activeButtonFg }};
+defaultUploadUserpicIcon: icon {{ "upload_chat_photo", msgDateImgFg }};
+defaultUserpicButton: UserpicButton {
+	size: size(72px, 72px);
+	photoSize: 72px;
+	photoPosition: point(-1px, -1px);
+	changeButton: defaultActiveButton;
+	changeIcon: defaultChangeUserpicIcon;
+	changeIconPosition: point(21px, 23px);
+	duration: 500;
+	uploadHeight: 24px;
+	uploadBg: msgDateImgBgOver;
+	uploadIcon: defaultUploadUserpicIcon;
+	uploadIconPosition: point(-1px, 1px);
+	uploadProgressLine: 3px;
+	uploadProgressMargin: 8px;
+}
