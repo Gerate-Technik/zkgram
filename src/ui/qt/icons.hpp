@@ -30,6 +30,8 @@ enum class Glyph {
     Play,
     Search,
     Check,
+    // Read by the recipient, as opposed to merely sent - see Check above.
+    CheckDouble,
     Lock,
     // White variant of Lock for a selected sidebar row or the secret-mode
     // toggle button - see zkgram_icons.style's zkgramIconLockOnActive
