@@ -408,7 +408,7 @@ void Session::wireAndStartConversation(ConversationId chatId) {
     };
 
     auto cryptoLayer =
-        std::make_unique<crypto::CryptoLayer>(dataDir_, password_, std::to_string(chatId), std::move(callbacks));
+        std::make_shared<crypto::CryptoLayer>(dataDir_, password_, std::to_string(chatId), std::move(callbacks));
     crypto::CryptoLayer* cryptoLayerPtr = cryptoLayer.get();
     {
         std::lock_guard<std::mutex> lock(conversationsMutex_);
@@ -564,31 +564,57 @@ void Session::armHandshakeWatchdog(ConversationId chatId) {
 }
 
 void Session::sendText(ConversationId chatId, const std::string& text) {
-    std::lock_guard<std::mutex> lock(conversationsMutex_);
-    if (readyConversations_.count(chatId) == 0) {
-        // Handshake not finished yet (or never started) - CryptoLayer's AES
-        // key is still None at this point, so calling send() would not
-        // fail cleanly. The UI already hides the input row until
-        // onReady/setConversationReady fires, this is the backend-side
-        // half of that same guard.
-        uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
-        return;
+    // conversationsMutex_ used to be held across the CryptoLayer::sendText()
+    // call below (which can block for real seconds deep inside the Python
+    // transport pipeline, waiting on a chunk ACK - see levels/transport.py's
+    // send_with_pending_acknowledgment). Called from the GUI thread, that
+    // deadlocked the whole app: the only thing that could ever deliver the
+    // ACK and unblock it is the TDLib receive thread, which needs this same
+    // mutex to store incoming bytes (see the onBytesReceived handler above).
+    // Fixed by copying the shared_ptr out and releasing the mutex first -
+    // conversations_ had to become shared_ptr (was unique_ptr) so this copy
+    // is possible; the CryptoLayer object stays alive via this local copy
+    // even if conversations_ itself is ever modified concurrently.
+    std::shared_ptr<crypto::CryptoLayer> layer;
+    {
+        std::lock_guard<std::mutex> lock(conversationsMutex_);
+        if (readyConversations_.count(chatId) == 0) {
+            // Handshake not finished yet (or never started) - CryptoLayer's
+            // AES key is still None at this point, so calling send() would
+            // not fail cleanly. The UI already hides the input row until
+            // onReady/setConversationReady fires, this is the backend-side
+            // half of that same guard.
+            uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
+            return;
+        }
+        auto it = conversations_.find(chatId);
+        if (it != conversations_.end()) {
+            layer = it->second;  // just a refcount bump, cheap
+        }
     }
-    auto it = conversations_.find(chatId);
-    if (it != conversations_.end()) {
-        it->second->sendText(text);
+    if (layer) {
+        layer->sendText(text);
     }
 }
 
 void Session::sendFile(ConversationId chatId, const std::string& filePath) {
-    std::lock_guard<std::mutex> lock(conversationsMutex_);
-    if (readyConversations_.count(chatId) == 0) {
-        uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
-        return;
+    // Same fix as sendText() above: copy the shared_ptr out and release
+    // conversationsMutex_ before calling into it - see that function's own
+    // comment for why holding the mutex across this call deadlocked the app.
+    std::shared_ptr<crypto::CryptoLayer> layer;
+    {
+        std::lock_guard<std::mutex> lock(conversationsMutex_);
+        if (readyConversations_.count(chatId) == 0) {
+            uiProvider_->onStatus(chatId, "Session", "Not ready yet, please wait for the encrypted session to finish starting");
+            return;
+        }
+        auto it = conversations_.find(chatId);
+        if (it != conversations_.end()) {
+            layer = it->second;
+        }
     }
-    auto it = conversations_.find(chatId);
-    if (it != conversations_.end()) {
-        it->second->sendFile(filePath);
+    if (layer) {
+        layer->sendFile(filePath);
     }
 }
 

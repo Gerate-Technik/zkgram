@@ -151,7 +151,16 @@ private:
     telegram::TelegramClient telegramClient_;
 
     std::mutex conversationsMutex_;
-    std::map<ConversationId, std::unique_ptr<crypto::CryptoLayer>> conversations_;
+    // shared_ptr, not unique_ptr: sendText()/sendFile() copy a reference out
+    // while holding conversationsMutex_, then release the mutex BEFORE
+    // calling into the copy (CryptoLayer::sendText can block for seconds
+    // deep inside the Python transport pipeline waiting on a chunk ACK -
+    // see their own comments). Holding conversationsMutex_ across that call
+    // deadlocked the whole app: the GUI thread would block inside it while
+    // still holding the mutex, and the only thing that could ever unblock
+    // it - the ACK arriving via the TDLib receive thread - needs that same
+    // mutex to deliver.
+    std::map<ConversationId, std::shared_ptr<crypto::CryptoLayer>> conversations_;
     // Populated only once a conversation's onReady callback actually fires
     // (handshake finished). sendText/sendFile check this before touching
     // Python: CryptoLayer's AES key is still None mid handshake, so calling
