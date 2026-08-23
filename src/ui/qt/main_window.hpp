@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QByteArray>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QMainWindow>
 #include <QMap>
 #include <QPoint>
@@ -14,16 +16,19 @@
 #include <functional>
 
 QT_BEGIN_NAMESPACE
-class QLineEdit;
 class QLabel;
 class QPushButton;
 class QStackedWidget;
 class QAudioInput;
+class QAudioOutput;
 class QMediaCaptureSession;
 class QMediaRecorder;
+class QMediaPlayer;
 class QKeyEvent;
 class QTimer;
 class QMenu;
+class QPropertyAnimation;
+class QCheckBox;
 // Здесь, на глобальной области видимости, вместе с остальными Qt-классами,
 // а не через "class QEventLoop* loop_" прямо в объявлении поля ниже: там
 // это elaborated-type-specifier внутри namespace zkgram::ui::qt, то есть
@@ -37,14 +42,20 @@ namespace zkgram::core {
 class Session;
 }
 
+namespace zkgram::monero {
+class MoneroWalletRpc;
+}
+
 namespace Ui {
 class IconButton;
 class RoundButton;
 class InputField;
 class MaskedInputField;
 class PasswordInput;
+class SentCodeField;
 class FlatLabel;
 class MessageBar;
+class VerticalLayout;
 }
 
 namespace zkgram::ui::qt {
@@ -101,8 +112,12 @@ public:
     // повторный запрос того же шага (неверный код, неверный 2FA-пароль -
     // см. TelegramClient::sendAuthRequestWithRetry) объясняет пользователю,
     // почему его спрашивают снова, а не выглядит как зависший экран.
+    // isCode selects codeInput_ (Ui::SentCodeField - digit-only, real
+    // tdesktop's own widget for this, see ui/widgets/sent_code_field.h)
+    // instead of plainInput_ for this slide - the login-code step only,
+    // distinct from masked (which selects passwordInput_ for 2FA).
     QString runSlide(const QString& title, const QString& subtitle, const QString& placeholder, bool masked,
-                      Validator validator = {}, const QString& initialError = {});
+                      Validator validator = {}, const QString& initialError = {}, bool isCode = false);
 
     // Non-blocking: shows a title/subtitle with no input field or Next
     // button, for phases with nothing to ask the user but that are not
@@ -115,6 +130,12 @@ public:
     // window is closed while a slide is waiting on input.
     void cancelPending();
 
+protected:
+    // Flat white (st::windowBg), matching real Telegram's own login screen
+    // exactly - see AuthSlide::paintEvent in main_window.cpp.
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+
 private Q_SLOTS:
     void onNextClicked();
 
@@ -123,11 +144,32 @@ private:
     // - see runSlide()'s masked param.
     QWidget* activeInput() const;
 
-    QLabel* logo_;  // just a static pixmap, no text styling to port
+    // Centers logo_+card_ as one group - called from resizeEvent() and from
+    // a card_->heightValue() subscription (wired in the constructor) so a
+    // text change that re-wraps a label (runSlide() setting a new title/
+    // subtitle) recenters too, not only an actual window resize.
+    void recenterCard();
+
+    // Real composition primitive (Ui::VerticalLayout), not a QVBoxLayout -
+    // see UI.md §4/§7. Positioned (centered) manually in resizeEvent, same
+    // "no Qt layout manager, resizeGetHeight + moveToLeft instead" contract
+    // every real tdesktop widget follows.
+    Ui::VerticalLayout* card_;
+    QLabel* logo_;  // just a static pixmap, no text styling to port - kept
+                     // as a plain sibling of card_, not inside it: QLabel is
+                     // not an Ui::RpWidget, so it cannot live in a
+                     // VerticalLayout the way every other field here does.
     Ui::FlatLabel* title_;
     Ui::FlatLabel* subtitle_;
+    // Three real field types share card_'s one field slot, toggled via
+    // setVisible() in runSlide() - see the constructor's own comment for
+    // why each is not wrapped in a collapsing Ui::SlideWrap (that would be
+    // the more correct real-Telegram pattern, but does not compile against
+    // this project's vendored lib_ui).
     Ui::MaskedInputField* plainInput_;
     Ui::PasswordInput* passwordInput_;
+    // Login-code step only - see runSlide()'s own comment.
+    Ui::SentCodeField* codeInput_;
     Ui::FlatLabel* error_;
     Ui::RoundButton* next_;
     QString result_;
@@ -201,6 +243,12 @@ public:
     // why QVariantList/QVariantMap instead of a custom struct type.
     Q_INVOKABLE void updateChatList(QVariantList chats);
 
+    // fetchMyProfile()'s callback runs on TDLib's own receive-loop thread,
+    // same marshalling need as every other core::Session callback reaching
+    // this class - see updateChatList's own comment for the pattern.
+    // username is empty if the account has none set.
+    Q_INVOKABLE void updateMyProfile(const QString& name, const QString& username);
+
     // A history photo that was still downloading when its message list was
     // first shown (see maybeLoadPlainHistory()) just finished - finds the
     // matching StoredMessage by messageId and re-renders the conversation
@@ -224,10 +272,16 @@ public:
     // previously this was always drawn as incoming, since the caller never
     // received is_outgoing_ at all (onNewMessage() dropped every outgoing
     // message before it could reach here).
+    // isVoiceNote/voiceDuration/voicePath: see telegram::PlainMessage's own
+    // comments - a companion's voice message, carrying its audio's local
+    // path (empty until TelegramClient::onHistoryVoiceReady() delivers it,
+    // same split as filePath/updateHistoryPhoto() for a photo) and its
+    // duration in seconds (known synchronously, unlike the path).
     Q_INVOKABLE void appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
                                                  const QString& senderName, const QString& filePath,
                                                  bool isOutgoing, qlonglong date, qlonglong mediaAlbumId,
-                                                 qlonglong replyToMessageId);
+                                                 qlonglong replyToMessageId, bool isVoiceNote, int voiceDuration,
+                                                 const QString& voicePath, const QByteArray& voiceWaveform);
     Q_INVOKABLE void setConversationReady(qlonglong chatId);
 
     // Called by QtUiProvider via BlockingQueuedConnection: show a modal
@@ -249,6 +303,15 @@ private Q_SLOTS:
     void onSendFileClicked();
     void onMicClicked();
     void onRecorderStateChanged();
+    // HistoryCanvas::onVoicePlayToggled callback target - toggles play/
+    // pause on voicePlayer_ for the tapped voice note (see .cpp for the
+    // exact play/pause/switch state machine).
+    void onVoicePlayToggleRequested(qlonglong messageId, const QString& path);
+    // Wired to voicePlayer_'s positionChanged/playbackStateChanged/
+    // durationChanged signals - pushes the current position/duration back
+    // into HistoryCanvas so the playing bubble's progress track/icon stay
+    // in sync while playback runs.
+    void onVoicePlaybackStateChanged();
     // Кнопки панели записи (см. recordBar_): отмена выбрасывает запись, не
     // отправляя её, пауза/продолжение переключают QMediaRecorder, отправка
     // останавливает запись и уходит обычным путём sendFilePath().
@@ -294,6 +357,17 @@ private Q_SLOTS:
     // itself, so a keyPressEvent override there would never see the key).
     void editLastOutgoingMessage();
 
+    // Hamburger button (leftmost in headerRow_) - see mainMenuPanel_'s own
+    // comment for the slide-out panel this opens/closes.
+    void toggleMainMenu();
+    void closeMainMenu();
+    // "Wallet" row in mainMenuPanel_ - lazily fetches the wallet's address/
+    // balance from monero-wallet-rpc the first time it is opened (not
+    // eagerly at startup: the daemon may not even be running, and nothing
+    // else in the app needs this data).
+    void openWalletSection();
+    void refreshWalletInfo();
+
 protected:
     void closeEvent(class QCloseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -334,6 +408,19 @@ private:
         // TDLib's media_album_id - see telegram::PlainMessage::mediaAlbumId's
         // own comment. 0 for a standalone (non-grouped) message.
         qint64 mediaAlbumId = 0;
+        // See telegram::PlainMessage::isVoiceNote/voiceNoteDuration's own
+        // comments - filePath above doubles as the voice note's local audio
+        // path when this is set (same "one path field, meaning depends on
+        // kind" pattern filePath already has for a photo vs. a plain
+        // received document).
+        bool isVoiceNote = false;
+        int voiceDuration = 0;
+        // Decoded peak samples for the real waveform bar UI - see
+        // telegram::PlainMessage::voiceWaveform's own comment. Empty for
+        // everything else, or for a voice note whose waveform failed to
+        // decode (paintVoiceContent() falls back to a flat bar row then,
+        // same as real Telegram does for a note with no waveform data).
+        QByteArray voiceWaveform;
     };
 
     // Appends to conversationMessages_[chatId] always; only actually drawn
@@ -353,7 +440,9 @@ private:
     // separate bubbles until the chat is reopened.
     void appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
                         const QString& filePath = QString(), qlonglong messageId = 0,
-                        const QString& senderName = QString(), qint64 date = 0, qint64 mediaAlbumId = 0);
+                        const QString& senderName = QString(), qint64 date = 0, qint64 mediaAlbumId = 0,
+                        bool isVoiceNote = false, int voiceDuration = 0,
+                        const QByteArray& voiceWaveform = QByteArray());
     // Rebuilds messages_ (a HistoryCanvas, see main_window.cpp) from
     // conversationMessages_[currentChatId_] - "attached"/"showTail" per
     // message (whether it joins the previous bubble/gets the pointed
@@ -474,7 +563,7 @@ private:
     // core::Session::searchChats) - replaces the old separate "username or
     // +phone" input plus a "New chat" button: typing here is enough, no
     // extra click needed, matching tdesktop's own dialogs search box.
-    QLineEdit* chatSearchInput_;
+    Ui::InputField* chatSearchInput_;
     QTimer* searchDebounceTimer_;
     // Throttles renderSidebarRows() during a burst of chat-list pushes
     // (initial login, hundreds of chats streaming in page by page via
@@ -520,6 +609,8 @@ private:
     // unencrypted, this is the one and only place that is made obvious,
     // since silently sending unencrypted from an app whose whole point is
     // encryption would be a real trust problem, not just a missing label.
+    // NOT migrated to Ui::FlatLabel - see the revert comment at its own
+    // construction site in main_window.cpp.
     QLabel* plainSendWarning_;
     // Reply-to-message preview (Ui::MessageBar, real widget - see
     // zkgram_chat_style_stub.style's defaultMessageBar comment).
@@ -542,9 +633,12 @@ private:
     // button.
     Ui::IconButton* sendButton_;
     Ui::IconButton* sendFileButton_;
-    QLineEdit* searchInput_;
+    Ui::InputField* searchInput_;
     QWidget* headerRow_;
     QLabel* companionAvatar_;
+    // NOT migrated to Ui::FlatLabel - see the crash comment at its own
+    // construction site in main_window.cpp (real dynamic chat-title text
+    // crashed Ui::Text::BlockParser, root cause not found yet).
     QLabel* companionLabel_;
     // Shown instead of headerRow_ while HistoryCanvas is in multi-message
     // selection mode (see HistoryCanvas::onSelectionModeChanged) - "N
@@ -557,6 +651,33 @@ private:
     // same reason messages_ is (MediaViewer is defined in main_window.cpp,
     // not this header) - cast back via asMediaViewer() at each use site.
     QWidget* mediaViewer_;
+
+    // Hamburger slide-out menu (real Telegram Desktop's own Window::MainMenu
+    // - not vendored here, see src/monero/monero.h's own comment on scope,
+    // this is a from-scratch equivalent): a fixed-width panel that slides
+    // in from the left over a dimmed backdrop, showing this account's own
+    // profile (name/username, fetched once via core::Session::fetchMyProfile)
+    // and a Monero wallet section (address/balance, via
+    // zkgram::monero::MoneroWalletRpc talking to an already-running
+    // monero-wallet-rpc daemon). The remaining rows (New Group, New
+    // Channel, Contacts, Calls, Saved Messages, Settings) are drawn for
+    // visual parity with real Telegram's own menu but are not wired to
+    // anything yet - clicking them just closes the menu.
+    QWidget* mainMenuDimmer_;
+    QWidget* mainMenuPanel_;
+    QPropertyAnimation* mainMenuAnimation_;
+    bool mainMenuOpen_ = false;
+    QLabel* mainMenuAvatar_;
+    QLabel* mainMenuNameLabel_;
+    QLabel* mainMenuUsernameLabel_;
+    QWidget* walletRow_;
+    QLabel* walletBalanceLabel_;
+    QWidget* walletDetail_;
+    QLabel* walletAddressLabel_;
+    QLabel* walletStatusLabel_;
+    bool walletInfoLoaded_ = false;
+    zkgram::monero::MoneroWalletRpc* moneroClient_;
+
     // Per-chat secret-mode toggle/indicator, next to companionLabel_ in
     // the conversation header - see updateSecretModeIndicator() and
     // secretModeOn_'s own comment for what this actually controls.
@@ -647,10 +768,22 @@ private:
     QMediaRecorder* recorder_;
     QString voiceFilePath_;
 
+    // Playback of an incoming voice note (see HistoryCanvas::onVoicePlayToggled
+    // below) - one shared player, same as real Telegram: starting a second
+    // voice note stops whatever was playing, never two at once.
+    QMediaPlayer* voicePlayer_;
+    QAudioOutput* voiceAudioOutput_;
+    // 0 when nothing is loaded into voicePlayer_ - matches a StoredMessage::
+    // messageId, never a CryptoLayer message (those have no real TDLib id
+    // and are not currently playable).
+    qlonglong playingVoiceMessageId_ = 0;
+
     // VOICE
     QWidget* composeRow_;
     QWidget* recordBar_;
     QLabel* recordDot_;
+    // NOT migrated to Ui::FlatLabel - see the revert comment at its own
+    // construction site in main_window.cpp.
     QLabel* recordTime_;
     Ui::IconButton* cancelRecordButton_;
     Ui::IconButton* pauseRecordButton_;

@@ -33,6 +33,8 @@ struct ChatListEntry {
     // Local filesystem path to the chat's profile photo, empty until
     // downloaded (see telegram::ChatSummary::photoPath).
     std::string photoPath;
+    // See telegram::ChatSummary::lastMessageDate's own comment.
+    std::int64_t lastMessageDate = 0;
 };
 
 // One historical (already-sent) message from a chat with no
@@ -58,6 +60,12 @@ struct PlainMessage {
     std::int64_t mediaAlbumId = 0;
     // See telegram::PlainMessage::replyToMessageId's own comment.
     std::int64_t replyToMessageId = 0;
+    // See telegram::PlainMessage::isVoiceNote/voiceNoteDuration/
+    // voiceNotePath's own comments.
+    bool isVoiceNote = false;
+    std::int32_t voiceNoteDuration = 0;
+    std::string voiceNotePath;
+    std::vector<std::uint8_t> voiceWaveform;
 };
 
 class UiProvider {
@@ -94,6 +102,14 @@ public:
         (void)conversation;
         (void)messageId;
         (void)name;
+    }
+
+    // A voice note's audio finished downloading after the fact - see
+    // PlainMessage::voiceNotePath. Same not-pure-virtual reasoning.
+    virtual void onHistoryVoiceReady(ConversationId conversation, std::int64_t messageId, const std::string& path) {
+        (void)conversation;
+        (void)messageId;
+        (void)path;
     }
 
     // Every one of these is scoped to a single conversation (one companion

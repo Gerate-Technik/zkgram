@@ -15,9 +15,29 @@ windowSubTextFg: #999999; // gray: fallback for additional text
 windowSubTextFgOver: #919191; // darker gray: fallback for additional text with mouse over
 windowBoldFg: #222222; // dark gray: fallback for bold text
 windowBoldFgOver: #222222; // dark gray: fallback for bold text with mouse over
-windowBgActive: #40a7e3; // bright blue: fallback for blue filled active areas
+// zkgram: shifted from real Telegram Desktop's default bright-blue accent
+// (#40a7e3/#168acd) to purple, the same way Telegram's own built-in accent
+// color picker lets a user choose a violet/purple theme instead of the
+// default blue - most accent-driven roles below (unread badges, links,
+// send icon, verified checks, player progress, ...) already alias
+// windowBgActive/windowActiveTextFg directly (see the grep-confirmed list
+// this comment replaces), so these two root values cascade the change
+// through the whole app instead of needing dozens of individual edits.
+windowBgActive: #8B6FC4; // purple: fallback for blue filled active areas
 windowFgActive: #ffffff; // white: fallback for text on active areas
-windowActiveTextFg: #168acd; // online blue: fallback for active text like online status
+windowActiveTextFg: #7B5EA7; // purple: fallback for active text like online status
+// zkgram: the login/auth screen (AuthSlide) keeps real Telegram's own blue
+// instead of the app-wide purple accent above, on explicit user request -
+// these four are the exact values windowBgActive/activeButtonBgOver/
+// activeButtonBgRipple/windowActiveTextFg had before the purple shift
+// (see the comment above), used only by zkgramAuthNextButton/AuthSlide's
+// own background fill (zkgram_icons.style, main_window.cpp), not aliased
+// into any of the app-wide roles.
+zkgramAuthAccentBg: #40a7e3; // real Telegram bright blue
+zkgramAuthAccentBgOver: #39a5db; // real Telegram default active button background with mouse over
+zkgramAuthAccentRipple: #2095d0; // real Telegram default active button ripple effect
+zkgramAuthAccentTextFg: #168acd; // real Telegram online blue
+zkgramAuthAccentLineFg: #37a1de; // real Telegram default active line (input field focus underline)
 windowShadowFg: #000000; // black: fallback for shadow
 windowShadowFgFallback: #f1f1f1; // gray: fallback for shadow without opacity
 
@@ -30,18 +50,18 @@ imageBgTransparent: #ffffff; // image background when displaying an image with o
 
 // widgets
 activeButtonBg: windowBgActive; // default active button background
-activeButtonBgOver: #39a5db; // default active button background with mouse over
-activeButtonBgRipple: #2095d0; // default active button ripple effect
+activeButtonBgOver: #7D5FBE; // default active button background with mouse over
+activeButtonBgRipple: #6B4FA8; // default active button ripple effect
 activeButtonFg: windowFgActive; // default active button text
 activeButtonFgOver: activeButtonFg; // default active button text with mouse over
-activeButtonSecondaryFg: #cceeff; // default active button additional text (selected messages counter in forward / delete buttons)
+activeButtonSecondaryFg: #e5d9f7; // default active button additional text (selected messages counter in forward / delete buttons)
 activeButtonSecondaryFgOver: activeButtonSecondaryFg; // default active button additional text with mouse over
-activeLineFg: #37a1de; // default active line (like code input field bottom border when you log in and field is focused)
+activeLineFg: #8B6FC4; // default active line (like code input field bottom border when you log in and field is focused)
 activeLineFgError: #e48383; // default active line for error state (like code input field bottom border when you log in and you've entered incorrect code)
 
 lightButtonBg: windowBg; // default light button background (like buttons in boxes)
-lightButtonBgOver: #e3f1fa; // default light button background with mouse over
-lightButtonBgRipple: #c9e4f6; // default light button ripple effect
+lightButtonBgOver: #ede3fa; // default light button background with mouse over
+lightButtonBgRipple: #d8c5f0; // default light button ripple effect
 lightButtonFg: windowActiveTextFg; // default light button text
 lightButtonFgOver: lightButtonFg; // default light button text with mouse over
 
@@ -215,7 +235,11 @@ dialogsUnreadFgOver: dialogsUnreadFg; // chat list unread badge text with mouse 
 dialogsArchiveFgOver: #525252 | dialogsNameFgOver; // chat list archive name text with mouse over
 dialogsScamFgOver: dialogsDraftFgOver; // chat list scam label with mouse over
 
-dialogsBgActive: #419fd9; // chat list background for current (active) chat
+dialogsBgActive: windowBgActive; // chat list background for current (active) chat - was left at real Telegram's
+                                  // original blue (#419fd9) when the rest of this file's accent-driven surfaces
+                                  // (dialogsUnreadBg, activeButtonBg, msgOut*, etc.) were already re-themed to
+                                  // windowBgActive's purple; the selected sidebar row read as a mismatched leftover
+                                  // blue against everything else. Aliased like the others now.
 dialogsNameFgActive: windowFgActive; // chat list name text for current (active) chat
 dialogsChatIconFgActive: dialogsNameFgActive; // chat list group or channel icon for current (active) chat
 dialogsDateFgActive: windowFgActive; // chat list date text for current (active) chat
@@ -348,22 +372,26 @@ historyScrollBgOver: #517c416b; // scroll bar background with mouse over the scr
 
 msgInBg: windowBg; // inbox message background
 msgInBgSelected: #c2dcf2; // inbox selected message background (and background of selected text in those messages)
-msgOutBg: #effdde; // outbox message background
-msgOutBgSelected: #b7dbdb; // outbox selected message background (and background of selected text in those messages)
+// zkgram: shifted from Telegram's classic green outgoing bubble to a
+// purple tint matching the accent shift above and the purple mesh-
+// gradient wallpaper (see main_window.cpp's kWallpaperColors) - the
+// green/purple clash was reported directly against a screenshot earlier.
+msgOutBg: #f2ebfb; // outbox message background
+msgOutBgSelected: #c9b8e8; // outbox selected message background (and background of selected text in those messages)
 msgSelectOverlay: #358cd44c; // overlay which is filling the media parts of selected messages (like in selected photo message)
 msgStickerOverlay: #358cd47f; // overlay which is filling the selected sticker message
 msgInServiceFg: windowActiveTextFg; // inbox message information text (like information about a forwarded message original sender)
 msgInServiceFgSelected: windowActiveTextFg; // inbox selected message information text (like information about a forwarded message original sender)
-msgOutServiceFg: #45a32d; // outbox message information text (like information about a forwarded message original sender)
-msgOutServiceFgSelected: #469992; // outbox message information text (like information about a forwarded message original sender)
+msgOutServiceFg: #8564bd; // outbox message information text (like information about a forwarded message original sender)
+msgOutServiceFgSelected: #6f4fa3; // outbox message information text (like information about a forwarded message original sender)
 msgInShadow: #748ea229; // inbox message shadow (below the bubble)
 msgInShadowSelected: #548dbb29; // inbox selected message shadow (below the bubble)
-msgOutShadow: #3ac3461d; // outbox message shadow (below the bubble)
-msgOutShadowSelected: #37a78d22; // outbox selected message shadow (below the bubble)
+msgOutShadow: #8b6fc41d; // outbox message shadow (below the bubble)
+msgOutShadowSelected: #6f4fa322; // outbox selected message shadow (below the bubble)
 msgInDateFg: #a0acb6; // inbox message time text
 msgInDateFgSelected: #6a9cc5; // inbox selected message time text
-msgOutDateFg: #6db566; // outbox message time text
-msgOutDateFgSelected: #56b2a6; // outbox selected message time text
+msgOutDateFg: #9678c9; // outbox message time text
+msgOutDateFgSelected: #7d5cae; // outbox selected message time text
 msgServiceFg: windowFgActive; // service message text (like date dividers or service message about the group title being changed)
 msgServiceBg: #517c417f; // service message background (like in a service message about group title being changed) (adjusted)
 msgServiceBgSelected: #96b38ba2; // service message selected text background (like in a service message about group title being changed) (adjusted)

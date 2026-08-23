@@ -216,14 +216,14 @@ void QtUiProvider::onStatus(zkgram::core::ConversationId conversation, const std
 
 Для `confirmSignatures`/`requestCredential`, которым нужно значение обратно, используется `Qt::BlockingQueuedConnection` (или прямой вызов, если вызов пришёл из самого GUI потока, чтобы не поймать самоблокировку), смотрите `qt_ui_provider.cpp`.
 
-Сборка Qt плагина:
+Сборка (единственная, консольного UI и переключателя `ZKGRAM_UI` больше нет - см. §4):
 
 ```bash
-cmake -S . -B build-qt -DPYBIND11_FINDPYTHON=ON -DZKGRAM_UI=qt -DCMAKE_PREFIX_PATH=<путь_до_Qt6>
-cmake --build build-qt --config Release
+cmake -S . -B build -DPYBIND11_FINDPYTHON=ON -DCMAKE_PREFIX_PATH=<путь_до_Qt6>
+cmake --build build --config Release
 ```
 
-или одной командой (см. §4): `.\build-cmake.ps1 -Ui qt -QtPrefix <путь_до_Qt6>`.
+или одной командой: `.\build.ps1`.
 
 ### `lib_ui`/`RpWidget` (UI библиотека Telegram Desktop): статус переноса
 
@@ -245,10 +245,11 @@ cmake --build build-qt --config Release
 
 ### Как добавить свой UI плагин
 
+Раньше здесь был выбор `ZKGRAM_UI=console|qt` в `CMakeLists.txt` - консольный вариант убран по решению пользователя (см. `CMakeLists.txt`'s own comment), Qt UI собирается всегда, без флагов. Новый `UiProvider` по-прежнему возможен архитектурно (интерфейс не завязан на Qt), но добавлять его в сборку теперь означает редактировать `CMakeLists.txt` напрямую (единого списка исходников, без ветвления по `ZKGRAM_UI`), а не заводить новое значение переключателя.
+
 1. Создайте класс, наследующий `zkgram::core::UiProvider`, реализуйте все методы из §"Что такое UiProvider".
-2. Заведите новое значение `ZKGRAM_UI` (например `tui`) и соответствующую ветку в `CMakeLists.txt` со своими исходниками и зависимостями по образцу ветки `qt`.
-3. Добавьте свою точку входа (`main_<name>.cpp`), которая собирает `core::Session` с вашим `UiProvider`.
-4. Если ваш UI живёт в своём event loop (не консольный ввод вывод), соблюдайте правило потоков выше: не трогайте состояние UI напрямую из методов `UiProvider`, маршальте вызов на свой поток.
+2. Добавьте свою точку входа (`main_<name>.cpp`), которая собирает `core::Session` с вашим `UiProvider`.
+3. Если ваш UI живёт в своём event loop (не консольный ввод вывод), соблюдайте правило потоков выше: не трогайте состояние UI напрямую из методов `UiProvider`, маршальте вызов на свой поток.
 
 ### Design принципы для UI слоя
 
@@ -276,18 +277,17 @@ TDLib не поставляется как обычный пакет, её ну�
 
 После сборки или установки TDLib укажите её через `CMAKE_PREFIX_PATH` или `Td_DIR` при конфигурации.
 
-### Одной командой (build-cmake.ps1)
+### Одной командой (build.ps1)
 
-`build-cmake.ps1` в корне репозитория оборачивает конфигурацию и сборку через `cmake` в одну команду и проверяет, что сборка запущена на Windows. Это низкоуровневый скрипт: он не ставит TDLib или Qt сам, только собирает сам zkgram против уже установленных зависимостей, путь к ним передаётся параметрами.
+`build.ps1` в корне репозитория — единственный сборочный скрипт проекта (никаких других `.ps1` по решению пользователя). Полный пайплайн с нуля: ставит TDLib и Qt6 (если их ещё нет), конфигурирует и собирает zkgram через `cmake`, прогоняет `windeployqt`, складывает готовый портативный билд в `dist/`.
 
 ```powershell
-.\build-cmake.ps1 -TdPrefix C:\tdlib                                              # консольный UI, Release
-.\build-cmake.ps1 -Ui qt -TdPrefix C:\tdlib -QtPrefix C:\Qt\6.9.3\msvc2022_64      # Qt UI
+.\build.ps1                          # с нуля: TDLib, Qt6, сборка, dist/
+.\build.ps1 -SkipTdlib -SkipQt       # TDLib и Qt6 уже стоят, просто пересобрать
+.\build.ps1 -Clean                   # полная пересборка TDLib и zkgram с нуля
 ```
 
-Параметры: `-Ui console|qt` (по умолчанию `console`), `-Config` (по умолчанию `Release`), `-PythonExe` (путь к нужному `python.exe`), `-TdPrefix` (путь к сборке или установке TDLib), `-QtPrefix` (путь к установке Qt6, нужен только при `-Ui qt`), `-VcpkgBinDir` (нужен только при сборке TDLib с динамической линковкой OpenSSL/zlib, для обычной сборки не требуется), `-Clean` (удалить папку `build` перед конфигурацией). Скрипт не подавляет ошибки `cmake`, он просто оборачивает команды ниже.
-
-Есть ещё `build.ps1` (без `-cmake`) — это отдельный, более высокоуровневый скрипт, который сначала ставит TDLib и Qt6 (если их ещё нет), затем сам вызывает `build-cmake.ps1`, прогоняет `windeployqt` и складывает готовый портативный билд в `dist/`. Он не принимает `-Ui`/`-TdPrefix`/`-QtPrefix` — это параметры именно `build-cmake.ps1`. См. `.\build.ps1 -?` или сам файл.
+Параметры: `-TdInstallDir`/`-QtDir`/`-QtVersion` (пути и версия зависимостей), `-OutDir` (куда класть портативный билд, по умолчанию `dist/`), `-SkipTdlib`/`-SkipQt` (пропустить установку, если уже стоит), `-Clean` (снести `build/` и пересобрать TDLib с нуля), `-Config` (по умолчанию `Release`), `-PythonExe`, `-VcpkgBinDir`. См. `.\build.ps1 -?` или сам файл — сборка Qt UI (с вендоренным `lib_ui`) без флагов, переключателя консоль/Qt больше нет.
 
 ### Сборка вручную
 

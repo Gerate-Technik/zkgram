@@ -55,6 +55,9 @@ struct MessageData {
     std::int64_t date = 0;
     std::int64_t mediaAlbumId = 0;
     MessageId replyToMessageId = 0;
+    bool isVoiceNote = false;
+    std::int32_t voiceNoteDuration = 0;
+    std::string voiceNotePath;
 };
 
 struct PeerData {

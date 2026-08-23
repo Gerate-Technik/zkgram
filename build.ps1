@@ -13,26 +13,25 @@ What this does, in order:
      source through vcpkg, which drags in a full ffmpeg build and dozens of
      other dependencies for ~an hour; see TODO.md, "переключился на
      aqtinstall"). Skipped if already installed at -QtDir/-QtVersion.
-  4. Builds zkgram itself (via build-cmake.ps1 -Ui qt) against the above.
+  4. Configures and builds zkgram itself (CMake + MSBuild) against the above.
   5. Runs windeployqt to place the Qt runtime DLLs next to zkgram.exe.
-  6. Copies everything a user needs to run the app - zkgram.exe, the Qt
-     DLLs windeployqt placed, and TDLib's OpenSSL/zlib being statically
-     linked means nothing else is needed - into a clean -OutDir. That whole
-     folder (not just zkgram.exe alone) is what must be copied/zipped/moved
-     to run it anywhere else; Qt itself is still dynamically linked (see
-     TODO.md, "план: портативность exe" for why full static Qt linking is a
-     separate, much larger undertaking not done here).
+
+The finished client is build\Release\zkgram.exe (no separate packaging/dist
+step - this used to also copy everything into a portable dist\ folder plus
+bundle CryptoLayer's Python source for running on a machine without this
+whole monorepo checked out; removed per explicit request, the build output
+now lives only in build\Release\, same place -Config puts it).
 
 Usage:
   .\build.ps1
-  .\build.ps1 -OutDir D:\zkgram-dist
   .\build.ps1 -Clean          # wipe and rebuild TDLib + zkgram from scratch
   .\build.ps1 -SkipTdlib      # already have TDLib installed, just rebuild zkgram+Qt step
   .\build.ps1 -SkipQt         # already have Qt installed, just rebuild zkgram
 
-For just the CMake configure+build step on its own (no TDLib/Qt install,
-no windeployqt, no dist/ packaging), use build-cmake.ps1 directly - this
-script's own step 4 is nothing more than a call to it.
+This is the ONLY build script in this repo (see this script's own step 4
+comment for why the CMake configure+build step used to live in a separate
+build-cmake.ps1 - that file is gone, folded in here, per project convention:
+one build entry point, not several).
 
 Re-running is safe and incremental: each step is skipped if its output
 already exists (TDLib install, Qt install), except the zkgram build itself
@@ -51,12 +50,14 @@ param(
     [string]$TdInstallDir = "C:\tdlib-install",
     [string]$QtDir = "C:\Qt",
     [string]$QtVersion = "6.9.3",
-    [string]$OutDir = "$PSScriptRoot\dist",
     [switch]$SkipTdlib,
     [switch]$SkipQt,
     [switch]$Clean,
-    # See build-cmake.ps1's own -VendorLibUi comment.
-    [switch]$VendorLibUi
+    # Step 4 (CMake configure+build) options - formerly build-cmake.ps1's own
+    # parameters, folded in here.
+    [string]$Config = "Release",
+    [string]$PythonExe = "",
+    [string]$VcpkgBinDir = ""
 )
 
 # NOT "Stop": with $ErrorActionPreference = "Stop", PowerShell 5.1 treats
@@ -162,16 +163,74 @@ if (-not (Test-Path "$qtInstallPath\bin\windeployqt.exe")) {
 }
 
 Write-Host ""
-Write-Host "=== 4. Building zkgram (Qt UI) ===" -ForegroundColor Cyan
+Write-Host "=== 4. Configuring and building zkgram (Qt UI + vendored lib_ui) ===" -ForegroundColor Cyan
 
-$buildCmakeArgs = @{
-    Ui = "qt"
-    TdPrefix = "$TdInstallDir;$vcpkgInstalled"
-    QtPrefix = $qtInstallPath
+# -Clean here also covers "the CMake build/ dir went stale" (e.g. after any
+# changes to TDLib/Qt itself under -TdInstallDir/-QtDir - CMake does not
+# watch those for changes the way it watches this repo's own source files),
+# not just "rebuild TDLib from scratch" (step 2 above).
+if ($Clean -and (Test-Path "$PSScriptRoot\build")) {
+    Write-Host "-Clean passed: removing build/ before reconfiguring ..."
+    Remove-Item -Recurse -Force "$PSScriptRoot\build"
 }
-if ($VendorLibUi) { $buildCmakeArgs["VendorLibUi"] = $true }
-& "$PSScriptRoot\build-cmake.ps1" @buildCmakeArgs
+
+# Resolve cmake.exe explicitly, not bare "cmake": on a machine with both an
+# official CMake and MSYS2's C:\msys64\ucrt64\bin\cmake.exe on PATH, the
+# MSYS2 one resolves find_package(OpenSSL)/find_package(Td)/find_package(Qt6)
+# against its own MinGW libraries instead of the MSVC ones zkgram needs,
+# breaking the build silently (see TODO.md for how this was found while
+# building TDLib).
+$cmakeCandidates = Get-Command cmake -All -ErrorAction SilentlyContinue
+if (-not $cmakeCandidates) {
+    Write-Error "cmake not found on PATH. Install it first."
+    exit 1
+}
+$preferredCmake = $cmakeCandidates | Where-Object { $_.Source -notmatch "(?i)msys64|mingw" } | Select-Object -First 1
+$cmakeExe = if ($preferredCmake) { $preferredCmake.Source } else { $cmakeCandidates[0].Source }
+if (-not $preferredCmake) {
+    Write-Host "Warning: only found MSYS2/MinGW cmake.exe candidates on PATH ($cmakeExe). This is known to break dependency detection for this project." -ForegroundColor Yellow
+}
+
+$cmakeArgs = @("-S", "$PSScriptRoot", "-B", "$PSScriptRoot\build", "-DPYBIND11_FINDPYTHON=ON")
+if ($PythonExe -ne "") { $cmakeArgs += "-DPython3_EXECUTABLE=$PythonExe" }
+# third_party/desktop-app's own external_jpeg/external_lz4/external_zlib come
+# from vcpkg's x64-windows (dynamic) triplet specifically, not the
+# x64-windows-static-md-release one TDLib/OpenSSL use above - see the comment
+# above zkgram_allow_nonsystem32_deps in third_party/desktop-app/CMakeLists.txt.
+$cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_xxHash=ON"
+$cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_range-v3=ON"
+$cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_tl-expected=ON"
+$cmakeArgs += "-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON"
+
+$prefixPaths = @("$TdInstallDir;$vcpkgInstalled", $qtInstallPath)
+$cmakeArgs += "-DCMAKE_PREFIX_PATH=$($prefixPaths -join ';')"
+
+& $cmakeExe @cmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# /m:1 (single-threaded MSBuild): this machine has 5.9GB RAM total, and
+# parallel MSBuild (the default) has repeatedly failed here with
+# "C1060: compiler is out of heap space" once lib_ui's ~446 files are in the
+# build - see zkgram/.claude/UI.md section 13c.
+& $cmakeExe --build "$PSScriptRoot\build" --config $Config -- /m:1
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# TDLib is now built against OpenSSL/zlib from vcpkg's x64-windows-static-md
+# triplet (static .lib, not DLLs), so the exe has no OpenSSL/zlib runtime
+# dependency and no DLLs need to sit next to it - see TODO.md for how this
+# replaced the earlier x64-windows (dynamic) triplet. -VcpkgBinDir is only
+# for the rare case of building against the dynamic triplet again; empty by
+# default means no copy step runs.
+if ($VcpkgBinDir -ne "") {
+    $stepOutDir = Join-Path "$PSScriptRoot\build" $Config
+    if ((Test-Path $VcpkgBinDir) -and (Test-Path $stepOutDir)) {
+        Get-ChildItem -Path $VcpkgBinDir -Filter "*.dll" | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $stepOutDir -Force
+        }
+    } else {
+        Write-Host "Warning: -VcpkgBinDir '$VcpkgBinDir' not found, did not copy DLLs." -ForegroundColor Yellow
+    }
+}
 
 $exePath = Join-Path $PSScriptRoot "build\Release\zkgram.exe"
 if (-not (Test-Path $exePath)) {
@@ -186,60 +245,5 @@ Write-Host "=== 5. Deploying Qt runtime DLLs ===" -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
-Write-Host "=== 6. Packaging a portable copy into $OutDir ===" -ForegroundColor Cyan
-# The whole build\Release\ folder (exe + every DLL windeployqt placed next
-# to it) is what needs to move together - copying zkgram.exe alone and
-# running it from somewhere else (Desktop, a USB stick) fails with missing
-# Qt6Core.dll and friends, because Qt itself is still linked dynamically
-# (only TDLib/OpenSSL/zlib are static, see the file header). This step
-# exists specifically so "the output" is one clean folder, not "go find
-# build\Release\ and remember every file in it has to come along."
-
-if (Test-Path $OutDir) {
-    Remove-Item -Recurse -Force $OutDir
-}
-New-Item -ItemType Directory -Path $OutDir | Out-Null
-# Excludes "data": TDLib's local session/identity database - if present in
-# build\Release\ at all, it is leftover from running zkgram.exe directly
-# out of that folder during development/testing, never something to ship.
-# A real user's own session gets created fresh the first time they run the
-# packaged exe.
-Copy-Item -Path (Join-Path $PSScriptRoot "build\Release\*") -Destination $OutDir -Recurse -Exclude "*.pdb", "*.lib", "*.exp", "data"
-# Copy-Item -Exclude does not reliably skip whole subdirectories by name
-# during a -Recurse copy on PowerShell 5.1 (only filters file name
-# patterns in some versions) - remove it explicitly as a safety net rather
-# than trust -Exclude alone for this one.
-$strayDataDir = Join-Path $OutDir "data"
-if (Test-Path $strayDataDir) {
-    Remove-Item -Recurse -Force $strayDataDir
-}
-
-# The exe's own sys.path setup (src/crypto/python_bridge.cpp) needs
-# cryptolayer/src, cryptolayer-module-interface, and python/bridge.py to run
-# on a machine that does not have this whole monorepo checked out - without
-# this, a copy of dist/ on another PC fails at startup with "No module named
-# bridge" (Python found, but the CryptoLayer source it needs to import was
-# never there). python_bridge.cpp looks for exactly this "python-deps"
-# folder next to zkgram.exe and prefers it over the compile-time dev paths
-# when present.
-Write-Host ""
-Write-Host "=== 7. Bundling CryptoLayer Python source into $OutDir\python-deps ===" -ForegroundColor Cyan
-$pythonDepsDir = Join-Path $OutDir "python-deps"
-New-Item -ItemType Directory -Path (Join-Path $pythonDepsDir "cryptolayer") -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $pythonDepsDir "python") -Force | Out-Null
-Copy-Item -Path (Join-Path $PSScriptRoot "..\cryptolayer\src") -Destination (Join-Path $pythonDepsDir "cryptolayer\src") -Recurse -Force
-Copy-Item -Path (Join-Path $PSScriptRoot "..\cryptolayer-module-interface") -Destination (Join-Path $pythonDepsDir "cryptolayer-module-interface") -Recurse -Force
-Copy-Item -Path (Join-Path $PSScriptRoot "python\bridge.py") -Destination (Join-Path $pythonDepsDir "python\bridge.py") -Force
-# .git/, __pycache__/, and *.egg-info are development artifacts from the
-# source checkouts above, not something Python needs to import these
-# modules - stripped so the packaged zip does not carry a second copy of
-# cryptolayer-module-interface's git history around.
-Get-ChildItem -Path $pythonDepsDir -Recurse -Directory -Force | Where-Object {
-    $_.Name -eq ".git" -or $_.Name -eq "__pycache__" -or $_.Name -like "*.egg-info"
-} | Remove-Item -Recurse -Force
-
-Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
-Write-Host "Portable build ready at: $OutDir"
-Write-Host "Run it: $OutDir\zkgram.exe"
-Write-Host "To move it to another folder/PC, copy the ENTIRE $OutDir folder, not just zkgram.exe."
+Write-Host "Build ready at: $exePath"
