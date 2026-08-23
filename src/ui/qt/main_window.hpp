@@ -261,6 +261,14 @@ public:
     // of the bubble's own content.
     Q_INVOKABLE void updateHistorySenderName(qlonglong chatId, qlonglong messageId, const QString& name);
 
+    // How far the other side has read in this chat - every outgoing message
+    // up to and including messageId gets the double (read) tick instead of
+    // the single (delivered) one. See
+    // telegram::TelegramClient::onOutgoingReadUpTo() for where the value
+    // comes from, and why receiving it tells Telegram nothing about what
+    // WE have read.
+    Q_INVOKABLE void updateOutgoingReadUpTo(qlonglong chatId, qlonglong messageId);
+
     Q_INVOKABLE void appendConversationStatus(qlonglong chatId, const QString& stage, const QString& message);
     Q_INVOKABLE void appendConversationPeerText(qlonglong chatId, const QString& text);
     Q_INVOKABLE void appendConversationFileReceived(qlonglong chatId, const QString& filePath);
@@ -338,6 +346,20 @@ private Q_SLOTS:
     // plain (non-encrypted) send. A CryptoLayer message has no TDLib id of
     // its own to link against (messageId 0 here), so replying to one still
     // falls back to prepending a quoted copy of its text, same as before.
+    // "You" for our own message, otherwise whoever the open chat is with -
+    // the label shown as the quoted author, both in the reply bar and in
+    // the bubble's own header. One helper because the context menu and the
+    // swipe gesture must not disagree about it.
+    QString replyAuthorLabel(MessageKind kind) const;
+    // Modal chat picker for Forward: returns the chosen chat id, or 0 if
+    // the user cancelled. Lists the chats already known to the sidebar
+    // (lastChatListSnapshot_), filtered as you type.
+    qlonglong pickForwardTarget();
+    // Sends text to chatId as a forwarded message, choosing the encrypted
+    // or the plain path by whether THAT chat has an active session - not
+    // the one being forwarded from.
+    void forwardTextTo(qlonglong chatId, const QString& text, const QString& originalAuthor);
+
     void startReply(const QString& senderTitle, const QString& text, qlonglong messageId);
     void cancelReply();
 
@@ -421,7 +443,33 @@ private:
         // decode (paintVoiceContent() falls back to a flat bar row then,
         // same as real Telegram does for a note with no waveform data).
         QByteArray voiceWaveform;
+        // The message this one replies to, 0 if it is not a reply. Stored
+        // rather than resolved: the message being quoted may not be loaded
+        // yet (it can sit further back than the newest page), and it may
+        // arrive later when an older page is fetched, at which point the
+        // quote fills in by itself on the next render - see
+        // renderCurrentConversation()'s resolution pass.
+        qlonglong replyToMessageId = 0;
     };
+
+    // Declared after StoredMessage on purpose: a member function
+    // DECLARATION is not a complete-class context (unlike a member function
+    // body), so a parameter type has to already be known here. Above the
+    // struct, GCC parsed StoredMessage as implicit int and every call site
+    // failed with "cannot convert ... to const int&".
+    //
+    // What a reply header shows for the message being quoted: the author
+    // label and the quoted line. One implementation, called from both the
+    // bulk rebuild in renderCurrentConversation() and the single-message
+    // live append in appendMessage(), so the two cannot disagree about it -
+    // they already did once, which is why a freshly sent reply showed no
+    // quote until the chat was reopened.
+    void quoteFromMessage(const StoredMessage& target, QString* author, QString* text) const;
+    // Finds the message replyToMessageId refers to in chatId and fills the
+    // same two strings, or leaves them empty when it is not loaded or not
+    // currently visible. The lookup is a linear scan, which is right for the
+    // one-message path; the bulk rebuild indexes the conversation instead.
+    void quoteForReply(qlonglong chatId, qlonglong replyToMessageId, QString* author, QString* text) const;
 
     // Appends to conversationMessages_[chatId] always; only actually drawn
     // into the visible messages_ list if chatId is the one currently
@@ -442,7 +490,7 @@ private:
                         const QString& filePath = QString(), qlonglong messageId = 0,
                         const QString& senderName = QString(), qint64 date = 0, qint64 mediaAlbumId = 0,
                         bool isVoiceNote = false, int voiceDuration = 0,
-                        const QByteArray& voiceWaveform = QByteArray());
+                        const QByteArray& voiceWaveform = QByteArray(), qlonglong replyToMessageId = 0);
     // Rebuilds messages_ (a HistoryCanvas, see main_window.cpp) from
     // conversationMessages_[currentChatId_] - "attached"/"showTail" per
     // message (whether it joins the previous bubble/gets the pointed
@@ -718,6 +766,10 @@ private:
     // button off entirely, see updateConversationControlsVisibility().
     QMap<qlonglong, bool> conversationIsChannel_;
     QMap<qlonglong, QString> conversationPhotoPaths_;
+    // Newest outgoing message id the other side has read, per chat - see
+    // updateOutgoingReadUpTo(). Absent/0 means "not reported yet", which
+    // renders as delivered rather than read.
+    QMap<qlonglong, qlonglong> conversationReadOutboxUpTo_;
     // Chats currently waiting on a probeZkgramPresence() answer - guards
     // against a second click starting a duplicate probe for the same chat
     // while one is already in flight, see onStartEncryptionClicked().

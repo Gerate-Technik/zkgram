@@ -82,6 +82,8 @@
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -96,6 +98,8 @@
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QBrush>
 #include <QLinearGradient>
 #include <QPalette>
@@ -1079,6 +1083,9 @@ struct HistoryItem {
     // and it inherited the timestamp's baseline instead of sitting centred
     // on the line the way Telegram's does.
     bool showTick = false;
+    // Turns the sent tick into the "read by them" double tick - see
+    // HistoryEntry::readByPeer and paintSentTick().
+    bool readByPeer = false;
     double tickSlotWidth = 0.0;
 
     // shared_ptr, not unique_ptr: QVector<HistoryItem> (items_ below) needs
@@ -1123,6 +1130,18 @@ struct HistoryEntry {
     bool isVoiceNote = false;
     qint32 voiceDuration = 0;
     QByteArray voiceWaveform;
+    // The quoted message's author and text, already resolved by
+    // MainWindow::renderCurrentConversation() - empty when this message is
+    // not a reply, or when the message it replies to is not loaded (an old
+    // one further back than any page fetched so far). Resolved there rather
+    // than here because that is the only place holding the whole
+    // conversation to look the id up in.
+    QString replyToSender;
+    QString replyToText;
+    // True only for an outgoing message the other side has already read -
+    // drives the single/double tick, see
+    // MainWindow::updateOutgoingReadUpTo().
+    bool readByPeer = false;
 };
 
 // KineticScroller (a hand-rolled QScroller-based wheel/touch momentum
@@ -1444,6 +1463,23 @@ public:
         return lo;
     }
 
+    // Swipe-to-reply, fired on release once a horizontal drag across a
+    // bubble passed the trigger distance - see mouseMoveEvent(). A plain
+    // callback rather than a signal, same reasoning as SidebarCanvas's
+    // onRowClicked: this class has no Q_OBJECT of its own.
+    std::function<void(HitResult)> onReplyRequested;
+
+    // Same shape as itemAt(), addressed by index instead of by position -
+    // the swipe gesture already knows which row it started on and must not
+    // re-hit-test on release, where the cursor may well have left the row.
+    HitResult itemInfo(int index) const {
+        if (index < 0 || index >= items_.size()) {
+            return HitResult{};
+        }
+        const HistoryItem& item = items_[index];
+        return HitResult{true, item.kind, item.rawText, item.messageId, index};
+    }
+
     // pos is in this widget's own local coordinates, which (post-migration
     // - see the class comment) directly equal absolute item-space
     // coordinates, same convention as QAbstractItemView::itemAt()
@@ -1637,6 +1673,13 @@ protected:
             longPressTimer_->start(450);
         }
 
+        // Swipe-to-reply origin. Recorded before the text-selection path
+        // below returns early for images/albums, so those can be swiped too
+        // even though they can never be drag-selected.
+        swipeIndex_ = selectable ? index : -1;
+        swipeStartPos_ = event->pos();
+        swipeOffset_ = 0;
+
         if (index < 0 || items_[index].isImage || !items_[index].doc) {
             clearSelection();
             Ui::RpWidget::mousePressEvent(event);
@@ -1658,6 +1701,38 @@ protected:
             (event->pos() - longPressStartPos_).manhattanLength() > 6) {
             longPressTimer_->stop();
         }
+
+        // Swipe-to-reply. Claimed only once the drag is clearly sideways
+        // (twice as much horizontal as vertical, past a small deadzone), so
+        // it cannot steal a vertical drag meant for scrolling or a diagonal
+        // one meant for selecting text. Once claimed it keeps the gesture
+        // for the rest of the press, which is why swipeActive_ short-
+        // circuits the test - a swipe that happens to pass back through
+        // near-vertical mid-drag must not flip back to selecting.
+        if (!multiSelectMode_ && swipeIndex_ >= 0 && (event->buttons() & Qt::LeftButton)) {
+            QPoint delta = event->pos() - swipeStartPos_;
+            if (!swipeActive_ && qAbs(delta.x()) > kSwipeDeadzone() &&
+                qAbs(delta.x()) > qAbs(delta.y()) * 2) {
+                swipeActive_ = true;
+                // The gesture is a swipe, so whatever text selection the
+                // press started is not wanted.
+                selecting_ = false;
+                clearSelection();
+                if (longPressTimer_) {
+                    longPressTimer_->stop();
+                }
+            }
+            if (swipeActive_) {
+                // Clamped, and follows the finger in whichever direction it
+                // went: Telegram's own swipe direction differs by platform
+                // and layout direction, and refusing one of the two here
+                // would just read as the gesture not working.
+                swipeOffset_ = qBound(-kSwipeMaxOffset(), delta.x(), kSwipeMaxOffset());
+                update();
+                return;
+            }
+        }
+
         if (!selecting_ || selectionItemIndex_ < 0) {
             Ui::RpWidget::mouseMoveEvent(event);
             return;
@@ -1678,6 +1753,29 @@ protected:
             longPressTimer_->stop();
         }
         selecting_ = false;
+
+        if (swipeActive_) {
+            int index = swipeIndex_;
+            bool triggered = qAbs(swipeOffset_) >= kSwipeTriggerOffset();
+            // Cleared before the callback runs: it re-renders the whole
+            // conversation (MainWindow::startReply -> the reply bar
+            // appearing resizes the list), and leaving a stale index behind
+            // across that would point at items_ that no longer exist.
+            swipeActive_ = false;
+            swipeIndex_ = -1;
+            swipeOffset_ = 0;
+            update();
+            if (triggered && onReplyRequested) {
+                HitResult hit = itemInfo(index);
+                if (hit.valid && hit.kind != MessageKind::System) {
+                    onReplyRequested(hit);
+                }
+            }
+            // Consumed: no image activation, no selection change.
+            Ui::RpWidget::mouseReleaseEvent(event);
+            return;
+        }
+        swipeIndex_ = -1;
         if (wasQuickPress && !multiSelectMode_ && event->button() == Qt::LeftButton &&
             !event->modifiers().testFlag(Qt::ControlModifier) &&
             (event->pos() - longPressStartPos_).manhattanLength() <= 6) {
@@ -1998,6 +2096,24 @@ private:
     int selectionEnd_ = -1;
     bool selecting_ = false;
 
+    // ---- swipe-to-reply -------------------------------------------------
+    // Distances in logical pixels, scaled like every other size in this
+    // file. Deadzone is where the gesture is still ambiguous; trigger is how
+    // far it has to go to actually mean "reply"; max is where the bubble
+    // stops following, so a long drag does not push it off screen.
+    static int kSwipeDeadzone() { return style::ConvertScale(8); }
+    static int kSwipeTriggerOffset() { return style::ConvertScale(44); }
+    static int kSwipeMaxOffset() { return style::ConvertScale(64); }
+    // Row the press landed on, -1 when the press was not on a swipeable
+    // row or the gesture has ended.
+    int swipeIndex_ = -1;
+    QPoint swipeStartPos_;
+    // Set once the drag is recognised as horizontal - until then the press
+    // may still turn out to be a text selection or a scroll.
+    bool swipeActive_ = false;
+    // Signed: the bubble follows the cursor in whichever direction it went.
+    int swipeOffset_ = 0;
+
     bool multiSelectMode_ = false;
     QSet<int> selectedIndices_;
     qreal selectionReveal_ = 0.0;
@@ -2253,23 +2369,72 @@ private:
                 int spaces = spaceWidth > 0.0 ? static_cast<int>(std::ceil((tickSize() + 2.0) / spaceWidth)) : 4;
                 tickSlot = QString(spaces, QChar(0x00A0));
                 item.showTick = true;
+                item.readByPeer = entry.readByPeer;
                 item.tickSlotWidth = spaces * spaceWidth;
             }
             QString escaped = entry.text.toHtmlEscaped();
             escaped.replace("\n", "<br>");
 
-            // Everything up to here (message text, plus the sender-name
-            // prefix added just below if any) is real content; the
-            // timestamp/tick span appended after this point is metadata,
+            // Reply header, above everything else in the bubble - the accent
+            // bar, the quoted author and one line of the quoted text, the
+            // same three parts real Telegram shows.
+            //
+            // Built into this same QTextDocument rather than painted as its
+            // own block with its own geometry: the document is what every
+            // size in this class is derived from (idealWidth, size().height()
+            // and paintSentTick's line metrics), so a header inside it is
+            // measured and positioned by construction. A separately painted
+            // one would have to have its height added by hand to each of the
+            // paths that compute item.height, and any miss would put the
+            // painting and the hit-testing out of step.
+            //
+            // A table, not a div with border-left: Qt's rich text engine
+            // ignores CSS borders on blocks (verified by rendering both - the
+            // border variant simply had no bar at all), while a table cell
+            // with bgcolor does draw.
+            QString replyHeaderHtml;
+            if (!entry.replyToText.isEmpty() || !entry.replyToSender.isEmpty()) {
+                QFont quoteFont = bubbleFont;
+                quoteFont.setPixelSize(bubbleMetaFontSize());
+                // Elided here rather than left to wrap: a quote is one line in
+                // Telegram, and letting a long one wrap would also drag the
+                // whole bubble out to the maximum width.
+                QString quote = QFontMetrics(quoteFont)
+                                     .elidedText(entry.replyToText.simplified(), Qt::ElideRight,
+                                                  maxBubbleContentWidth() - style::ConvertScale(24));
+                const QColor quoteColor =
+                    (entry.kind == MessageKind::Outgoing ? st::msgOutDateFg : st::msgInDateFg)->c;
+                QString sender = entry.replyToSender.isEmpty() ? QString("Message") : entry.replyToSender;
+                replyHeaderHtml = QString("<table cellspacing=\"0\" cellpadding=\"0\"><tr>"
+                                           "<td bgcolor=\"#3a8ee6\" width=\"3\"></td><td width=\"6\"></td>"
+                                           "<td><b style=\"color:#3a8ee6;\">%1</b><br>"
+                                           "<span style=\"color:%2; font-size:%3px;\">%4</span></td>"
+                                           "</tr></table>")
+                                      .arg(sender.toHtmlEscaped())
+                                      .arg(quoteColor.name())
+                                      .arg(bubbleMetaFontSize())
+                                      .arg(quote.toHtmlEscaped());
+            }
+
+            // Everything up to here (the reply header, the message text, plus
+            // the sender-name prefix added just below if any) is real content;
+            // the timestamp/tick span appended after this point is metadata,
             // not content - measured by rendering this part alone into a
             // throwaway document, since HTML entity decoding (&nbsp;,
             // etc.) means character counts do not map 1:1 between source
             // HTML and the document's own plain-text positions.
+            //
+            // The header has to be inside this measurement, not prepended
+            // afterwards: item.textLength is the cap on how far a selection
+            // may reach (see documentPositionForSelection), so leaving the
+            // header out would shift every position in the document past it
+            // and clamp selection short of the end of the real text.
             QString textOnlyHtml = escaped;
             if (entry.kind == MessageKind::Incoming && !entry.attached && !entry.senderName.isEmpty()) {
                 textOnlyHtml =
                     QString("<b style=\"color:#3a8ee6;\">%1</b><br>%2").arg(entry.senderName.toHtmlEscaped(), escaped);
             }
+            textOnlyHtml = replyHeaderHtml + textOnlyHtml;
             {
                 QTextDocument measuring;
                 measuring.setHtml(textOnlyHtml);
@@ -2290,6 +2455,7 @@ private:
             if (entry.kind == MessageKind::Incoming && !entry.attached && !entry.senderName.isEmpty()) {
                 html = QString("<b style=\"color:#3a8ee6;\">%1</b><br>%2").arg(entry.senderName.toHtmlEscaped(), html);
             }
+            html = replyHeaderHtml + html;
         }
 
         item.doc = std::make_shared<QTextDocument>();
@@ -2352,6 +2518,13 @@ private:
         bool selectable = item.kind != MessageKind::System;
         if (multiSelectMode_ && selectable) {
             bubbleLeft += qRound(checkboxGutterWidth() * selectionReveal_);
+        }
+        // The row being swiped follows the cursor, so the gesture has visible
+        // feedback while it is happening rather than only when it fires. Only
+        // the bubble moves - the selection checkbox gutter and everything
+        // else stay put, the same way Telegram slides just the message.
+        if (swipeActive_ && index == swipeIndex_) {
+            bubbleLeft += swipeOffset_;
         }
 
         if (!item.albumPixmaps.isEmpty()) {
@@ -2633,7 +2806,13 @@ private:
         // slack left over from rounding the run up to a whole number of
         // spaces is split between the timestamp side and the bubble's margin.
         double left = right - item.tickSlotWidth + (item.tickSlotWidth - tickSize()) / 2.0;
-        paintGlyph(painter, QRectF(left, centerY - tickSize() / 2.0, tickSize(), tickSize()), Glyph::Check);
+        // Double tick once the other side has read it, single while it is
+        // only delivered - the same two assets real Telegram Desktop uses
+        // (history_sent / history_received). Both are the same size, so the
+        // reserved run measured in buildItem() fits either way and the
+        // bubble does not change width when a read receipt arrives.
+        paintGlyph(painter, QRectF(left, centerY - tickSize() / 2.0, tickSize(), tickSize()),
+                    item.readByPeer ? Glyph::CheckDouble : Glyph::Check);
     }
 
     // Recomputes top_ for every item from index onward, based on each
@@ -3568,6 +3747,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // message pane and leaving the sidebar visible beside it would not
     // match real Telegram's own fullscreen overlay.
     mediaViewer_ = new MediaViewer(chatPage_);
+    // Swipe a message sideways to reply to it - the gesture half of the
+    // same action the context menu's "Reply" performs, so both go through
+    // startReply() and neither knows anything the other does not.
+    historyCanvas->onReplyRequested = [this](HistoryCanvas::HitResult hit) {
+        startReply(replyAuthorLabel(hit.kind), hit.text, hit.messageId);
+    };
     historyCanvas->onImageActivated = [this](const QVector<QPixmap>& images, int index) {
         asMediaViewer(mediaViewer_)->open(images, index);
     };
@@ -4148,6 +4333,134 @@ void MainWindow::startReply(const QString& senderTitle, const QString& text, qlo
     input_->setFocus();
 }
 
+void MainWindow::quoteFromMessage(const StoredMessage& target, QString* author, QString* text) const {
+    *author = target.kind == MessageKind::Outgoing ? QString("You") : target.senderName;
+    // A media message with no caption has no text to quote - name the kind
+    // instead of quoting an empty line.
+    *text = !target.text.isEmpty() ? target.text : (!target.filePath.isEmpty() ? QString("Photo") : QString());
+}
+
+void MainWindow::quoteForReply(qlonglong chatId, qlonglong replyToMessageId, QString* author, QString* text) const {
+    author->clear();
+    text->clear();
+    if (replyToMessageId == 0) {
+        return;
+    }
+    // Secret content is only quotable while secret mode is on for this chat -
+    // a reply must not surface a hidden message's text on a plain bubble.
+    // Same rule the bulk rebuild applies by indexing only what it is about
+    // to draw.
+    bool secretVisible = secretModeOn_.value(chatId, false);
+    // constFind, not value(): QMap::value() returns a copy, and copying the
+    // whole conversation on every appended message is exactly the kind of
+    // per-message cost this file has had to remove elsewhere.
+    auto chat = conversationMessages_.constFind(chatId);
+    if (chat == conversationMessages_.constEnd()) {
+        return;
+    }
+    for (const StoredMessage& candidate : *chat) {
+        if (candidate.messageId == replyToMessageId && (!candidate.isSecret || secretVisible)) {
+            quoteFromMessage(candidate, author, text);
+            return;
+        }
+    }
+}
+
+QString MainWindow::replyAuthorLabel(MessageKind kind) const {
+    return kind == MessageKind::Outgoing ? QString("You") : companionLabel_->text();
+}
+
+qlonglong MainWindow::pickForwardTarget() {
+    // Plain Qt Widgets rather than a lib_ui box: this is one modal list with
+    // a filter, and Ui::BoxContent brings its own layer/window management
+    // that nothing else in this file uses yet (UI.md section 13c).
+    QDialog dialog(this);
+    dialog.setWindowTitle("Forward to");
+    dialog.resize(style::ConvertScale(360), style::ConvertScale(460));
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* filter = new QLineEdit(&dialog);
+    filter->setPlaceholderText("Search");
+    layout->addWidget(filter);
+
+    auto* list = new QListWidget(&dialog);
+    layout->addWidget(list, 1);
+    // The sidebar's own snapshot, so the picker offers exactly the chats the
+    // user can already see, in the same order, with no second source of
+    // truth to drift.
+    for (const QVariant& entryVariant : lastChatListSnapshot_) {
+        QVariantMap entry = entryVariant.toMap();
+        auto* row = new QListWidgetItem(entry["title"].toString(), list);
+        row->setData(Qt::UserRole, entry["id"].toLongLong());
+    }
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    // Nothing selected yet, so there is nothing to forward to - enabled by
+    // the selection handler below.
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    buttons->button(QDialogButtonBox::Ok)->setText("Forward");
+
+    connect(filter, &QLineEdit::textChanged, list, [list](const QString& query) {
+        QString trimmed = query.trimmed();
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem* row = list->item(i);
+            row->setHidden(!trimmed.isEmpty() && !row->text().contains(trimmed, Qt::CaseInsensitive));
+        }
+    });
+    connect(list, &QListWidget::itemSelectionChanged, buttons, [list, buttons] {
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(list->currentItem() != nullptr);
+    });
+    // Double-click is the shortcut every list-picker has - same as picking a
+    // row and confirming.
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
+        return 0;
+    }
+    return list->currentItem()->data(Qt::UserRole).toLongLong();
+}
+
+void MainWindow::forwardTextTo(qlonglong chatId, const QString& text, const QString& originalAuthor) {
+    if (session_ == nullptr || chatId == 0) {
+        return;
+    }
+    // Attribution kept in the text itself. TDLib's real forwardMessages
+    // (which preserves the original author as message metadata) is not
+    // exposed by this project's transport layer, and an encrypted forward
+    // could not use it anyway - CryptoLayer carries text, not Telegram
+    // messages. A prefix is the honest approximation of both.
+    QString forwarded = originalAuthor.isEmpty() ? QString("Forwarded:\n%1").arg(text)
+                                                  : QString("Forwarded from %1:\n%2").arg(originalAuthor, text);
+    // Decided by the DESTINATION chat, not the one being forwarded from -
+    // the old Forward always called sendText(), which is the encrypted path,
+    // so forwarding into any chat without an active session (that is, almost
+    // all of them) failed instead of sending.
+    bool isActive = conversationActive_.value(chatId, false);
+    try {
+        if (isActive) {
+            session_->sendText(chatId, forwarded.toStdString());
+        } else {
+            session_->sendPlainText(chatId, forwarded.toStdString());
+        }
+    } catch (const std::exception& e) {
+        appendMessage(currentChatId_, MessageKind::System, QString("Forward failed: %1").arg(e.what()),
+                       /*isSecret=*/false);
+        return;
+    }
+    // Only the open chat has anything on screen to append to; a forward to
+    // some other chat shows up there when it is next opened, from history.
+    if (chatId == currentChatId_) {
+        appendMessage(chatId, MessageKind::Outgoing, forwarded, isActive);
+    } else {
+        appendMessage(currentChatId_, MessageKind::System,
+                       QString("Forwarded to %1").arg(conversationTitles_.value(chatId, QString::number(chatId))),
+                       /*isSecret=*/false);
+    }
+}
+
 void MainWindow::cancelReply() {
     replyToText_.clear();
     replyToMessageId_ = 0;
@@ -4688,7 +5001,8 @@ void MainWindow::maybeLoadPlainHistory(qlonglong chatId) {
                     messageId, QString::fromStdString(message.senderName), /*isSecret=*/false, message.date,
                     message.mediaAlbumId, message.isVoiceNote, message.voiceNoteDuration,
                     QByteArray(reinterpret_cast<const char*>(message.voiceWaveform.data()),
-                               static_cast<int>(message.voiceWaveform.size()))});
+                               static_cast<int>(message.voiceWaveform.size())),
+                    static_cast<qlonglong>(message.replyToMessageId)});
             }
             if (!history.isEmpty()) {
                 conversationMessages_[chatId] = history + conversationMessages_[chatId];
@@ -4791,7 +5105,8 @@ void MainWindow::maybeLoadMoreHistory() {
                     messageId, QString::fromStdString(message.senderName), /*isSecret=*/false, message.date,
                     message.mediaAlbumId, message.isVoiceNote, message.voiceNoteDuration,
                     QByteArray(reinterpret_cast<const char*>(message.voiceWaveform.data()),
-                               static_cast<int>(message.voiceWaveform.size()))});
+                               static_cast<int>(message.voiceWaveform.size())),
+                    static_cast<qlonglong>(message.replyToMessageId)});
             }
             if (older.isEmpty()) {
                 // Every message on this page was already on screen. Move
@@ -4913,7 +5228,7 @@ void MainWindow::onStartEncryptionClicked() {
 void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString& text, bool isSecret,
                                 const QString& filePath, qlonglong messageId, const QString& senderName,
                                 qint64 date, qint64 mediaAlbumId, bool isVoiceNote, int voiceDuration,
-                                const QByteArray& voiceWaveform) {
+                                const QByteArray& voiceWaveform, qlonglong replyToMessageId) {
     // Same sender AND same kind AND same isSecret, not just same kind:
     // two different people's consecutive messages in a group chat must
     // not read as one attached block with only the first person's name
@@ -4936,7 +5251,8 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         date = QDateTime::currentDateTime().toSecsSinceEpoch();
     }
     conversationMessages_[chatId].push_back(StoredMessage{kind, text, filePath, messageId, senderName, isSecret, date,
-                                                            mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform});
+                                                            mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform,
+                                                            replyToMessageId});
     if (isSecret) {
         hasSecretContent_.insert(chatId);
         if (chatId == currentChatId_) {
@@ -4965,6 +5281,11 @@ void MainWindow::appendMessage(qlonglong chatId, MessageKind kind, const QString
         entry.isVoiceNote = isVoiceNote;
         entry.voiceDuration = voiceDuration;
         entry.voiceWaveform = voiceWaveform;
+        // Resolved here as well, not only in renderCurrentConversation():
+        // this path draws the message immediately, and leaving the quote
+        // empty meant a reply you just sent (or one arriving live) showed up
+        // with no header at all until the chat was reopened and rebuilt.
+        quoteForReply(chatId, replyToMessageId, &entry.replyToSender, &entry.replyToText);
         asCanvas(messages_)->appendItem(entry);
         if (shouldScrollToBottom) {
             asCanvas(messages_)->scrollToBottom();
@@ -5028,6 +5349,22 @@ void MainWindow::updateHistorySenderName(qlonglong chatId, qlonglong messageId, 
     }
 }
 
+void MainWindow::updateOutgoingReadUpTo(qlonglong chatId, qlonglong messageId) {
+    qlonglong& known = conversationReadOutboxUpTo_[chatId];
+    // Monotonic: TDLib can re-send an older value while re-syncing, and a
+    // message that has been read does not become unread again.
+    if (messageId <= known) {
+        return;
+    }
+    known = messageId;
+    if (chatId == currentChatId_) {
+        // Coalesced, not immediate: a chat catching up after being opened on
+        // the other device pushes a run of these, and each one would
+        // otherwise rebuild the whole conversation just to swap some ticks.
+        scheduleConversationRender();
+    }
+}
+
 void MainWindow::scheduleConversationRender() {
     pendingConversationRenderChatId_ = currentChatId_;
     // Same shape as updateChatList()'s sidebar throttle: if a render is
@@ -5076,6 +5413,43 @@ void MainWindow::renderCurrentConversation() {
                       conversation[i].isSecret == conversation[i - 1].isSecret;
     }
 
+    // Quote lookup for the reply headers below, built from `conversation`
+    // (what is actually about to be drawn) rather than from `stored`: a
+    // reply pointing at a secret message must not surface that message's
+    // text as a quote on a plain bubble while secret mode is off. A reply
+    // whose target is not here - filtered out, or simply older than any
+    // page loaded so far - just gets no header, and picks one up on a later
+    // render if that page is fetched.
+    QHash<qlonglong, const StoredMessage*> byMessageId;
+    byMessageId.reserve(conversation.size());
+    for (const StoredMessage& message : conversation) {
+        if (message.messageId != 0) {
+            byMessageId.insert(message.messageId, &message);
+        }
+    }
+    // Everything at or below this id has been read by the other side, see
+    // updateOutgoingReadUpTo(). 0 means "nothing known yet", which leaves
+    // every outgoing message on the plain single (delivered) tick.
+    const qlonglong readUpTo = conversationReadOutboxUpTo_.value(currentChatId_, 0);
+
+    // Fills in the parts of an entry that depend on the rest of the
+    // conversation rather than on the message alone.
+    auto resolveEntry = [&](HistoryEntry& entry, const StoredMessage& message) {
+        if (message.replyToMessageId != 0) {
+            auto quoted = byMessageId.constFind(message.replyToMessageId);
+            if (quoted != byMessageId.constEnd()) {
+                // Index for the lookup, shared helper for what to show - see
+                // quoteFromMessage().
+                quoteFromMessage(*quoted.value(), &entry.replyToSender, &entry.replyToText);
+            }
+        }
+        // Only a real TDLib id can be compared against the server's read
+        // marker. A CryptoLayer message has none (id 0), so it stays on the
+        // single tick rather than claiming a read state nobody reported.
+        entry.readByPeer = message.kind == MessageKind::Outgoing && message.messageId != 0 && readUpTo != 0 &&
+                            message.messageId <= readUpTo;
+    };
+
     QVector<HistoryEntry> entries;
     entries.reserve(conversation.size());
     // Telegram delivers every photo of an album as its own separate
@@ -5112,6 +5486,7 @@ void MainWindow::renderCurrentConversation() {
                 HistoryEntry entry{conversation[i].kind, caption,   QString(), attached[i], conversation[i].senderName,
                                     showTail,             conversation[i].messageId, conversation[i].date};
                 entry.albumFilePaths = albumPaths;
+                resolveEntry(entry, conversation[i]);
                 entries.push_back(entry);
                 i = j;
                 continue;
@@ -5124,6 +5499,7 @@ void MainWindow::renderCurrentConversation() {
         entry.isVoiceNote = conversation[i].isVoiceNote;
         entry.voiceDuration = conversation[i].voiceDuration;
         entry.voiceWaveform = conversation[i].voiceWaveform;
+        resolveEntry(entry, conversation[i]);
         entries.push_back(entry);
         ++i;
     }
@@ -5156,7 +5532,6 @@ void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageI
                                              qlonglong date, qlonglong mediaAlbumId, qlonglong replyToMessageId,
                                              bool isVoiceNote, int voiceDuration, const QString& voicePath,
                                              const QByteArray& voiceWaveform) {
-    (void)replyToMessageId;  // not yet rendered as a reply header, see TODO.md
     // Only for chats whose history has already been asked for, i.e. ones
     // the user has opened at least once this run. For any other chat the
     // message is deliberately dropped: its conversation holds nothing yet,
@@ -5194,7 +5569,8 @@ void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageI
     // is what StoredMessage::filePath actually needs to hold for one - see
     // its own comment for why the two are stored in the same field.
     appendMessage(chatId, MessageKind::Incoming, text, /*isSecret=*/false, isVoiceNote ? voicePath : filePath,
-                  messageId, senderName, date, mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform);
+                  messageId, senderName, date, mediaAlbumId, isVoiceNote, voiceDuration, voiceWaveform,
+                  replyToMessageId);
 }
 
 void MainWindow::setConversationReady(qlonglong chatId) {
@@ -5264,23 +5640,18 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
     // to link against (hit.messageId 0 there), so it still falls back to
     // quoting the text into the sent message - see replyToMessageId_'s own
     // comment.
+    // Same action the swipe gesture performs (see
+    // HistoryCanvas::onReplyRequested) - both go through startReply().
     menu->addAction("Reply", [this, text, kind, messageId = hit.messageId] {
-        QString title = (kind == MessageKind::Outgoing) ? QString("You") : companionLabel_->text();
-        startReply(title, text, messageId);
+        startReply(replyAuthorLabel(kind), text, messageId);
     });
-    // "Forward" resends the text to the currently open conversation as a
-    // new message, marked as forwarded - picking a different destination
-    // chat is not implemented (would need its own picker UI).
-    menu->addAction("Forward", [this, text] {
-        if (session_ == nullptr || currentChatId_ == 0) {
-            return;
+    // "Forward" asks where to send it, like any messenger, instead of the
+    // old behaviour of quietly resending into the chat already open.
+    menu->addAction("Forward", [this, text, kind] {
+        qlonglong target = pickForwardTarget();
+        if (target != 0) {
+            forwardTextTo(target, text, replyAuthorLabel(kind));
         }
-        QString forwarded = "Forwarded: " + text;
-        // Always via sendText (encrypted) - Forward has never offered a
-        // plain-send fallback the way onSendClicked()/sendFilePath() do,
-        // so it is always isSecret=true to match.
-        session_->sendText(currentChatId_, forwarded.toStdString());
-        appendMessage(currentChatId_, MessageKind::Outgoing, forwarded, /*isSecret=*/true);
     });
     // Enters the same multi-message selection mode a long-press on this
     // bubble would - see HistoryCanvas::enterSelectionMode()'s own comment.
@@ -5409,7 +5780,15 @@ void MainWindow::onSendClicked() {
     // (encrypted via sendText, or plain via sendPlainText) is what
     // determines which mode this message belongs to, not anything about
     // the UI's current secretModeOn_ state.
-    appendMessage(currentChatId_, MessageKind::Outgoing, text, isActive);
+    //
+    // replyId is carried into the local copy as well, so the reply header
+    // appears on your own message straight away rather than only after the
+    // chat is reopened and the history reloaded (this optimistic copy is
+    // all the user sees until then - TDLib's echo of our own send is
+    // deliberately dropped, see appendPlainMessageReceived).
+    appendMessage(currentChatId_, MessageKind::Outgoing, text, isActive, QString(), /*messageId=*/0, QString(),
+                   /*date=*/0, /*mediaAlbumId=*/0, /*isVoiceNote=*/false, /*voiceDuration=*/0,
+                   /*voiceWaveform=*/QByteArray(), replyId);
     input_->clear();
 }
 
