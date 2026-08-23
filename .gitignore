@@ -11,10 +11,13 @@ out/
 __pycache__/
 *.pyc
 
-# Personal scratch notes — not meant to be shared/committed
-TODO.md
 *.o
 *.obj
+
+# Vendored third-party libraries' own TODO.md files (e.g. range-v3) - not
+# ours, not meant to be tracked here. Our own TODO.md (repo root) is
+# tracked deliberately.
+/third_party/**/TODO.md
 *.exe
 *.dll
 *.so
