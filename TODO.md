@@ -442,3 +442,33 @@ main → core::Session::Session → std::make_unique<CryptoLayer> → crypto::Cr
 Пользователь открыл гамбургер-меню (пункт 4 выше) при проверке — панель `MainMenuPanel` отрисовалась правильно, но показала "Could not reach monero-wallet-rpc: Connection refused". Разобрался: это НЕ баг ни в `MainMenuPanel`, ни в чём-либо, тронутом в этой сессии — `zkgram::monero::MoneroWalletRpc` (`src/monero/monero.cpp`, `.h`) обращается к `monero-wallet-rpc`, отдельному демону из официального Monero CLI (не то, что запускает сам zkgram), по умолчанию `http://127.0.0.1:38083/json_rpc` (стейджнет-порт, `ZKGRAM_MONERO_RPC_URL`/`_USER`/`_PASSWORD` — переопределение через переменные окружения, `main_window.cpp` ~строка 3691). "Connection refused" означает, что демон просто не запущен на машине — ожидаемо для машины, где `monero-wallet-rpc.exe` никогда не скачивался/не стартовал. Проверил `README.md`/`docs/README.md`/`TODO.md` — ни слова про то, что этот демон нужно ставить/запускать отдельно, само требование нигде не задокументировано.
 
 Пользователь явно попросил отложить и не отвлекаться от lib_ui-списка выше. **Когда вернёмся**: либо (a) написать инструкцию/раздел в `docs/README.md` про установку `monero-wallet-rpc` (скачать с getmonero.org, создать/открыть wallet-файл, запустить с `--rpc-bind-port 38083 --wallet-file <path> --password <pw>` или аналогичными флагами под нужную сеть), либо (b) если это нужно проверить быстро самому — тот же запуск локально на машине разработки, посмотреть, действительно ли зкграм после этого корректно получает баланс/адрес через `fetchBalance`/`fetchPrimaryAddress`.
+## Первая полная сборка на Linux: собрано и запущено вживую (2026-08-23)
+
+`main` на `c67bb23` (мерж PR #7) **собирается на Linux целиком и запускается** — 117 МБ бинарник `build/zkgram`, ноль ошибок и ноль предупреждений компилятора. До этого сборка на Linux не проверялась ни разу: весь проект собирался только под Windows (`build.ps1`/`install-tdlib.ps1`), а `build.sh`/`installtdlib.sh` были написаны, но вживую не прогонялись.
+
+**Окружение**: Ubuntu 24.04, 4 ядра, gcc 13. TDLib собрана из исходников через `./installtdlib.sh` (Release, `~/tdlib-install`, ~40 минут). CryptoLayer — публичные `igmunv/cryptolayer` и `igmunv/cryptolayer-module-interface`, склонированы рядом с `zkgram/`, как ожидает `python_bridge.cpp`; `cryptography`+`brotli` доставлены в тот же интерпретатор, которым собирается проект. Проверено отдельно: `import crypto_layer`/`bridge` с этим `sys.path` работает (у `bridge.py` сработала ветка без `file_ingester` — публичный `BaseModule.Listener`, ровно тот случай, который описан в комментарии к `_LISTENER_TAKES_FILE_INGESTER`).
+
+**Рабочая команда сборки — не `build.sh`, а cmake напрямую** (почему — пункты 2 и 3 ниже):
+
+```
+cmake -S . -B build -DPYBIND11_FINDPYTHON=ON -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE=/usr/bin/python3.12 \
+  -DCMAKE_PREFIX_PATH=/root/tdlib-install -DQt6_DIR=/opt/qt6/lib/cmake/Qt6
+cmake --build build --parallel 4
+```
+
+**Четыре препятствия, все реальные:**
+
+1. **Qt 6.8 неоткуда взять штатным способом.** `download.qt.io` и зеркала `qtproject` закрыты сетевой политикой этой машины (403 на CONNECT), то есть рецепт из `build.sh` (`aqtinstall`) там не работает; в apt Ubuntu 24.04 только 6.4.2 при нужных ≥6.8 (см. `QT_MIN_VERSION` и его обоснование). Взял **Qt 6.8.3 из conda-forge** (`micromamba create -p /opt/qt6 -c conda-forge qt6-main qt6-multimedia`) — там есть и приватные заголовки, которые нужны вендоренному lib_ui, и Multimedia. Это рабочий третий вариант в дополнение к aqtinstall/системному Qt, стоит дописать в `build.sh`/`docs/README.md`.
+2. **`find_package(Qt6)` падает на `WrapOpenGL`.** В `DEPS_QT_APT` в `build.sh` нет GL/Vulkan-заголовков: не хватает `libgl1-mesa-dev`, `libegl1-mesa-dev`, `libglu1-mesa-dev`, `libvulkan-dev`, `libxkbcommon-dev`, `libx11-dev`. Ошибка при этом выглядит как "Qt6Widgets найден, но Qt6_FOUND=FALSE", настоящая причина видна только под `--debug-find-pkg=Qt6Widgets` (Qt6Gui → WrapOpenGL).
+3. **`--qt-prefix` ломает сборку, если Qt не системный.** Скрипт кладёт префикс в `CMAKE_PREFIX_PATH`, оттуда `lib_base` начинает брать не только Qt, но и glib того же префикса — и падает на генерации: "Imported target `external_glib` includes non-existent path /opt/qt6/lib/glib-2.0/include" (в conda-пакете есть `.pc`, но нет этих заголовков). Лечится тем, что Qt подключается точечно через `-DQt6_DIR=<prefix>/lib/cmake/Qt6`, а `CMAKE_PREFIX_PATH` остаётся только под TDLib — тогда glib берётся системный, тот, под который в `--deps` и ставятся `libglib2.0-dev`/`gobject-introspection`.
+4. **`g-ir-scanner` падает с `ModuleNotFoundError: giscanner._giscanner`.** Не бага lib_base: у `/usr/bin/g-ir-scanner` абсолютный шебанг `#!/usr/bin/python3`, а `python3` в системе через `update-alternatives` указывал на 3.11, тогда как расширение `_giscanner` из apt собрано под 3.12 (`_giscanner.cpython-312-*.so`). Лечится `update-alternatives --set python3 /usr/bin/python3.12`. Тот же класс проблемы, что и с выбором интерпретатора для pybind11 (см. `PYBIND11_FINDPYTHON`): на машине несколько питонов, и разные части сборки молча берут разные.
+
+**Запуск проверен**: под Xvfb (`DISPLAY=:99`) открывается окно 960×640, Qt Multimedia инициализируется (FFmpeg 7.1.1), крэшей нет, показывается визард "Create a password". Звука в контейнере нет (`PulseAudioService: pa_context_connect() failed`) — ожидаемо. Дальше визард требует пароль и телефон, поэтому саму переписку (и шапку ответа на сообщение из PR #7) отсюда проверить нельзя — нужен реальный вход в Telegram.
+
+**Замечено на скриншоте визарда, требует проверки**: между текстом описания и разделителем поле ввода пароля выглядит пустым — не видно ни рамки, ни плейсхолдера. Может быть нормой (`Ui::InputField` рисует рамку только по фокусу), а может быть регрессом отрисовки после переезда полей на `Ui::InputField` (см. п.6 раздела про lib_ui). Проверять в живом окне, а не по скриншоту.
+
+**Мелочи, которые стоит починить в репозитории:**
+- `build.sh` устарел относительно `CMakeLists.txt`: передаёт `-DZKGRAM_UI` и `-DZKGRAM_VENDOR_LIB_UI`, которых в проекте больше нет (cmake ругается "Manually-specified variables were not used"), а `--help`/`--ui console` по-прежнему обещают консольную сборку, удалённую вместе с этими опциями.
+- В `installtdlib.sh` в гите нет бита `+x` (`./installtdlib.sh` → "Permission denied", нужно `bash installtdlib.sh`).
+- В `DEPS_QT_APT` не хватает GL/Vulkan/X11-пакетов из п.2.
