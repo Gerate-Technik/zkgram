@@ -1,5 +1,7 @@
 #include "core/session.hpp"
 
+#include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <utility>
@@ -25,6 +27,48 @@ std::string logFilePath() {
 }
 
 // Temporary diagnostic-only logging, same as telegram_client.cpp's
+// Does this message look like CryptoLayer traffic rather than somebody's
+// ordinary Telegram text? Everything the crypto stack sends leaves as a
+// space-joined run of WordCoder dictionary words - one short word per
+// ciphertext byte (the transitional level's sworker(), in cryptolayer) - and
+// every packet carries an ECDSA signature ahead of its payload, so even the
+// smallest one runs to some seventy words. Judged by shape rather than
+// against the dictionary itself, which keeps the dictionary file out of this
+// layer; being wrong is cheap either way, since a plain message mistaken for
+// ciphertext is dropped by the transitional level's own decode (it logs the
+// failure and returns) and a packet mistaken for plain text only leaves us
+// where we were before any of this buffering existed.
+bool looksLikeCryptoLayerTraffic(const crypto::Bytes& data) {
+    if (data.size() < 64) {
+        return false;
+    }
+    int tokens = 1;
+    std::size_t tokenBytes = 0;
+    for (std::uint8_t byte : data) {
+        if (byte == ' ') {
+            if (tokenBytes == 0) {
+                return false;  // a run of spaces: WordCoder joins with exactly one
+            }
+            ++tokens;
+            tokenBytes = 0;
+            continue;
+        }
+        // No control characters, no digits, no punctuation - the dictionary
+        // is words only. Bytes >= 0x80 are the continuation bytes of the
+        // dictionary's Cyrillic letters and are left alone.
+        if (byte < 0x80 && std::isalpha(static_cast<unsigned char>(byte)) == 0) {
+            return false;
+        }
+        ++tokenBytes;
+        // The dictionary refuses words longer than 10 characters (WordCoder's
+        // own _check_dict), which is at most 20 bytes of UTF-8 Cyrillic.
+        if (tokenBytes > 20) {
+            return false;
+        }
+    }
+    return tokenBytes > 0 && tokens >= 16;
+}
+
 // logDebug() - see TODO.md, the "Connecting..." investigation.
 void logDebug(const std::string& message) {
     std::ofstream file(logFilePath(), std::ios::app);
@@ -63,8 +107,19 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
         {
             std::lock_guard<std::mutex> lock(conversationsMutex_);
             auto it = conversationOnBytes_.find(chatId);
-            if (it != conversationOnBytes_.end()) {
+            bool draining = drainingCiphertext_.count(chatId) != 0;
+            if (it != conversationOnBytes_.end() && !draining) {
                 onBytes = it->second;
+            } else if (looksLikeCryptoLayerTraffic(data)) {
+                // Nothing to hand this to yet (or a replay of earlier
+                // packets is still in flight, and these must not overtake
+                // it) - hold on to it, see pendingCiphertext_'s own comment
+                // for why dropping it broke the handshake outright.
+                std::deque<PendingPacket>& pending = pendingCiphertext_[chatId];
+                pending.push_back(PendingPacket{data, std::chrono::steady_clock::now()});
+                while (pending.size() > kMaxPendingCiphertext) {
+                    pending.pop_front();
+                }
             }
         }
         if (onBytes) {
@@ -297,9 +352,12 @@ void Session::wireAndStartConversation(ConversationId chatId) {
     // для ЭТОГО чата - сохраняем их, единый диспетчер в конструкторе находит нужный по chatId.
     callbacks.registerReceiver = [this, chatId](std::function<void(const crypto::Bytes&)> onBytes,
                                                  std::function<void(const std::string&)> onFile) {
-        std::lock_guard<std::mutex> lock(conversationsMutex_);
-        conversationOnBytes_[chatId] = std::move(onBytes);
-        conversationOnFile_[chatId] = std::move(onFile);
+        {
+            std::lock_guard<std::mutex> lock(conversationsMutex_);
+            conversationOnBytes_[chatId] = std::move(onBytes);
+            conversationOnFile_[chatId] = std::move(onFile);
+        }
+        drainPendingCiphertext(chatId);
     };
 
     // crypto -> UI: пробрасываем в zkgram::core::UiProvider с привязкой к chatId,
@@ -357,6 +415,8 @@ void Session::wireAndStartConversation(ConversationId chatId) {
         conversations_[chatId] = std::move(cryptoLayer);
     }
 
+    armHandshakeWatchdog(chatId);
+
     // init() blocks (waits on the companion's public key/signature) - see
     // the header comment on initThreads_.
     std::lock_guard<std::mutex> lock(conversationsMutex_);
@@ -369,6 +429,137 @@ void Session::wireAndStartConversation(ConversationId chatId) {
             logDebug("wireAndStartConversation: chatId=" + std::to_string(chatId) + " init() threw: " + e.what());
             uiProvider_->onStatus(chatId, "Encryption", std::string("Failed: ") + e.what());
         }
+    });
+}
+
+// Feeds a chat's held-back ciphertext into the session that just registered
+// itself, oldest first, then lets live traffic through again.
+//
+// On its own thread, not on the caller's: registerReceiver() is called from
+// inside CryptoLayer's own create_session(), i.e. from Python, on the init
+// thread that is about to start the handshake - pushing packets back into
+// the stack from there would re-enter it before it finished setting itself
+// up. The thread is joined in stop(); it does not outlive the Session.
+//
+// While it runs, drainingCiphertext_ makes the dispatcher queue new arrivals
+// instead of delivering them, so a packet arriving mid-replay cannot
+// overtake the ones already waiting.
+void Session::drainPendingCiphertext(ConversationId chatId) {
+    std::lock_guard<std::mutex> lock(conversationsMutex_);
+    if (pendingCiphertext_[chatId].empty()) {
+        pendingCiphertext_.erase(chatId);
+        return;
+    }
+    drainingCiphertext_.insert(chatId);
+    replayThreads_.emplace_back([this, chatId] {
+        // A moment's grace before the first packet goes in. registerReceiver
+        // is called from CryptoLayer's create_session(), and the transitional
+        // level it hands us only gets its own upper/lower levels wired by the
+        // update_levels() call right after that returns - a packet arriving
+        // in between would land in a half-built stack. That window is
+        // microseconds wide on the init thread; this waits far longer than it
+        // needs to, and gives it up immediately if the app is closing.
+        {
+            std::unique_lock<std::mutex> lock(shutdownMutex_);
+            if (shutdownRequested_.wait_for(lock, std::chrono::milliseconds(250),
+                                             [this] { return shuttingDown_; })) {
+                std::lock_guard<std::mutex> conversationsLock(conversationsMutex_);
+                drainingCiphertext_.erase(chatId);
+                return;
+            }
+        }
+        bool droppedStale = false;
+        for (;;) {
+            PendingPacket packet;
+            std::function<void(const crypto::Bytes&)> onBytes;
+            {
+                std::lock_guard<std::mutex> lock(conversationsMutex_);
+                auto pending = pendingCiphertext_.find(chatId);
+                auto receiver = conversationOnBytes_.find(chatId);
+                if (pending == pendingCiphertext_.end() || pending->second.empty() ||
+                    receiver == conversationOnBytes_.end()) {
+                    if (pending != pendingCiphertext_.end()) {
+                        pendingCiphertext_.erase(pending);
+                    }
+                    drainingCiphertext_.erase(chatId);
+                    break;
+                }
+                packet = std::move(pending->second.front());
+                pending->second.pop_front();
+                onBytes = receiver->second;
+            }
+            // Older than the protocol accepts: handing it over would only
+            // have it dropped one level down (transport.py's rworker checks
+            // the packet's own timestamp), so it is dropped here instead and
+            // reported once the queue is done - see below for why this is
+            // worth saying out loud rather than silently ignoring.
+            if (std::chrono::steady_clock::now() - packet.arrived >= kCryptoLayerPacketLifetime) {
+                logDebug("drainPendingCiphertext: chatId=" + std::to_string(chatId) + " dropping a packet held for " +
+                          std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                              std::chrono::steady_clock::now() - packet.arrived)
+                                              .count()) +
+                          "s - past the protocol's own 300s limit");
+                droppedStale = true;
+                continue;
+            }
+            logDebug("drainPendingCiphertext: chatId=" + std::to_string(chatId) + " replaying " +
+                      std::to_string(packet.data.size()) + " bytes held from before the session existed");
+            onBytes(packet.data);
+        }
+        if (!droppedStale) {
+            return;
+        }
+        // The companion started their side more than five minutes ago, and
+        // the protocol cannot recover from that on its own. CryptoLayer
+        // re-sends an unacknowledged packet every 30 seconds forever, but it
+        // re-sends the SAME bytes, timestamp included
+        // (send_with_pending_acknowledgment in transport.py), while the
+        // receiving end throws away anything stamped 300 seconds ago or more
+        // (rworker, same file). So once that window has passed, the first
+        // side's node id can never be accepted again, no matter how long
+        // either of them waits - the handshake is unrecoverable until one of
+        // them starts over. Nothing on this side can repair it: the
+        // timestamp sits inside the signed payload, so it cannot be rewritten
+        // in passing. All that is left is to say exactly that, instead of
+        // leaving two people staring at a progress line forever.
+        uiProvider_->onStatus(chatId, "Encryption",
+                               "Your companion started their encrypted session more than 5 minutes ago, and the "
+                               "protocol refuses packets that old - this handshake cannot complete. Ask them to "
+                               "press \"Start encrypted session\" again, and press it on both sides within about "
+                               "five minutes of each other.");
+    });
+}
+
+// Says out loud that a handshake is not going anywhere.
+//
+// CryptoLayer waits for the companion's node id, signature and public key in
+// three plain `while not ...: sleep(0.1)` loops with no timeout of their own
+// (crypto_layer.py), so a companion who never presses "Start encrypted
+// session" leaves the session waiting silently for as long as the app runs.
+// The status lines it does emit ("Waiting for companion node id...") never
+// change, and there is nothing in them to tell a slow companion from one who
+// is not running zkgram at all. This turns that silence into one explicit
+// message; it deliberately does not cancel anything, since a companion who
+// starts ten minutes later still completes the handshake normally.
+void Session::armHandshakeWatchdog(ConversationId chatId) {
+    watchdogThreads_.emplace_back([this, chatId] {
+        std::unique_lock<std::mutex> lock(shutdownMutex_);
+        if (shutdownRequested_.wait_for(lock, std::chrono::seconds(45), [this] { return shuttingDown_; })) {
+            return;  // the app is closing, nothing to report
+        }
+        lock.unlock();
+        {
+            std::lock_guard<std::mutex> conversationsLock(conversationsMutex_);
+            if (readyConversations_.count(chatId) != 0) {
+                return;  // handshake finished on its own, as it usually does
+            }
+        }
+        logDebug("armHandshakeWatchdog: chatId=" + std::to_string(chatId) + " still not ready after 45s");
+        uiProvider_->onStatus(chatId, "Encryption",
+                               "Still waiting for the companion. An encrypted session needs BOTH sides to press "
+                               "\"Start encrypted session\" in this chat, and within about five minutes of each "
+                               "other - the protocol drops handshake packets older than that (see "
+                               "drainPendingCiphertext).");
     });
 }
 
@@ -436,6 +627,14 @@ void Session::cacheHistory(ConversationId chatId, const std::vector<PlainMessage
 // init thread still gets joined - and an unjoined init thread would be its
 // own std::terminate() when the map is destroyed.
 void Session::stop() noexcept {
+    // Woken first, before anything blocking below: a watchdog is otherwise
+    // asleep for up to 45 seconds and would hold shutdown for that long, and
+    // it has nothing useful to say once the app is closing anyway.
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        shuttingDown_ = true;
+    }
+    shutdownRequested_.notify_all();
     // Threads are moved out and joined WITHOUT holding conversationsMutex_:
     // an init() thread's own work (CryptoLayer callbacks calling back into
     // sendBytes/registerReceiver, see wireAndStartConversation) needs that
@@ -459,6 +658,14 @@ void Session::stop() noexcept {
             threadsToJoin.push_back(std::move(thread));
         }
         initThreads_.clear();
+        for (auto& thread : replayThreads_) {
+            threadsToJoin.push_back(std::move(thread));
+        }
+        replayThreads_.clear();
+        for (auto& thread : watchdogThreads_) {
+            threadsToJoin.push_back(std::move(thread));
+        }
+        watchdogThreads_.clear();
     }
     try {
         telegramClient_.disconnect();

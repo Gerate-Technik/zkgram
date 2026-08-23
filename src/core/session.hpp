@@ -1,5 +1,7 @@
 #pragma once
 
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -135,6 +137,11 @@ public:
 
 private:
     void wireAndStartConversation(ConversationId chatId);
+    // Replays pendingCiphertext_[chatId] into the session that just
+    // registered its receiver - see the definition.
+    void drainPendingCiphertext(ConversationId chatId);
+    // Reports a handshake that is going nowhere - see the definition.
+    void armHandshakeWatchdog(ConversationId chatId);
 
     std::shared_ptr<UiProvider> uiProvider_;
     std::string dataDir_;
@@ -164,6 +171,49 @@ private:
     // which conversation's ingester an incoming message/file belongs to.
     std::map<ConversationId, std::function<void(const crypto::Bytes&)>> conversationOnBytes_;
     std::map<ConversationId, std::function<void(const std::string&)>> conversationOnFile_;
+    // Ciphertext that arrived for a chat before its CryptoLayer session was
+    // there to take it, replayed into that session the moment it registers
+    // itself (drainPendingCiphertext).
+    //
+    // This is what makes two people able to find each other at all. The
+    // handshake opens with each side sending its node id and then waiting
+    // for the other's (crypto_layer.py's node_id_exchange), and until this
+    // existed anything that arrived before the local session was created was
+    // simply dropped by the dispatcher above. So whoever pressed "Start
+    // encrypted session" first had their node id thrown away by the other
+    // side, and no matter who pressed second, one of the two waited for a
+    // packet that had already come and gone - both then sat in that loop
+    // forever, which is exactly what "they never find each other" was.
+    //
+    // Bounded per chat: this holds messages for chats that may never start a
+    // session at all, and a handshake needs only a handful of packets.
+    //
+    // Each one is kept with the moment it arrived, because the protocol puts
+    // a hard limit on how late a packet may be delivered - see
+    // kCryptoLayerPacketLifetime and drainPendingCiphertext().
+    struct PendingPacket {
+        crypto::Bytes data;
+        std::chrono::steady_clock::time_point arrived;
+    };
+    std::map<ConversationId, std::deque<PendingPacket>> pendingCiphertext_;
+    // CryptoLayer's transport level drops any packet whose own timestamp is
+    // 300 seconds or more old ("old packet. bye" in transport.py's rworker),
+    // so replaying anything older than that is pointless - it would be
+    // thrown away at the other end of the call. Mirrored here so the user
+    // can be told what actually happened instead of watching a handshake
+    // that cannot possibly finish.
+    static constexpr std::chrono::seconds kCryptoLayerPacketLifetime{300};
+    static constexpr std::size_t kMaxPendingCiphertext = 32;
+    // Chats whose held-back packets are being replayed right now - the
+    // dispatcher queues new arrivals behind them rather than letting a live
+    // packet overtake the replay.
+    std::set<ConversationId> drainingCiphertext_;
+    std::vector<std::thread> replayThreads_;
+    // One per started conversation, see armHandshakeWatchdog().
+    std::vector<std::thread> watchdogThreads_;
+    std::mutex shutdownMutex_;
+    std::condition_variable shutdownRequested_;
+    bool shuttingDown_ = false;
 };
 
 }  // namespace zkgram::core

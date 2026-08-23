@@ -5913,10 +5913,14 @@ void MainWindow::showMessageContextMenu(const QPoint& pos) {
     // "Forward" asks where to send it, like any messenger, instead of the
     // old behaviour of quietly resending into the chat already open.
     menu->addAction("Forward", [this, text, kind] {
-        qlonglong target = pickForwardTarget();
-        if (target != 0) {
-            forwardTextTo(target, text, replyAuthorLabel(kind));
-        }
+        // Same deferral as the attach menu, for the same reason - see
+        // runAfterMenuClosed(). pickForwardTarget() is a modal QDialog.
+        runAfterMenuClosed([this, text, kind] {
+            qlonglong target = pickForwardTarget();
+            if (target != 0) {
+                forwardTextTo(target, text, replyAuthorLabel(kind));
+            }
+        });
     });
     // Enters the same multi-message selection mode a long-press on this
     // bubble would - see HistoryCanvas::enterSelectionMode()'s own comment.
@@ -6075,6 +6079,27 @@ void MainWindow::sendFilePath(const QString& filePath, const QString& label) {
     appendMessage(currentChatId_, MessageKind::Outgoing, label + filePath, isActive, filePath);
 }
 
+// Runs something after the popup menu that asked for it has closed.
+//
+// A menu action's callback fires while Ui::PopupMenu is still up and still
+// holding Qt's popup mouse/keyboard grab - verified here by watching the X
+// window list: the menu window is still mapped while the file dialog is on
+// screen. Opening a modal from inside that callback therefore spins a nested
+// event loop underneath an active grab. With Qt's own widget dialog that
+// merely looks wrong (the menu hangs around behind it); with a NATIVE file
+// dialog - xdg-desktop-portal or GTK, a window belonging to another process,
+// which is what a normal Linux desktop gives you - the grab means the dialog
+// never receives input at all: the app dims and nothing happens, which is
+// exactly what was reported. Real Telegram Desktop never opens a modal
+// straight out of a menu action either (base::call_delayed/Ui::PostponeCall
+// around every such call site).
+//
+// A queued call is enough: the menu hides and releases the grab as the
+// action finishes, before control returns to the event loop.
+void MainWindow::runAfterMenuClosed(std::function<void()> action) {
+    QMetaObject::invokeMethod(this, std::move(action), Qt::QueuedConnection);
+}
+
 void MainWindow::onSendFileClicked() {
     // Меню над скрепкой вместо сразу открывающегося файлового диалога -
     // как в Telegram, где скрепка сначала спрашивает тип вложения.
@@ -6096,22 +6121,26 @@ void MainWindow::onSendFileClicked() {
     menu->addAction(
         "Photo or Video",
         [this] {
-            QString filePath = QFileDialog::getOpenFileName(
-                this, "Send photo or video", QString(),
-                "Photos and videos (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm);;"
-                "All files (*)");
-            if (!filePath.isEmpty()) {
-                sendFilePath(filePath, "File: ");
-            }
+            runAfterMenuClosed([this] {
+                QString filePath = QFileDialog::getOpenFileName(
+                    this, "Send photo or video", QString(),
+                    "Photos and videos (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm);;"
+                    "All files (*)");
+                if (!filePath.isEmpty()) {
+                    sendFilePath(filePath, "File: ");
+                }
+            });
         },
         &st::zkgramIconPhoto);
     menu->addAction(
         "Document",
         [this] {
-            QString filePath = QFileDialog::getOpenFileName(this, "Send document");
-            if (!filePath.isEmpty()) {
-                sendFilePath(filePath, "File: ");
-            }
+            runAfterMenuClosed([this] {
+                QString filePath = QFileDialog::getOpenFileName(this, "Send document");
+                if (!filePath.isEmpty()) {
+                    sendFilePath(filePath, "File: ");
+                }
+            });
         },
         &st::zkgramIconDocument);
 

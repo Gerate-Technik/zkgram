@@ -351,7 +351,10 @@ private Q_SLOTS:
     // the bubble's own header. One helper because the context menu and the
     // swipe gesture must not disagree about it.
     QString replyAuthorLabel(MessageKind kind) const;
-    // Modal chat picker for Forward: returns the chosen chat id, or 0 if
+    // Defers an action until the popup menu that triggered it has closed -
+    // see its own comment in main_window.cpp for the grab this avoids.
+    void runAfterMenuClosed(std::function<void()> action);
+        // Modal chat picker for Forward: returns the chosen chat id, or 0 if
     // the user cancelled. Lists the chats already known to the sidebar
     // (lastChatListSnapshot_), filtered as you type.
     qlonglong pickForwardTarget();
