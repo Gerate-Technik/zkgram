@@ -423,7 +423,7 @@ main → core::Session::Session → std::make_unique<CryptoLayer> → crypto::Cr
    - Собрано (`build_log101.txt`, чисто, без предупреждений с первого захода) и запущено (`zkgram.exe` живёт, не падает). **Не проверено вживую** — сам список сообщений (скролл, подгрузка старой истории, клик по фото, выделение текста) не тестировался реальным логином, нужна проверка пользователем.
 2. **[ПЕРЕСМОТРЕНО 2026-08-17, отложено] Композитинг обоев чата через `Ui::ChatTheme`.** Проверил реальный API (`src/ui/chat/chat_theme.h`) — это не тонкая замена: `Ui::ChatTheme` рассчитан на полноценную асинхронную систему смены тем (реальные файлы обоев, gift-символы, паттерны, `crl::on_main`-колбэки с воркер-потока для кэширования/анимации перехода между темами) — ничего из этого у zkgram нет и не запланировано. `chat_background.hpp`/`.cpp` (`zkgram::ui::qt::GenerateFreeformGradient`) уже порт настоящего алгоритма (freeform mesh gradient, inverse-distance interpolation между 4 точками — тот же принцип, что у реального tdesktop) и даёт тот же визуальный результат при много меньшем риске. Переход на `Ui::ChatTheme` не даст видимой разницы ценой существенной новой сложности — не делаем, если только не появится причина, отличная от "используем lib_ui ради самого факта".
 3. **[СДЕЛАНО 2026-08-17] `MediaViewer` → `Ui::RpWidget`.** Простой, самодостаточный базовый класс (не в скролл-области, обычный fullscreen-оверлей с ручным `setGeometry(parentWidget()->rect())` в `resizeEvent`) — замена `QWidget` на `Ui::RpWidget` без изменения логики. Не переопределяет `leaveEvent`, конфликта с `final` не было.
-4. **[СДЕЛАНО 2026-08-17] `HamburgerButton`/`MainMenuDimmer`/`MainMenuPanel`/`MenuRow` → `Ui::RpWidget`.** Все четыре — базовый класс `QWidget` → `Ui::RpWidget`. `HamburgerButton`/`MenuRow` оба переопределяли `leaveEvent(QEvent*)` — переведены на `leaveEventHook()` (тот же фикс, что раньше для `SidebarCanvas`: `RpWidgetBase::leaveEvent()` объявлен `final`). Не стали заменять на `Ui::PopupMenu`/`Ui::LayerWidget` — эти виджеты сейчас просто рисуют сами себя (плоская заливка, текст), полноценных выпадающих меню/слоёв с анимацией открытия там нет, так что смысла тащить эти более тяжёлые типы ради самого факта не было; база `Ui::RpWidget` — минимально достаточный шаг. `AuthSlide` (сам класс-контейнер, не его дочерние виджеты, которые уже реальные) остался на `QWidget` — не было в списке, отмечено, не трогалось.
+4. **[СДЕЛАНО 2026-08-17] `HamburgerButton`/`MainMenuDimmer`/`MainMenuPanel`/`MenuRow` → `Ui::RpWidget`.** Все четыре — базовый класс `QWidget` → `Ui::RpWidget`. `HamburgerButton`/`MenuRow` оба переопределяли `leaveEvent(QEvent*)` — переведены на `leaveEventHook()` (тот же фикс, что раньше для `SidebarCanvas`: `RpWidgetBase::leaveEvent()` объявлен `final`). Не стали заменять на `Ui::PopupMenu`/`Ui::LayerWidget` — эти виджеты сейчас просто рисуют сами себя (плоская заливка, текст), полноценных выпадающих меню/слоёв с анимацией открытия там нет, так что смысла тащить эти более тяжёлые типы ради самого факта не было; база `Ui::RpWidget` — минимально достаточный шаг. **[СДЕЛАНО 2026-08-23]** `AuthSlide` (сам класс-контейнер, не его дочерние виджеты, которые уже реальные) тоже переведён на `Ui::RpWidget` — `class AuthSlide : public Ui::RpWidget` (было `QWidget`), `resizeEvent`'s базовый вызов на `Ui::RpWidget::resizeEvent`. Понадобился реальный `#include "ui/rp_widget.h"` в `main_window.hpp` (не просто forward-declaration `class RpWidget;`, как для остальных `Ui::`-типов там — `AuthSlide` от него **наследуется**, значит нужен полный тип уже на этапе объявления класса, а не только указатель на него). `leaveEvent`/`enterEvent` не переопределялись — конфликта с `final` не было. Показ управляется через `QStackedWidget` (сам вызывает `show()`/`hide()` для текущей страницы), так что "RpWidget по умолчанию скрыт" тут не проблема, в отличие от отдельно добавляемых в layout виджетов. Собрано начисто.
 5. **[СДЕЛАНО 2026-08-23] Текстовое выделение/hit-testing в `HistoryCanvas` сверено с `HistoryView::ListWidget`.** Сверял по настоящему исходнику (`telegramdesktop/tdesktop`, `history_view_list_widget.cpp` — на машине сборки его не было, склонирован отдельно), а не по памяти. Нашлись три реальных расхождения, все три закрыты:
    - **Протяжка после двойного клика шла посимвольно.** У Telegram двойной клик переводит жест в `TextSelectType::Words` (`ListWidget::switchToWordSelection`), и дальше КАЖДОЕ движение мыши пересчитывает выделение по границам слов (`Element::selectionFromStates` → `Ui::Text::String::adjustSelection`), пока кнопка не отпущена. У нас двойной клик выделял слово и на этом всё заканчивалось: следующее же движение сбрасывало выделение обратно в посимвольное от точки клика. Теперь `selectType_` (`Chars`/`Words`/`Paragraphs`) живёт до следующего нажатия, а новый `applySelectionRange()` растягивает оба конца до границ слов на каждом move — это и даёт то самое "щёлканье" выделения по словам.
    - **Тройного клика не было вообще.** В Qt нет события тройного клика, Telegram детектит его сам: нажатие внутри `QApplication::doubleClickInterval()` после двойного и в пределах `startDragDistance()` от той же точки (`_trippleClickPoint`/`_trippleClickStartTime` + `validateTrippleClickStartTime()`). Портировано один в один, включая перезапуск таймера при срабатывании (чтобы четвёртый клик не сбрасывал абзац обратно в символы посреди жеста); тройной клик выделяет всё сообщение.
@@ -447,6 +447,110 @@ main → core::Session::Session → std::make_unique<CryptoLayer> → crypto::Cr
 Собрано начисто, запущено под Xvfb — окно поднимается, экран визарда рисуется как раньше. **Вживую (реальный чат, сайдбар, композер) не проверено** — нужен вход в Telegram.
 7. **Цвет по всему приложению — фиолетовый, не настоящий telegram-синий.** `windowBgActive: #8B6FC4`/`windowActiveTextFg: #7B5EA7` в `third_party/desktop-app/lib_ui/ui/colors.palette` — осознанная замена настоящего `#40a7e3`/`#168acd`, сделанная раньше в этой сессии. 2026-08-17 пользователь попросил вернуть настоящий синий ТОЛЬКО на экране входа (`zkgramAuthAccentBg`/`zkgramAuthAccentBgOver`/`zkgramAuthAccentRipple`/`zkgramAuthAccentTextFg`, те же 4 цвета, что были до сдвига в фиолетовый) — остальное приложение (сайдбар, бейджи, ссылки, статус "online" и т.д.) осталось фиолетовым. Это НЕ баг lib_ui-подключения (все эти места уже правильно читают `st::windowBgActive`/`st::windowActiveTextFg` через `.style`-систему) — сколько бы виджетов ни переехало на `lib_ui`, они по-прежнему будут фиолетовыми, пока эти два корневых цвета не поменяют или пока это не признают осознанным выбором бренда. Нужно явное решение пользователя: оставить фиолетовым (осознанный брендинг) или вернуть везде настоящий синий — не трогать без ответа.
 8. **`intro/`/`iv/`/`history/`/`media/` (532 файла в `src/`) — физически лежат, не подключены к сборке.** Не в `CMakeLists.txt`'s `ZKGRAM_SOURCES` вообще, не компилируются. Обсуждалось отдельно 2026-08-17: интеграция требует либо (a) заменить TDLib на родной MTProto-стек tdesktop (`mtproto/`+`main/`+`storage/`+`window/`+`core/` — многонедельная переделка архитектуры, объяснено и сознательно отклонено пользователем в диалоге), либо (b) писать адаптеры, читающие данные из TDLib вместо `Main::Session`, для нужного визуального слоя точечно (то, чем и является этот список — выбор в пользу (b), маленькими кусками, не вендоря сессионный код).
+9. **[СДЕЛАНО 2026-08-23] Лупа поиска стояла далеко слева от поля.** `chatSearchIcon`/`headerSearchIcon` (`Ui::RpWidget`, красят себя `st::zkgramIconSearch` через `paintRequest()`) создавались с `resize(20px, 20px)` **до** `layout->addWidget(...)` — обычный Qt-layout пересчитывает размер дочернего виджета по его `sizeHint()`/size policy на следующем layout-проходе, так что `resize()` — это просто стартовая геометрия, которую layout тут же перезаписывает. `Ui::RpWidget` не переопределяет `sizeHint()`, так что виджету доставался дефолтный (гораздо более широкий) размер — сама иконка рисовалась 20×20 в левом верхнем углу этого широкого блока, а справа оставалось пустое место перед полем, что и читалось как "лупа далеко слева". Фикс — `setFixedSize()` вместо `resize()` в обоих местах (main_window.cpp, `chatSearchIcon`/`headerSearchIcon`): `setFixedSize()` фиксирует и размер, и сам size policy, так что layout больше не может его растянуть. Не проверено вживую.
+
+## Кандидаты на адаптацию под TDLib (не MTProto) — `intro/`/`iv/`/`history/`/`media/`
+
+Запрошено пользователем 2026-08-23: не "вендорить всё", а найти конкретные файлы/подпапки с
+реально маленьким числом зависимостей от `Main::Session`/`mtproto`/`Data::Session`, которые
+можно точечно адаптировать под TDLib-данные (вариант (b) из пункта 8 выше), в приоритете от
+самых дешёвых к самым дорогим. Список ниже — по факту грепа реальных `#include`, не догадка.
+(Заполняется по возвращении фонового агента-исследователя — см. следующее сообщение в этой
+же сессии, если строка ниже ещё не заменена реальными находками.)
+
+Метод: транзитивное дерево `#include` каждого `.cpp`, разрешённое против `src/` +
+`third_party/desktop-app/{lib_ui,lib_base,lib_rpl,lib_crl}`. Число ниже = сколько РАЗНЫХ
+невендоренных tdesktop-заголовков реально достижимо из файла (std/Qt/ffmpeg/OpenAL/cmark не
+считаются). Готовый скрипт — `pf.py` в scratchpad этой сессии (не сохранён в репозитории),
+сырой вывод — `pf_{history,iv,media,intro}.txt` там же.
+
+**Уровень 1 — можно адаптировать прямо сейчас (0-2 недостающих заголовка):**
+
+- **`src/iv/markdown/` — подтверждено.** 15 из 32 `.cpp` имеют ровно **1** пробел
+  (`webview/webview_common.h`); `iv_markdown_slideshow_chrome.cpp` — **0**. На всю папку 9
+  разных недостающих заголовков (`webview/webview_common.h`, `spellcheck/
+  spellcheck_highlight_syntax.h`, `lang/lang_keys.h`, `core/{file_utilities,
+  click_handler_types,credits_amount}.h`, `platform/qt/graphic_qt.h`, `emoji.h`, `logs.h`).
+  Исключение — `iv_markdown_history_view_media.cpp` (**13**, тянет `main/main_session.h`).
+  TDLib-заменитель не нужен вообще — это чистый текст/layout-пайплайн над собственными
+  структурами `Iv::Markdown`.
+- **`src/media/streaming/`.** `media_streaming_file.cpp`/`_loader.cpp`/`_round_preview.cpp`/
+  `_utility.cpp` — **0**. `_reader.cpp` — **1**, `_audio_track.cpp`/`_player.cpp` — **2**,
+  `_video_track.cpp` — **3**. Подтверждённо только ffmpeg, без завязки на данные. Вся связность
+  сосредоточена в двух файлах: `media_streaming_loader_mtproto.cpp` (**7**) и
+  `media_streaming_document.cpp` (**6**). TDLib-заменитель: свой `Loader`-подкласс поверх
+  `td_api::file`+`updateFile` (локальный путь/прогресс скачивания) вместо `LoaderMtproto`.
+- **`src/media/audio/`, `src/media/clip/`.** `media_audio_local_cache.cpp` — **0**;
+  `media_audio_{capture,edit,ffmpeg_loader,loader,loaders}.cpp` и
+  `media_clip_implementation.cpp` — **1** (везде один и тот же `core/file_location.h` — простой
+  path/`FileLocation`-struct, тривиально переписать самим).
+- **`src/media/view/` (только плеер/чром, БЕЗ основного вьювера).**
+  `media_view_playback_progress.cpp` — **1**, `media_view_recognition_selection.cpp` — **1**,
+  `media_view_pip_{opengl,raster}.cpp` — **1**, `media_player_button.cpp` — **0**,
+  `media_player_dropdown.cpp` — **1**.
+- **Следующие кандидаты в `src/history/view/` (не `view/media/`)** — логичное продолжение уже
+  вендоренных `ui/chat/*`: `history_view_element_overlay.cpp` — **0**,
+  `history_view_empty_list_bubble.cpp` — **0**,
+  `controls/history_view_characters_limit.cpp` — **0**,
+  `controls/history_view_compose_ai_button.cpp` — **0**,
+  `media/history_view_media_spoiler.cpp` — **0**, `history_view_top_toast.cpp` — **1**,
+  `history_view_sponsored_click_handler.cpp` — **1**,
+  `reactions/history_view_reactions_tabs.cpp` — **1**,
+  `controls/history_view_voice_record_button.cpp` — **2**,
+  `history_view_drag.cpp`/`history_view_webpage_preview.cpp`/
+  `history_view_keyboard_text_selection.cpp` — **2** каждый.
+
+**Уровень 2 — реально только через адаптер (3-5 пробелов):**
+`history_view_sticker_player.cpp` — **2** (нужен `lottie/lottie_single_player.h`, но сам слой
+рендера стикера отделён от `Data::Document`; TDLib-заменитель: `td_api::sticker` + скачанный
+`.tgs`/`.webm`-путь); `history_view_invoice.cpp` — **3**; `history_view_no_forwards_request.cpp`
+— **3**; `history_view_ephemeral_plate.cpp` — **5**; `media_streaming_instance.cpp` — **4**.
+
+**Уровень 3 — не стоит и пытаться:**
+Основные рендереры `src/history/view/media/` — ПРОТИВОПОЛОЖНОСТЬ гипотезе "нужны только
+пиксели": `history_view_photo.cpp` **16**, `history_view_document.cpp` **18**,
+`history_view_gif.cpp` **19+**, базовый `history_view_media.cpp` **13** (сам тянет
+`dialogs/dialogs_entry.h`, `storage/storage_databases.h`, `api/api_send_progress.h`),
+`history_view_file.cpp` **8**, `history_view_media_grouped.cpp` **12** — все завязаны на
+`HistoryItem`/`Data::Media` целиком, портировать лист без самого `HistoryItem` нельзя.
+`src/intro/` — подтверждённо сильно завязан, кроме ОДНОГО реального исключения:
+`intro_code_input.cpp` — **1** (`lang/lang_keys.h`), настоящий чистый UI-виджет, извлекаем уже
+сейчас. Остальное: `intro_start.cpp` **4**, `intro_signup.cpp` **7**, `intro_email.cpp` **8**,
+`intro_password_check.cpp` **8**, `intro_code.cpp` **9**, `intro_qr.cpp` **10** (не мельче
+соседей, вопреки интуиции), `intro_phone.cpp` **16**, `intro_step.cpp` **24**,
+`intro_widget.cpp` **27** — все на `main/main_account.h`+`mtproto/sender.h`.
+`src/media/stories/` (большинство файлов 8-13) и `media_view_overlay_widget.cpp` (**12+**,
+плюс `platform/platform_overlay_widget.h`) — тоже не стоит трогать.
+
+## Список расхождений с оригинальным дизайном Telegram (не про lib_ui-виджеты, про сам вид)
+
+Запрошено пользователем 2026-08-23. Собрано из уже задокументированных находок этой сессии,
+не выдумано заново:
+
+1. **Фиолетовый акцент по всему приложению вместо telegram-синего** — см. пункт 7 выше,
+   главное расхождение, ждёт решения пользователя.
+2. **Лупа поиска — отдельный виджет-сосед, не оверлей внутри поля** (пункт 6 выше). Реальный
+   Telegram рисует иконку ВНУТРИ рамки поля (`textMargins` поля резервирует место слева под
+   неё), `Ui::InputField` такого встроенного слота не даёт — у нас `Ui::RpWidget`-иконка рядом
+   в layout. Визуально похоже, но не идентично (у настоящего Telegram нет видимого зазора
+   между иконкой и рамкой поля — они как один элемент).
+3. **`recordTime_` (таймер записи голосового) потерял моноширинный шрифt** при переезде на
+   `st::`-стилизацию (пункт 6) — вендоренный `.style`-DSL в этом поднаборе не поддерживает
+   произвольное семейство шрифта, только размер/начертание. Цифры при обновлении визуально
+   "прыгают", не выровнены по ширине, как в реальном клиенте.
+4. **Выделение текста не переходит на соседние сообщения** (пункт 5 выше, "осознанное
+   расхождение") — у настоящего Telegram протяжка мимо пузыря продолжает выделение в соседние
+   сообщения; у нас выделение всегда остаётся внутри одного пузыря, а множественный выбор
+   сообщений — отдельный режим (долгое нажатие). Это другая, уже реализованная модель, не
+   баг — но если цель "прямо как в оригинале", это расхождение.
+5. **Обои чата — не через `Ui::ChatTheme`** (пункт 2 выше) — свой генератор градиента
+   (`GenerateFreeformGradient`) даёт визуально похожий, но не идентичный результат: нет
+   gift-символов, нет полноценной системы тайловых паттернов реального Telegram (только один
+   PNG, статично затонированный), нет анимированного перехода между темами.
+6. **`companionLabel_`** — реальный `Ui::FlatLabel` с реальным стилем, но всё ещё под вопросом
+   стабильности (см. пункт 1 в основном списке выше) — если снова откатится на `QLabel`, само
+   отображение (шрифт/цвет) останется тем же через `applyLabelStyle()`, так что визуально
+   это НЕ то расхождение, которое стоит чинить отдельно.
 
 ## НЕ часть lib_ui-миграции: Monero-кошелёк не подключается (2026-08-17, отложено по просьбе пользователя)
 

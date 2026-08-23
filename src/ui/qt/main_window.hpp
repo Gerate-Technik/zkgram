@@ -12,6 +12,12 @@
 #include <QVector>
 #include <QWidget>
 
+// Full type, not a forward declaration: AuthSlide below inherits from
+// Ui::RpWidget, which needs the complete type at class-definition time
+// (unlike the other Ui:: forward decls below, which only ever appear here
+// as pointer members).
+#include "ui/rp_widget.h"
+
 #include <cstdint>
 #include <functional>
 
@@ -92,7 +98,7 @@ private:
 // changes, see runSlide(). This mirrors how tdesktop's own intro widget
 // reuses one layout across its steps rather than allocating a new page per
 // step.
-class AuthSlide : public QWidget {
+class AuthSlide : public Ui::RpWidget {
     Q_OBJECT
 
 public:
@@ -695,10 +701,11 @@ private:
     Ui::InputField* searchInput_;
     QWidget* headerRow_;
     QLabel* companionAvatar_;
-    // NOT migrated to Ui::FlatLabel - see the crash comment at its own
-    // construction site in main_window.cpp (real dynamic chat-title text
-    // crashed Ui::Text::BlockParser, root cause not found yet).
-    QLabel* companionLabel_;
+    Ui::FlatLabel* companionLabel_;
+    // FlatLabel has no public text getter (unlike QLabel::text()) - tracked
+    // separately for the one read-back use (forwarding a message shows
+    // "You" vs the companion's own name, see MainWindow::replyAuthorLabel).
+    QString companionName_;
     // Shown instead of headerRow_ while HistoryCanvas is in multi-message
     // selection mode (see HistoryCanvas::onSelectionModeChanged) - "N
     // selected" plus Forward/Copy/Delete, matching real Telegram's own

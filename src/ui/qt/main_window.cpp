@@ -181,14 +181,13 @@ void lockButtonSize(QWidget* button) {
     button->setFixedSize(button->size());
 }
 
-// A plain QLabel wearing a real Ui::FlatLabel style's values. All three
-// labels this is used for (companionLabel_/plainSendWarning_/recordTime_)
-// were real Ui::FlatLabel once and were reverted - one crashed inside
-// Ui::Text::BlockParser on real chat titles, one went invisible, see
-// TODO.md - so they stay QLabel, but their look no longer lives in a
-// stylesheet: the font and the text color are read from the very same
-// st::zkgram* FlatLabel declarations the FlatLabel version used, so
-// reverting the widget type did not also revert to hand-picked hex.
+// A plain QLabel wearing a real Ui::FlatLabel style's values - used where a
+// widget was tried as Ui::FlatLabel and reverted rather than left on
+// hand-picked hex (plainSendWarning_/recordTime_, see TODO.md for why:
+// plainSendWarning_ went invisible, recordTime_ was reverted as a
+// precaution in the same pass). companionLabel_ is back on real
+// Ui::FlatLabel as of 2026-08-23 (see its own construction-site comment)
+// and no longer uses this helper.
 void applyLabelStyle(QLabel* label, const style::FlatLabel& labelStyle) {
     label->setFont(labelStyle.style.font);
     QPalette palette = label->palette();
@@ -3468,12 +3467,12 @@ void AuthSlide::recenterCard() {
 }
 
 void AuthSlide::resizeEvent(QResizeEvent* event) {
-    QWidget::resizeEvent(event);
+    Ui::RpWidget::resizeEvent(event);
     recenterCard();
     update();
 }
 
-AuthSlide::AuthSlide(QWidget* parent) : QWidget(parent) {
+AuthSlide::AuthSlide(QWidget* parent) : Ui::RpWidget(parent) {
     setObjectName("authSlide");
 
     // logo_ sits above card_ as a plain sibling (see its own header
@@ -3732,7 +3731,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // overlaid icon, not pixel-identical, but real lib_ui/real style
     // values rather than a hand-painted QLineEdit.
     auto* chatSearchIcon = new Ui::RpWidget(searchRow);
-    chatSearchIcon->resize(style::ConvertScale(20), style::ConvertScale(20));
+    // setFixedSize(), not resize(): this widget is about to be added to
+    // searchRowLayout below, and a QLayout re-sizes its children according
+    // to their own sizeHint()/size policy on the next layout pass - a
+    // plain resize() call is just an initial geometry that the layout
+    // immediately overrides. Ui::RpWidget does not override sizeHint(), so
+    // without setFixedSize() the layout gave it Qt's default (much wider)
+    // size, leaving the 20x20 painted icon sitting in the corner of a
+    // wide empty box - which is exactly the "icon shifted far left of the
+    // field" bug this fixes.
+    chatSearchIcon->setFixedSize(style::ConvertScale(20), style::ConvertScale(20));
     chatSearchIcon->paintRequest(
     ) | rpl::on_next(
         [chatSearchIcon] {
@@ -3807,26 +3815,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Real info/info.style: topBarInfoButtonInnerSize: 42px.
     companionAvatar_->setFixedSize(style::ConvertScale(42), style::ConvertScale(42));
     companionAvatar_->hide();  // no chat selected yet, see onChatListItemClicked
-    // REVERTED to QLabel (2026-08-17): Ui::FlatLabel here crashed on the
-    // very first real chat click - Ui::Text::BlockParser::parse() (inside
-    // FlatLabel::setText -> Text::String::setText) segfaulted on a null/
-    // wild pointer given the chat's real TDLib title (dynamic content),
-    // while the exact same st::zkgramCompanionLabel style with the fixed
-    // string "zkgram" at construction did not crash, and AuthSlide's own
-    // FlatLabels (title_/subtitle_, same defaultFlatLabel/defaultTextStyle
-    // ancestry) call setText() repeatedly without issue. Root cause not
-    // found yet (crash dump analysis via cdb pointed at BlockParser
-    // dereferencing a small/invalid address, not obviously tied to any one
-    // style field) - reverted rather than guessed at further, since a
-    // crash on the single most common interaction (opening a chat) is not
-    // acceptable to leave in place while still investigating. See TODO.md.
-    companionLabel_ = new QLabel("zkgram", headerRow_);
+    // RE-ATTEMPTED as Ui::FlatLabel (2026-08-23), on a concrete new lead
+    // rather than a blind retry: Ui::Text::BlockParser (labels.cpp:34's
+    // _labelOptions path, same one every FlatLabel::setText(QString) call
+    // goes through - see BlockParser::parse(), text_block_parser.cpp:701)
+    // has a documented history of crashing on specific character sequences
+    // (see its own comment, text_block_parser.cpp:603-615, citing
+    // telegramdesktop/tdesktop#7005) - real chat titles are the one piece
+    // of content in this whole app that is fully attacker/TDLib-controlled
+    // and unpredictable, unlike every other FlatLabel here (AuthSlide's
+    // title_/subtitle_, all fixed strings). The other concrete, cheap-to-
+    // fix lead: setConversationTitle() below used to be able to pass an
+    // EMPTY string through if TDLib ever reports one (a not-yet-resolved
+    // chat, a deleted account) - conversationTitles_.value(id, "zkgram")
+    // only falls back to "zkgram" when the KEY is absent, not when the
+    // stored value is empty, so an empty title could reach setText() even
+    // though the whole rest of the app never saw an empty FlatLabel before.
+    // Guarded that specific case at the call site (see setConversationTitle
+    // below). This is still not a proven root cause - if the crash comes
+    // back, that rules out the empty-title theory specifically, not
+    // FlatLabel/BlockParser in general.
+    companionLabel_ = new Ui::FlatLabel(headerRow_, QString("zkgram"), st::zkgramCompanionLabel);
+    companionLabel_->show();
     companionLabel_->setObjectName("companionLabel");
-    // Still a QLabel (the Ui::FlatLabel attempt crashed on real chat titles,
-    // see TODO.md), but no longer styled by a stylesheet rule: font and
-    // color come from the same st::zkgramCompanionLabel declaration the
-    // FlatLabel used, so both roads lead to the same palette values.
-    applyLabelStyle(companionLabel_, st::zkgramCompanionLabel);
     // Per-chat secret-mode toggle - see secretModeOn_'s own comment in
     // the header for what this actually gates. Hidden by default
     // (updateSecretModeIndicator() shows it only once the current chat
@@ -3863,7 +3874,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     headerLayout->addWidget(secretModeToggle_);
     headerLayout->addStretch();
     auto* headerSearchIcon = new Ui::RpWidget(headerRow_);
-    headerSearchIcon->resize(style::ConvertScale(20), style::ConvertScale(20));
+    // setFixedSize(), not resize() - same fix as chatSearchIcon above.
+    headerSearchIcon->setFixedSize(style::ConvertScale(20), style::ConvertScale(20));
     headerSearchIcon->paintRequest(
     ) | rpl::on_next(
         [headerSearchIcon] {
@@ -4564,7 +4576,7 @@ void MainWindow::quoteForReply(qlonglong chatId, qlonglong replyToMessageId, QSt
 }
 
 QString MainWindow::replyAuthorLabel(MessageKind kind) const {
-    return kind == MessageKind::Outgoing ? QString("You") : companionLabel_->text();
+    return kind == MessageKind::Outgoing ? QString("You") : companionName_;
 }
 
 qlonglong MainWindow::pickForwardTarget() {
@@ -5090,7 +5102,19 @@ void MainWindow::onChatListItemClicked(qlonglong chatId) {
     }
 
     QString title = conversationTitles_.value(currentChatId_, "zkgram");
+    if (title.isEmpty()) {
+        // conversationTitles_.value(id, "zkgram") only falls back to
+        // "zkgram" when the KEY is absent - TDLib can report a genuinely
+        // empty title (chat not fully resolved yet, a deleted account),
+        // which stores an empty QString under an existing key and reaches
+        // here as "". See companionLabel_'s own construction-site comment
+        // for why an empty FlatLabel::setText() is one live theory for the
+        // BlockParser crash this class had - guarded here regardless of
+        // whether that theory is the actual cause.
+        title = "Unknown";
+    }
     companionLabel_->setText(title);
+    companionName_ = title;
     companionAvatar_->setPixmap(chatAvatarPixmap(title, currentChatId_, conversationPhotoPaths_.value(currentChatId_),
                                                   style::ConvertScale(42)));
     companionAvatar_->show();

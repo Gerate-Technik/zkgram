@@ -44,6 +44,10 @@ build_log*.txt
 .vscode/
 .idea/
 .claude/
+# Personal session logs/notes and machine-local Claude Code settings, split
+# out of .claude/ so .claude/ itself (CLAUDE.md/UI.md - project convention,
+# not personal) can be pushed later without also pushing this.
+.private/
 CMakeCache.txt
 CMakeFiles/
 
