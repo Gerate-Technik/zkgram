@@ -104,6 +104,16 @@ public:
         (void)name;
     }
 
+    // The other side has read every outgoing message up to and including
+    // messageId in this conversation - drives the single/double tick, see
+    // telegram::TelegramClient::onOutgoingReadUpTo() for where the value
+    // comes from and why it says nothing about what we have read. Same
+    // not-pure-virtual reasoning as the callbacks above.
+    virtual void onOutgoingReadUpTo(ConversationId conversation, std::int64_t messageId) {
+        (void)conversation;
+        (void)messageId;
+    }
+
     // A voice note's audio finished downloading after the fact - see
     // PlainMessage::voiceNotePath. Same not-pure-virtual reasoning.
     virtual void onHistoryVoiceReady(ConversationId conversation, std::int64_t messageId, const std::string& path) {

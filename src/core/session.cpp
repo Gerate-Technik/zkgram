@@ -143,6 +143,9 @@ Session::Session(std::shared_ptr<UiProvider> uiProvider, std::string dataDir, st
             }
             uiProvider_->onHistorySenderNameReady(chatId, messageId, name);
         });
+    telegramClient_.onOutgoingReadUpTo([this](telegram::ChatId chatId, telegram::MessageId messageId) {
+        uiProvider_->onOutgoingReadUpTo(chatId, messageId);
+    });
     telegramClient_.onHistoryVoiceReady(
         [this](telegram::ChatId chatId, telegram::MessageId messageId, const std::string& path) {
             if (MessageData* existing = dataRegistry_.message(chatId, messageId)) {

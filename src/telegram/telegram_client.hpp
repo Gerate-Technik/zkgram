@@ -182,6 +182,16 @@ public:
     // PlainMessage::voiceNotePath) - same pattern as onHistoryPhotoReady.
     void onHistoryVoiceReady(std::function<void(ChatId, MessageId, const std::string& path)> callback);
 
+    // Fires when the other side's read marker moves in a chat: every
+    // outgoing message up to and including this id has been read by them.
+    // TDLib reports it as updateChatReadOutbox, and also carries the
+    // current value on the chat itself (last_read_outbox_message_id), which
+    // is what makes an already-open conversation show the right ticks
+    // without waiting for the next update. Receiving this says nothing
+    // about what WE have read - that is updateChatReadInbox, a different
+    // marker in the other direction.
+    void onOutgoingReadUpTo(std::function<void(ChatId, MessageId)> callback);
+
     // The logged-in account's own display name/username (td_api::getMe) -
     // one-shot, not a standing subscription, and not tied to any chat. Used
     // for the app's own profile panel (see MainWindow's hamburger menu),

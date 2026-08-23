@@ -435,6 +435,17 @@ struct TelegramClient::Impl {
                 onNewMessage(*update->message_);
                 break;
             }
+            case td_api::updateMessageSendSucceeded::ID: {
+                // One of our own messages just got its permanent id (what
+                // it carried while sending was temporary, see
+                // onNewMessage) - the same message, now final, goes through
+                // the same path.
+                auto* update = static_cast<td_api::updateMessageSendSucceeded*>(object.get());
+                if (update->message_ != nullptr) {
+                    onNewMessage(*update->message_);
+                }
+                break;
+            }
             case td_api::updateFile::ID: {
                 auto* update = static_cast<td_api::updateFile*>(object.get());
                 onFileUpdate(*update->file_);
@@ -461,6 +472,17 @@ struct TelegramClient::Impl {
             case td_api::updateChatReadInbox::ID: {
                 auto* update = static_cast<td_api::updateChatReadInbox*>(object.get());
                 onChatUnreadCountUpdate(update->chat_id_, update->unread_count_);
+                break;
+            }
+            case td_api::updateChatReadOutbox::ID: {
+                // The OTHER side's marker: what they have read of what we
+                // sent (see onOutgoingReadUpTo's own comment). Nothing is
+                // cached here - the UI keeps the per-chat value, this only
+                // has to arrive.
+                auto* update = static_cast<td_api::updateChatReadOutbox*>(object.get());
+                if (onOutgoingReadUpTo_) {
+                    onOutgoingReadUpTo_(update->chat_id_, update->last_read_outbox_message_id_);
+                }
                 break;
             }
             case td_api::updateChatPhoto::ID: {
@@ -651,6 +673,13 @@ struct TelegramClient::Impl {
         ChatEntry& entry = chats_[chat.id_];
         entry.title = chat.title_;
         entry.unreadCount = chat.unread_count_;
+        // The read marker a chat already carries when it first arrives.
+        // Without this, a conversation opened in a session where no
+        // updateChatReadOutbox happens to fire shows every outgoing message
+        // as merely delivered, however long ago the other side read it.
+        if (chat.last_read_outbox_message_id_ != 0 && onOutgoingReadUpTo_) {
+            onOutgoingReadUpTo_(chat.id_, chat.last_read_outbox_message_id_);
+        }
         if (chat.last_message_ != nullptr) {
             entry.lastMessagePreview = previewFor(*chat.last_message_);
             entry.lastMessageDate = chat.last_message_->date_;
@@ -1295,6 +1324,18 @@ struct TelegramClient::Impl {
         if (message.content_ == nullptr) {
             return;
         }
+        // A message this device is still sending. TDLib gives it a
+        // temporary id now and the permanent one only later, with
+        // updateMessageSendSucceeded - which routes the finished message
+        // back into this same function, so nothing is lost by waiting.
+        // Reporting it here would hand the UI an id that stops existing a
+        // moment later, and that id is exactly what a reply link and the
+        // read marker are keyed on. A send that fails keeps a
+        // sending_state_ forever and is simply never reported, which is
+        // correct: it never became a message on the server.
+        if (message.sending_state_ != nullptr) {
+            return;
+        }
         ChatId chatId = message.chat_id_;
         bool incoming = !message.is_outgoing_;
 
@@ -1627,6 +1668,7 @@ struct TelegramClient::Impl {
     std::map<std::int32_t, PendingHistoryPhoto> pendingHistoryPhotos_;
     std::function<void(ChatId, MessageId, const std::string&)> onHistoryPhoto_;
     std::function<void(ChatId, MessageId, const std::string&)> onHistorySenderName_;
+    std::function<void(ChatId, MessageId)> onOutgoingReadUpTo_;
 
     // Reuses PendingHistoryPhoto's shape (chatId, messageId) - same idea,
     // a different content type, see requestHistoryVoice()'s own comment.
@@ -1730,6 +1772,10 @@ void TelegramClient::onFileReceived(std::function<void(ChatId, const std::string
 
 void TelegramClient::onHistoryPhotoReady(std::function<void(ChatId, MessageId, const std::string&)> callback) {
     impl_->onHistoryPhoto_ = std::move(callback);
+}
+
+void TelegramClient::onOutgoingReadUpTo(std::function<void(ChatId, MessageId)> callback) {
+    impl_->onOutgoingReadUpTo_ = std::move(callback);
 }
 
 void TelegramClient::onHistorySenderNameReady(std::function<void(ChatId, MessageId, const std::string&)> callback) {

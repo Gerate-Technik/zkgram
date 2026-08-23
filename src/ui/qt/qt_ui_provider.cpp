@@ -107,6 +107,11 @@ void QtUiProvider::onHistorySenderNameReady(zkgram::core::ConversationId convers
                                Q_ARG(QString, QString::fromStdString(name)));
 }
 
+void QtUiProvider::onOutgoingReadUpTo(zkgram::core::ConversationId conversation, std::int64_t messageId) {
+    QMetaObject::invokeMethod(window_, "updateOutgoingReadUpTo", kFireAndForget, Q_ARG(qlonglong, conversation),
+                               Q_ARG(qlonglong, static_cast<qlonglong>(messageId)));
+}
+
 void QtUiProvider::onHistoryVoiceReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
                                         const std::string& path) {
     // A voice note's audio and a photo's image both just replace

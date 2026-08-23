@@ -32,6 +32,7 @@ public:
                               const std::string& path) override;
     void onHistorySenderNameReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
                                    const std::string& name) override;
+    void onOutgoingReadUpTo(zkgram::core::ConversationId conversation, std::int64_t messageId) override;
     void onHistoryVoiceReady(zkgram::core::ConversationId conversation, std::int64_t messageId,
                               const std::string& path) override;
 

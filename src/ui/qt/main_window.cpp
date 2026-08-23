@@ -1041,6 +1041,12 @@ int minBubbleContentWidth() { return style::ConvertScale(160); }
 // "HH:mm" span, and the side of the square the outgoing tick is drawn in.
 // Real chat.style: msgDateFont: font(13px).
 int bubbleMetaFontSize() { return style::ConvertScale(13); }
+// Gap between the timestamp and the tick, and between the message text and
+// the metadata block as a whole - real chat.style: historySendStateSkip is
+// the room the tick takes next to the date, historyItemDateSpace (13px) the
+// room the date needs after the text.
+double metaTickGap() { return style::ConvertScale(3.0); }
+double metaTextGap() { return style::ConvertScale(13.0); }
 double tickSize() { return style::ConvertScale(13.0); }
 
 // Paints one bubble's body (fill, shadow, corners, tail) at bodyRect via
@@ -1156,18 +1162,23 @@ struct HistoryItem {
     QString voicePath;
     QByteArray voiceWaveform;
 
-    // Outgoing "sent" tick. Drawn as a Glyph::Check over the run of
-    // non-breaking spaces of this width reserved at the end of the text (see
-    // where the item is measured, and paintSentTick) rather than being a
-    // U+2713 character in the document itself: as a character it came out in
-    // whatever the system font happened to have for it, at body-text weight,
-    // and it inherited the timestamp's baseline instead of sitting centred
-    // on the line the way Telegram's does.
+    // The bubble's own metadata: the timestamp, plus the delivery tick on an
+    // outgoing message. Painted by paintMessageMeta() into the bubble's
+    // bottom-right corner, over a run of non-breaking spaces of the same
+    // width reserved at the end of the text (see buildItem) - deliberately
+    // not part of the document's own text. Two reasons: a tick as a U+2713
+    // character came out in whatever the system font happened to have for
+    // it, at body-text weight; and an inline timestamp sits wherever the
+    // last line happens to end, so on any bubble wider than its own last
+    // line - which is most of them once the text wraps - it ended up
+    // stranded mid-bubble instead of pinned to the corner real Telegram
+    // pins it to.
+    QString metaText;
+    double metaWidth = 0.0;
     bool showTick = false;
     // Turns the sent tick into the "read by them" double tick - see
-    // HistoryEntry::readByPeer and paintSentTick().
+    // HistoryEntry::readByPeer and MainWindow::updateOutgoingReadUpTo().
     bool readByPeer = false;
-    double tickSlotWidth = 0.0;
 
     // shared_ptr, not unique_ptr: QVector<HistoryItem> (items_ below) needs
     // HistoryItem to stay copy-constructible for some of its own internal
@@ -2507,24 +2518,28 @@ private:
             // comes from otherwise.
             QDateTime when =
                 entry.date > 0 ? QDateTime::fromSecsSinceEpoch(entry.date) : QDateTime::currentDateTime();
-            QString time = when.toString("HH:mm");
-            // Space for the tick, not the tick itself - it is painted over
-            // this run afterwards (see HistoryItem::showTick/paintSentTick).
-            // Non-breaking spaces specifically: ordinary trailing spaces are
-            // excluded from QTextLine::naturalTextWidth(), which is what
-            // paintSentTick measures the run back from, and they would not
-            // widen the bubble to make room either.
-            QString tickSlot;
+            QFont metaFont = bubbleFont;
+            metaFont.setPixelSize(bubbleMetaFontSize());
+            QFontMetricsF metaMetrics(metaFont);
+            item.metaText = when.toString("HH:mm");
+            item.metaWidth = metaMetrics.horizontalAdvance(item.metaText);
             if (entry.kind == MessageKind::Outgoing) {
-                QFont metaFont = bubbleFont;
-                metaFont.setPixelSize(bubbleMetaFontSize());
-                double spaceWidth = QFontMetricsF(metaFont).horizontalAdvance(QChar(0x00A0));
-                int spaces = spaceWidth > 0.0 ? static_cast<int>(std::ceil((tickSize() + 2.0) / spaceWidth)) : 4;
-                tickSlot = QString(spaces, QChar(0x00A0));
                 item.showTick = true;
                 item.readByPeer = entry.readByPeer;
-                item.tickSlotWidth = spaces * spaceWidth;
+                item.metaWidth += metaTickGap() + tickSize();
             }
+            // Space for the metadata, not the metadata itself - it is
+            // painted into the bubble's corner afterwards, see
+            // paintMessageMeta(). Non-breaking spaces specifically:
+            // ordinary trailing spaces are excluded from
+            // QTextLine::naturalTextWidth() and from the document's own
+            // idealWidth(), so they would neither hold the space open on
+            // the last line nor widen a one-line bubble to make room.
+            double spaceWidth = metaMetrics.horizontalAdvance(QChar(0x00A0));
+            int spaces = spaceWidth > 0.0
+                              ? static_cast<int>(std::ceil((item.metaWidth + metaTextGap()) / spaceWidth))
+                              : 8;
+            QString metaSlot(spaces, QChar(0x00A0));
             QString escaped = entry.text.toHtmlEscaped();
             escaped.replace("\n", "<br>");
 
@@ -2535,7 +2550,7 @@ private:
             // Built into this same QTextDocument rather than painted as its
             // own block with its own geometry: the document is what every
             // size in this class is derived from (idealWidth, size().height()
-            // and paintSentTick's line metrics), so a header inside it is
+            // and paintMessageMeta's line metrics), so a header inside it is
             // measured and positioned by construction. A separately painted
             // one would have to have its height added by hand to each of the
             // paths that compute item.height, and any miss would put the
@@ -2594,17 +2609,13 @@ private:
                 item.textLength = measuring.toPlainText().length();
             }
 
-            // Phase 6b: real msgInDateFg/msgOutDateFg (the old #a0acb6 was
-            // already the real msgInDateFg value, by luck, but was also
-            // being used for outgoing messages, whose real timestamp color
-            // is msgOutDateFg, a green matching the outgoing bubble).
-            const QColor dateColor =
-                (entry.kind == MessageKind::Outgoing ? st::msgOutDateFg : st::msgInDateFg)->c;
-            html = QString("%1&nbsp;&nbsp;<span style=\"color:%2; font-size:%3px;\">%4%5</span>")
+            // Only the reservation goes into the document; the timestamp
+            // itself, in real msgInDateFg/msgOutDateFg, is painted over it
+            // by paintMessageMeta().
+            html = QString("%1<span style=\"font-size:%2px;\">%3</span>")
                        .arg(escaped)
-                       .arg(dateColor.name())
                        .arg(bubbleMetaFontSize())
-                       .arg(time, tickSlot);
+                       .arg(metaSlot);
             if (entry.kind == MessageKind::Incoming && !entry.attached && !entry.senderName.isEmpty()) {
                 html = QString("<b style=\"color:#3a8ee6;\">%1</b><br>%2").arg(entry.senderName.toHtmlEscaped(), html);
             }
@@ -2757,8 +2768,8 @@ private:
         painter.save();
         painter.translate(bubbleLeft + paddingH, bubbleTop + paddingV);
         drawDocument(painter, item, isSelected);
-        if (item.showTick) {
-            paintSentTick(painter, item);
+        if (!item.metaText.isEmpty()) {
+            paintMessageMeta(painter, item);
         }
         painter.restore();
         drawSelectionCheckbox(painter, index, bubbleTop, bubbleOuterHeight);
@@ -2945,7 +2956,19 @@ private:
     // from the bubble's bottom-right corner: the last line is not
     // necessarily the widest one, so the timestamp this follows can sit well
     // to the left of the bubble's right edge.
-    void paintSentTick(QPainter& painter, const HistoryItem& item) const {
+    // Timestamp, and the delivery tick on our own messages, in the bubble's
+    // bottom-right corner - where real Telegram puts them
+    // (HistoryView::Message draws its "info" against the bubble's right
+    // edge, not against the end of the text). Right-aligned to
+    // item.contentWidth, which IS the bubble's inner width, so a message
+    // whose last line is shorter than the bubble - every wrapped message
+    // whose width was set by an earlier line - still keeps its timestamp in
+    // the corner instead of trailing the last word. The space is reserved
+    // on the last line in buildItem(), so nothing here can overlap text: if
+    // the last line plus the metadata does not fit, the reserved run wraps
+    // and the metadata gets a line of its own, again exactly as in
+    // Telegram.
+    void paintMessageMeta(QPainter& painter, const HistoryItem& item) const {
         QTextBlock block = item.doc->lastBlock();
         QTextLayout* layout = block.layout();
         if (layout == nullptr || layout->lineCount() == 0) {
@@ -2953,19 +2976,29 @@ private:
         }
         QTextLine line = layout->lineAt(layout->lineCount() - 1);
         QPointF blockOrigin = item.doc->documentLayout()->blockBoundingRect(block).topLeft();
-        double right = blockOrigin.x() + line.x() + line.naturalTextWidth();
+        double baseline = blockOrigin.y() + line.y() + line.ascent();
         double centerY = blockOrigin.y() + line.y() + line.height() / 2.0;
-        // Centred in the reserved run rather than flush to its start, so the
-        // slack left over from rounding the run up to a whole number of
-        // spaces is split between the timestamp side and the bubble's margin.
-        double left = right - item.tickSlotWidth + (item.tickSlotWidth - tickSize()) / 2.0;
-        // Double tick once the other side has read it, single while it is
-        // only delivered - the same two assets real Telegram Desktop uses
-        // (history_sent / history_received). Both are the same size, so the
-        // reserved run measured in buildItem() fits either way and the
-        // bubble does not change width when a read receipt arrives.
-        paintGlyph(painter, QRectF(left, centerY - tickSize() / 2.0, tickSize(), tickSize()),
-                    item.readByPeer ? Glyph::CheckDouble : Glyph::Check);
+        double right = item.contentWidth;
+
+        painter.save();
+        if (item.showTick) {
+            // Double tick once the other side has read it, single while it
+            // is only delivered - the same two assets real Telegram Desktop
+            // uses (history_sent / history_received). Both are the same
+            // size, so nothing moves when a read receipt arrives.
+            paintGlyph(painter, QRectF(right - tickSize(), centerY - tickSize() / 2.0, tickSize(), tickSize()),
+                        item.readByPeer ? Glyph::CheckDouble : Glyph::Check);
+            right -= tickSize() + metaTickGap();
+        }
+        QFont metaFont = painter.font();
+        metaFont.setPixelSize(bubbleMetaFontSize());
+        painter.setFont(metaFont);
+        // Real msgInDateFg/msgOutDateFg (msgOutDateFg is the green matching
+        // the outgoing bubble, not the same gray as an incoming one).
+        painter.setPen((item.kind == MessageKind::Outgoing ? st::msgOutDateFg : st::msgInDateFg)->c);
+        double textWidth = QFontMetricsF(metaFont).horizontalAdvance(item.metaText);
+        painter.drawText(QPointF(right - textWidth, baseline), item.metaText);
+        painter.restore();
     }
 
     // Recomputes top_ for every item from index onward, based on each
@@ -5691,6 +5724,60 @@ void MainWindow::appendConversationFileReceived(qlonglong chatId, const QString&
     appendMessage(chatId, MessageKind::Incoming, "File: " + filePath, /*isSecret=*/true, filePath);
 }
 
+// Matches TDLib's echo of one of our own sends against the optimistic copy
+// appendMessage() already drew for it, and fills in the real message id (and
+// the server's own timestamp) on that copy. Returns false when nothing here
+// matches - see the caller for what that means.
+//
+// Matching is by content, not by a pending-send queue: TDLib gives a message
+// a temporary id on send and swaps it for the permanent one later
+// (updateMessageSendSucceeded), and this code deliberately does not track
+// that handshake - it only ever sees the finished message. Text equality
+// covers a plain send; a file send's optimistic copy holds "<label><path>"
+// as its text while the echo carries TDLib's own preview ("Photo", or the
+// document's file name), so those match on the file name instead. Oldest
+// unmatched copy first, so sending the same text twice fills the two in the
+// order they were sent.
+bool MainWindow::backfillOutgoingMessageId(qlonglong chatId, qlonglong messageId, const QString& text,
+                                            const QString& filePath, qint64 date) {
+    if (messageId == 0) {
+        return false;
+    }
+    QVector<StoredMessage>& stored = conversationMessages_[chatId];
+    QString echoFileName = filePath.isEmpty() ? QString() : QFileInfo(filePath).fileName();
+    for (StoredMessage& candidate : stored) {
+        if (candidate.kind != MessageKind::Outgoing || candidate.messageId != 0 || candidate.isSecret) {
+            continue;
+        }
+        QString candidateFileName =
+            candidate.filePath.isEmpty() ? QString() : QFileInfo(candidate.filePath).fileName();
+        bool sameText = !text.isEmpty() && candidate.text == text;
+        bool sameFile = !candidateFileName.isEmpty() &&
+                         (candidateFileName == echoFileName || candidateFileName == text);
+        if (!sameText && !sameFile) {
+            continue;
+        }
+        candidate.messageId = messageId;
+        if (date != 0) {
+            // The server's time, not the moment this device happened to
+            // call send - the difference is what a reloaded history would
+            // show later, and the two must not disagree.
+            candidate.date = date;
+        }
+        seenMessageIds_[chatId].insert(messageId);
+        if (chatId == currentChatId_) {
+            // The drawn item carries the id too (it is what a right-click or
+            // a swipe reads to reply to this message), and a message already
+            // on screen quoting this one can only resolve its header once
+            // the id is known - both come out of a rebuild, coalesced
+            // because a burst of sends produces a burst of echoes.
+            scheduleConversationRender();
+        }
+        return true;
+    }
+    return false;
+}
+
 void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageId, const QString& text,
                                              const QString& senderName, const QString& filePath, bool isOutgoing,
                                              qlonglong date, qlonglong mediaAlbumId, qlonglong replyToMessageId,
@@ -5707,17 +5794,31 @@ void MainWindow::appendPlainMessageReceived(qlonglong chatId, qlonglong messageI
     }
     // TDLib's own echo of a message THIS device just sent. onSendClicked()/
     // sendFilePath() already appended an optimistic MessageKind::Outgoing
-    // copy the moment the user hit send (messageId 0, no dedup entry - see
-    // seenMessageIds_ below), so drawing this echo too would show every
-    // plain outgoing send twice. Real per-message dedup (matching the
-    // optimistic copy up with this real-id echo and just backfilling the
-    // id/date onto it) is a bigger change than this pass makes - dropping
-    // the echo entirely is the smaller, correct-for-now fix: this device's
-    // own sends are already visible, and nothing else currently reads a
-    // plain message's isOutgoing/mediaAlbumId off the live path, only off
-    // history (see maybeLoadPlainHistory/groupAlbums), which already
-    // includes outgoing messages correctly.
+    // copy the moment the user hit send (messageId 0), so drawing this echo
+    // too would show every plain outgoing send twice.
+    //
+    // The echo used to be dropped outright, which cost more than it looked
+    // like: it is the ONLY place the real TDLib id of our own message ever
+    // arrives, so without it that message stayed id 0 for the rest of the
+    // session, and everything keyed by message id quietly did nothing for
+    // it. Replying to it sent no reply link at all (TDLib reads reply-to
+    // id 0 as "not a reply", so the other side just saw a plain message);
+    // an incoming reply TO it had nothing to resolve its quote against, so
+    // it rendered with no header; and the read marker
+    // (updateOutgoingReadUpTo, which compares ids) could never reach it, so
+    // it kept a single tick no matter what the other side did. All three
+    // were reported together, and all three are the same missing id.
     if (isOutgoing) {
+        backfillOutgoingMessageId(chatId, messageId, text, filePath, date);
+        // Either way the echo itself is not drawn. An unmatched one is not
+        // necessarily a message sent from another device (which would be
+        // worth showing): in a chat with an active encrypted session every
+        // send also goes out as an ordinary Telegram message carrying
+        // CryptoLayer's ciphertext, and so does the presence probe - both
+        // come back here as outgoing echoes with nothing to match, and
+        // drawing them would put raw ciphertext on screen as if it were a
+        // message. Telling those apart from a genuine other-device send
+        // needs more than this function knows.
         return;
     }
     if (messageId != 0) {

@@ -471,6 +471,14 @@ private:
     // one-message path; the bulk rebuild indexes the conversation instead.
     void quoteForReply(qlonglong chatId, qlonglong replyToMessageId, QString* author, QString* text) const;
 
+    // TDLib's echo of one of our own sends, matched against the optimistic
+    // copy appendMessage() already drew, so that copy gets the real message
+    // id instead of staying at 0 for the rest of the session. Returns false
+    // if nothing matches (a send from another device) - see the call site in
+    // appendPlainMessageReceived() for why the id matters at all.
+    bool backfillOutgoingMessageId(qlonglong chatId, qlonglong messageId, const QString& text,
+                                    const QString& filePath, qint64 date);
+
     // Appends to conversationMessages_[chatId] always; only actually drawn
     // into the visible messages_ list if chatId is the one currently
     // selected in the sidebar AND (!isSecret || secret mode is currently
