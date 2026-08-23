@@ -25,6 +25,7 @@
 // style_zkgram_icons.h (which only pulls in ui/style/style_core.h, enough
 // for the st:: symbols it declares itself, not the rest of the palette).
 #include "styles/palette.h"
+#include "styles/style_basic.h"
 // st::msgWaveformBar/Skip/Min/Max (paintVoiceWaveform(), ported from real
 // Telegram Desktop's HistoryView::PaintWaveform) - declared in
 // ui/chat/chat.style, already part of the qt build's generate_styles() list
@@ -84,6 +85,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -122,6 +124,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSplitter>
+#include <QSplitterHandle>
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStyle>
@@ -178,13 +181,91 @@ void lockButtonSize(QWidget* button) {
     button->setFixedSize(button->size());
 }
 
-QString loadStylesheet() {
-    QFile file(":/style.qss");
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return QString();
-    }
-    return QTextStream(&file).readAll();
+// A plain QLabel wearing a real Ui::FlatLabel style's values. All three
+// labels this is used for (companionLabel_/plainSendWarning_/recordTime_)
+// were real Ui::FlatLabel once and were reverted - one crashed inside
+// Ui::Text::BlockParser on real chat titles, one went invisible, see
+// TODO.md - so they stay QLabel, but their look no longer lives in a
+// stylesheet: the font and the text color are read from the very same
+// st::zkgram* FlatLabel declarations the FlatLabel version used, so
+// reverting the widget type did not also revert to hand-picked hex.
+void applyLabelStyle(QLabel* label, const style::FlatLabel& labelStyle) {
+    label->setFont(labelStyle.style.font);
+    QPalette palette = label->palette();
+    palette.setColor(QPalette::WindowText, labelStyle.textFg->c);
+    label->setPalette(palette);
 }
+
+// Flat panel background, painted from the palette. Replaces the last
+// container rules style.qss carried (#central/#sidebar/#header/#composeBar/
+// #recordBar/#writeRestrictionBar and the divider) - see TODO.md, the
+// lib_ui list's point 6, which held the file open until exactly these moved
+// into code. Real Telegram Desktop paints its own panels this way: a
+// palette fill in the widget's own paint handler plus an st::lineWidth
+// separator in st::shadowFg where two panels meet (Ui::Shadow, and
+// HistoryView::TopBarWidget's own bottom line) - not a stylesheet, which
+// needs WA_StyledBackground on every container and silently stops applying
+// to any widget that paints itself, which is now most of this window.
+enum class PanelEdge { None, Bottom, Right };
+
+Ui::RpWidget* createPanel(QWidget* parent, const style::color& bg, PanelEdge edge = PanelEdge::None) {
+    auto* panel = new Ui::RpWidget(parent);
+    panel->paintRequest(
+    ) | rpl::on_next(
+        [panel, &bg, edge] {
+            QPainter painter(panel);
+            painter.fillRect(panel->rect(), bg);
+            if (edge == PanelEdge::Bottom) {
+                painter.fillRect(0, panel->height() - st::lineWidth, panel->width(), st::lineWidth, st::shadowFg);
+            } else if (edge == PanelEdge::Right) {
+                painter.fillRect(panel->width() - st::lineWidth, 0, st::lineWidth, panel->height(), st::shadowFg);
+            }
+        },
+        panel->lifetime());
+    return panel;
+}
+
+// The sidebar/conversation divider. QSplitter's stock handle is drawn by
+// QStyle as a wide OS-themed groove; style.qss used to override it with a
+// 1px line plus a hover tint, and this keeps exactly that, from the palette
+// instead. QSplitterHandle is a plain QWidget (QSplitter::createHandle has
+// to return one), so this is the one place here still overriding
+// paintEvent/enterEvent directly rather than going through Ui::RpWidget.
+class DividerHandle final : public QSplitterHandle {
+public:
+    DividerHandle(Qt::Orientation orientation, QSplitter* parent) : QSplitterHandle(orientation, parent) {}
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), hovered_ ? st::windowSubTextFg : st::shadowFg);
+    }
+    void enterEvent(QEnterEvent* event) override {
+        hovered_ = true;
+        update();
+        QSplitterHandle::enterEvent(event);
+    }
+    void leaveEvent(QEvent* event) override {
+        hovered_ = false;
+        update();
+        QSplitterHandle::leaveEvent(event);
+    }
+
+private:
+    bool hovered_ = false;
+};
+
+class MainSplitter final : public QSplitter {
+public:
+    MainSplitter(Qt::Orientation orientation, QWidget* parent) : QSplitter(orientation, parent) {
+        setHandleWidth(st::lineWidth);
+    }
+
+protected:
+    QSplitterHandle* createHandle() override {
+        return new DividerHandle(orientation(), this);
+    }
+};
 
 // Every button/menu glyph the window draws now comes from icons.cpp (one
 // shared 24x24 grid, one stroke weight, re-rendered as vectors at whatever
@@ -780,8 +861,8 @@ protected:
 
 // One clickable row in mainMenuPanel_ ("My Profile", "Wallet", "New Group",
 // ...) - hand-painted rather than a QPushButton: this codebase avoids
-// setStyleSheet for anything beyond the handful of stock input widgets
-// still on style.qss (see UI.md section 8), and a flat QPushButton with a
+// setStyleSheet entirely (style.qss is gone - every widget here paints
+// itself from the palette now, see createPanel), and a flat QPushButton with a
 // left-aligned icon+label needs exactly that to look right. Mirrors
 // RippleButton-era widgets elsewhere in spirit (hover highlight, a
 // std::function click callback) without the ripple animation itself -
@@ -1687,8 +1768,25 @@ protected:
         }
         int pos = docPositionAt(items_[index], event->pos());
         selectionItemIndex_ = index;
-        selectionStart_ = pos;
-        selectionEnd_ = pos;
+        // Triple click - a press landing inside the double-click interval
+        // and within startDragDistance() of the double click before it,
+        // which is exactly how real Telegram detects it (Qt has no triple
+        // click event of its own): see _trippleClickPoint/
+        // _trippleClickStartTime and validateTrippleClickStartTime() in
+        // ListWidget::mouseActionStart. The timer is restarted rather than
+        // cleared so a fourth click keeps the paragraph instead of dropping
+        // back to characters mid-gesture, same as there.
+        bool tripleClick = tripleClickTimer_.isValid() &&
+                            tripleClickTimer_.elapsed() < QApplication::doubleClickInterval() &&
+                            (event->pos() - tripleClickPoint_).manhattanLength() < QApplication::startDragDistance();
+        selectType_ = tripleClick ? SelectType::Paragraphs : SelectType::Chars;
+        selectionAnchor_ = pos;
+        if (tripleClick) {
+            tripleClickTimer_.restart();
+        } else {
+            tripleClickTimer_.invalidate();
+        }
+        applySelectionRange(pos);
         selecting_ = true;
         update();
     }
@@ -1737,7 +1835,7 @@ protected:
             Ui::RpWidget::mouseMoveEvent(event);
             return;
         }
-        selectionEnd_ = docPositionAt(items_[selectionItemIndex_], event->pos());
+        applySelectionRange(docPositionAt(items_[selectionItemIndex_], event->pos()));
         update();
     }
 
@@ -1882,16 +1980,20 @@ protected:
             Ui::RpWidget::mouseDoubleClickEvent(event);
             return;
         }
-        QTextCursor cursor(items_[index].doc.get());
-        cursor.setPosition(docPositionAt(items_[index], event->pos()));
-        cursor.select(QTextCursor::WordUnderCursor);
         selectionItemIndex_ = index;
-        // Clamped the same as docPositionAt() - WordUnderCursor should
-        // not normally cross into the timestamp span (it starts with a
-        // non-breaking space, not a word character), but this makes that
-        // guaranteed rather than incidental.
-        selectionStart_ = qMin(cursor.selectionStart(), items_[index].textLength);
-        selectionEnd_ = qMin(cursor.selectionEnd(), items_[index].textLength);
+        // Word granularity, and it stays on for the rest of the press:
+        // dragging out of a double click extends the selection whole word
+        // at a time, not character by character - real Telegram's
+        // TextSelectType::Words, set by ListWidget::switchToWordSelection()
+        // and then reused by every mouseActionUpdate() until the button
+        // goes up. selecting_ stays true here for exactly that reason.
+        selectType_ = SelectType::Words;
+        selectionAnchor_ = docPositionAt(items_[index], event->pos());
+        applySelectionRange(selectionAnchor_);
+        selecting_ = true;
+        // Opens the triple-click window - see mousePressEvent().
+        tripleClickPoint_ = event->pos();
+        tripleClickTimer_.start();
         update();
     }
 
@@ -2095,6 +2197,21 @@ private:
     int selectionStart_ = -1;
     int selectionEnd_ = -1;
     bool selecting_ = false;
+    // The three selection granularities real Telegram has
+    // (Ui::Text::TextSelectType): a plain drag moves character by
+    // character, a drag out of a double click moves whole words, a triple
+    // click takes the whole message.
+    enum class SelectType { Chars, Words, Paragraphs };
+    SelectType selectType_ = SelectType::Chars;
+    // The end of the selection the drag is not moving. Needed on top of
+    // selectionStart_ because in word mode BOTH ends are recomputed on
+    // every move (each has to sit on its own word boundary), so neither of
+    // them is the raw point the gesture started from any more.
+    int selectionAnchor_ = -1;
+    // Double-click position and age, for the triple-click test in
+    // mousePressEvent(). An invalid timer means "no double click recently".
+    QPoint tripleClickPoint_;
+    QElapsedTimer tripleClickTimer_;
 
     // ---- swipe-to-reply -------------------------------------------------
     // Distances in logical pixels, scaled like every other size in this
@@ -2190,10 +2307,46 @@ public:
     void exitSelectionMode() { setMultiSelectMode(false); }
 
 private:
+    // Grows the anchor..pos pair out to whole words, or to the whole
+    // message, depending on the granularity the gesture set. Real Telegram
+    // does the same in Ui::Text::String::adjustSelection(), called through
+    // Element::selectionFromStates() on every mouse move while a selection
+    // is in progress - not only once when it starts, which is what makes a
+    // word-mode drag snap outward as it passes each word boundary.
+    void applySelectionRange(int pos) {
+        if (selectionItemIndex_ < 0 || selectionItemIndex_ >= items_.size()) {
+            return;
+        }
+        const HistoryItem& item = items_[selectionItemIndex_];
+        if (selectType_ == SelectType::Paragraphs || !item.doc) {
+            selectionStart_ = 0;
+            selectionEnd_ = item.textLength;
+            return;
+        }
+        int from = qMin(selectionAnchor_, pos);
+        int to = qMax(selectionAnchor_, pos);
+        if (selectType_ == SelectType::Words) {
+            QTextCursor cursor(item.doc.get());
+            cursor.setPosition(from);
+            cursor.movePosition(QTextCursor::StartOfWord);
+            from = cursor.position();
+            cursor.setPosition(to);
+            cursor.movePosition(QTextCursor::EndOfWord);
+            to = cursor.position();
+        }
+        // Clamped the same way docPositionAt() clamps - a word at the end
+        // of the text must not grow into the timestamp/tick span appended
+        // after it (see textLength's own comment).
+        selectionStart_ = qMin(from, item.textLength);
+        selectionEnd_ = qMin(to, item.textLength);
+    }
+
     void clearSelection() {
         if (selectionItemIndex_ >= 0) {
             selectionItemIndex_ = -1;
             selectionStart_ = selectionEnd_ = -1;
+            selectionAnchor_ = -1;
+            selectType_ = SelectType::Chars;
             update();
         }
     }
@@ -3047,6 +3200,10 @@ protected:
         // visible sub-rect (event->rect()) - exactly what used to require
         // manually reading verticalScrollBar()->value() for.
         QRect visible = event->rect();
+        // Was style.qss's "#chatListWidget { background-color: #ffffff; }":
+        // the rows below paint themselves but not the gaps between them, so
+        // without this the scrolled content shows through.
+        painter.fillRect(visible, st::dialogsBg);
         for (int i = 0; i < rows_.size(); ++i) {
             int top = i * sidebarRowHeight();
             if (top + sidebarRowHeight() < visible.top() || top > visible.bottom()) {
@@ -3191,7 +3348,7 @@ SidebarCanvas* asSidebar(QWidget* widget) {
 // App icon (resources/app.ico, same file CMakeLists.txt separately embeds
 // as the window/taskbar icon via app.rc) scaled up for the auth slide logo
 // - avoids drawing/tracing any Telegram trademark artwork ourselves.
-// Loaded from the Qt resource system (see resources.qrc / loadStylesheet),
+// Loaded from the Qt resource system (see resources.qrc),
 // not a working-directory-relative path.
 QPixmap loadAuthLogo(int size) {
     QPixmap icon(":/app.ico");
@@ -3493,7 +3650,11 @@ void AuthSlide::onNextClicked() {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("zkgram");
 
-    auto* central = new QWidget(this);
+    // st::windowBgOver, not the old literal #e6ebee: the only part of this
+    // widget the user can ever see is the 1px divider gap between the two
+    // panes covering it, so it takes the palette's own "surface behind the
+    // panels" role rather than keeping a hand-picked hex alive for it.
+    auto* central = createPanel(this, st::windowBgOver);
     central->setObjectName("central");
     chatPage_ = central;
     auto* rootLayout = new QHBoxLayout(central);
@@ -3503,13 +3664,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Sidebar/conversation split is user-resizable by dragging the divider,
     // same as tdesktop's own dialogs list - a fixed width did not match
     // real Telegram Desktop's behavior.
-    auto* splitter = new QSplitter(Qt::Horizontal, central);
+    auto* splitter = new MainSplitter(Qt::Horizontal, central);
     splitter->setObjectName("mainSplitter");
     splitter->setChildrenCollapsible(false);
     rootLayout->addWidget(splitter);
 
     // ---- sidebar: chat list + "start a new conversation" ----
-    auto* sidebar = new QWidget(splitter);
+    auto* sidebar = createPanel(splitter, st::dialogsBg, PanelEdge::Right);
     sidebar->setObjectName("sidebar");
     // Real window/window.style: columnMinimalWidthLeft: 260px.
     sidebar->setMinimumWidth(style::ConvertScale(260));
@@ -3603,7 +3764,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    headerRow_ = new QWidget(conversationColumn);
+    headerRow_ = createPanel(conversationColumn, st::windowBg, PanelEdge::Bottom);
     headerRow_->setObjectName("header");
     auto* headerLayout = new QHBoxLayout(headerRow_);
     headerLayout->setContentsMargins(style::ConvertScale(12), style::ConvertScale(6), style::ConvertScale(12),
@@ -3628,6 +3789,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // acceptable to leave in place while still investigating. See TODO.md.
     companionLabel_ = new QLabel("zkgram", headerRow_);
     companionLabel_->setObjectName("companionLabel");
+    // Still a QLabel (the Ui::FlatLabel attempt crashed on real chat titles,
+    // see TODO.md), but no longer styled by a stylesheet rule: font and
+    // color come from the same st::zkgramCompanionLabel declaration the
+    // FlatLabel used, so both roads lead to the same palette values.
+    applyLabelStyle(companionLabel_, st::zkgramCompanionLabel);
     // Per-chat secret-mode toggle - see secretModeOn_'s own comment in
     // the header for what this actually gates. Hidden by default
     // (updateSecretModeIndicator() shows it only once the current chat
@@ -3982,7 +4148,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // old two separate stacked bars (a big button row, then a whole
     // separate full-width colored warning strip) with large empty gaps
     // between them and the composer below.
-    writeRestrictionBar_ = new QWidget(conversationColumn);
+    writeRestrictionBar_ = createPanel(conversationColumn, st::historyComposeAreaBg);
     QWidget* startEncryptionRow = writeRestrictionBar_;
     startEncryptionRow->setObjectName("writeRestrictionBar");
     startEncryptionRow->setFixedHeight(style::ConvertScale(46));
@@ -3994,6 +4160,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // disappeared after the FlatLabel conversion). Same root cause not
     // found yet, same precaution - reverted rather than guessed at again.
     plainSendWarning_ = new QLabel("Not encrypted - sent as plain Telegram text", startEncryptionRow);
+    applyLabelStyle(plainSendWarning_, st::zkgramPlainSendWarning);
     plainSendWarning_->setObjectName("plainSendWarning");
     startEncryptionRowLayout->addWidget(plainSendWarning_);
     startEncryptionRowLayout->addStretch();
@@ -4051,7 +4218,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // ComposeControls::updateControlsGeometry()/updateHeight() in
     // telegram_fork/tdesktop's history_view_compose_controls.cpp for
     // where every one of these numbers comes from.
-    auto* inputRow = new QWidget(conversationColumn);
+    auto* inputRow = createPanel(conversationColumn, st::historyComposeAreaBg);
     composeRow_ = inputRow;
     inputRow->setObjectName("composeBar");
     inputRow->setFixedHeight(style::ConvertScale(54));
@@ -4087,7 +4254,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // VoiceRecordBar в ComposeControls у Telegram Desktop. Слева корзина
     // (отменить и выбросить), затем мигающая красная точка и таймер,
     // справа пауза и отправка.
-    recordBar_ = new QWidget(conversationColumn);
+    recordBar_ = createPanel(conversationColumn, st::historyComposeAreaBg);
     recordBar_->setObjectName("recordBar");
     recordBar_->setFixedHeight(style::ConvertScale(54));
     recordBar_->hide();
@@ -4112,6 +4279,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // this one as equally unproven rather than waiting for a third bug
     // report to roll it back too.
     recordTime_ = new QLabel("0:00,00", recordBar_);
+    applyLabelStyle(recordTime_, st::zkgramRecordTime);
     recordTime_->setObjectName("recordTime");
 
     pauseRecordButton_ = new Ui::IconButton(recordBar_, st::zkgramPauseRecordButton);
@@ -4193,10 +4361,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // every single startup (see TODO.md, crash in
     // MainWindow::setConnectionStatus called from MainWindow::MainWindow).
     setConnectionStatus("Not connected", "#bcc0c4");
-
-    // Colors/spacing live in src/ui/qt/style.qss, not here - edit that file
-    // to restyle the window, no rebuild needed.
-    setStyleSheet(loadStylesheet());
 
     sendButton_->setClickedCallback([this] { onSendOrMicClicked(); });
     sendFileButton_->setClickedCallback([this] { onSendFileClicked(); });
